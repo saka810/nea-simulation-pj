@@ -23,7 +23,12 @@ sound_ray = np.zeros(3)
 soundray_comesfrom = np.zeros(3)
 reciever_point = np.zeros(3)
 node = np.zeros(3)
+
+
 # collision = False
+
+mesh_nearestid=0 #最も手前の交点を持つ面のインデックス
+temp_distance=1000000000.0 #とりあえず大きい数字
 
 
 # 非重複経路ループ
@@ -49,16 +54,41 @@ def loop():
 
         for k in range(nref, 0, -1):
             for j in range(mesh_count):
-                collision=False
+                collision = False
                 t = mm.parameter_t(sound_ray, soundray_comesfrom, mesh[j].normal, mesh[j].vertexes)
 
                 if t > 0:
                     node = mm.node_renew(sound_ray, soundray_comesfrom, t)
-                    collision = mm.collision_detection(node, mesh[mesh_id].vertexes)
+                    collision, distance = mm.collision_distance(sound_ray, soundray_comesfrom, mesh[mesh_id].normal,
+                                                                mesh[mesh_id].vertexes)
+
+                    if distance<temp_distance:
+                        temp_distance=distance
+                        mesh_nearestid=mesh_id
 
                 if collision:
                     t = mm.parameter_t(sound_ray, soundray_comesfrom, mesh[mesh_id].normal, mesh[mesh_id].vertexes)
                     node = mm.node_renew(sound_ray, soundray_comesfrom, t)
-                    # ↑交点座標の更新まで記入　次は元コード1066から
+                    # ここから元コード1086に移動
+
+                    if mesh_nearestid==mesh_id:
+                        # 　エネルギーを減衰させる式がここに入る 今は書いてない
+                        soundray_comesfrom=sr.soundraycomesfrom_renew(node)
+                        sound_ray=sr.soundray_renew(imaginary_sourcepoint[k-1],soundray_comesfrom)
+                        sound_ray=sr.noramlized_soundray(sound_ray)
+
+        # k==0となる部分　元コード1066はfor kの外に出す
+        if distance > np.linalg.norm(soundsource_point - soundray_comesfrom, ord=2):
+            # 受音リストの書き込み　csvファイルとかに1行ずつ書く　以下はダミー
+            print("受音リストに書き込み")
+            # 元コードは<でif にしてループを抜けていたが外に出すなら＞の条件だけで十分？
+
+
+
+
+
+
+
+
 
     return

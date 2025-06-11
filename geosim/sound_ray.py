@@ -1,8 +1,9 @@
 import numpy as np
 
+#虚音源になったときのエネルギーを減衰させるメソッドをここに追加予定
 
 # 音源から出る音線を作成します
-def soundray_maker(ray_number):
+def soundray_generator(ray_number):
     sound_rays = np.array([np.zeros(3), 3])
     dt = np.pi * (3.0 - np.sqrt(5.0))
     dz = 2.0 / ray_number
@@ -26,11 +27,11 @@ def noramlized_soundray(sound_ray):
 
 
 # 反射音線ベクトルの作成と正規化 (バックトレースではこれはつかわない)
-def reflection_maker(sound_ray, nomal):
+def reflection_generator(sound_ray, normal):
     reflection = np.array(np.zeros(3))
 
-    t = np.dot(sound_ray, nomal)
-    reflection = sound_ray - 2.0 * t * nomal
+    t = np.dot(sound_ray, normal)
+    reflection = sound_ray - 2.0 * t * normal
 
     reflection = noramlized_soundray(reflection)
 
