@@ -1,6 +1,5 @@
 import numpy as np
 
-#虚音源になったときのエネルギーを減衰させるメソッドをここに追加予定
 
 # 音源から出る音線を作成します
 def soundray_generator(ray_number):
@@ -47,3 +46,17 @@ def soundraycomesfrom_renew(node):
 def soundray_renew(imaginarysound_point, soundray_comesfrom):
     new_soundray = np.array(np.zeros(3))
     new_soundray = imaginarysound_point - soundray_comesfrom
+    return new_soundray
+
+
+# 虚音源になったときのエネルギーを減衰させるメソッドをここに追加予定
+# 元コード1091
+# 想定されている吸音率は垂直入射？ＮＥＡは残響室吸音率が多い？
+def energy_decay(sound_ray, normal, absorption):
+    coefficient = np.linalg.norm(sound_ray * normal, ord=2)
+    energy = 1 + np.sqrt(1 - absorption) * coefficient - (1 + np.sqrt(1 - absorption))
+    energy = energy / (1 + np.sqrt(1 - absorption) * coefficient + (1 + np.sqrt(1 - absorption)))
+    energy = abs(energy)
+    energy = energy * energy * energy
+    # 元コードが2条の後自身を掛ける形になっているが3条？
+    return energy
