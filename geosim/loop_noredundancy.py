@@ -1,5 +1,4 @@
 import numpy as np
-
 from geosim.sound_ray import energy_decay
 from mesh import Mesh
 import sound_ray as sr

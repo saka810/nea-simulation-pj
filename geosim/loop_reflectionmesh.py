@@ -23,49 +23,54 @@ for i in range(mesh_count):
     mesh.append(Mesh(np.zeros(3), np.zeros(3), np.zeros(3), np.zeros(3), "name", 0.1))
 
 
+
 # 目的：音線を追跡した際、反射する面のインデックスを記録する
 # 元コード524
 def loop():
     reflectionmesh_idlist = []
-    reflectionmesh_idlist.append(-1)  # 0番目は-1を入れてる
+    reflectionmesh_idlist.append(-1)  # 0番目は-1を入れてる 後で追加するときにインデックスをずらす必要があるみたい
 
     for soundray_i in range(len(soundray_list)):
-        sound_ray = soundray_list[soundray_i, :]
-        sound_ray = sr.noramlized_soundray(sound_ray)
-        soundray_comesfrom = soundsource_point
 
-        min_distance = 1000000000.0  # とりあえず大きい数字
+        for k in range(nref):
+            sound_ray = soundray_list[soundray_i, :]
+            sound_ray = sr.noramlized_soundray(sound_ray)
+            soundray_comesfrom = soundsource_point
 
-        for j in range(mesh_count):
-            collision = False
+            min_distance = 1000000000.0  # とりあえず大きい数字
 
-            if np.dot(sound_ray, mesh[j].normal) < 0:
-                t = mm.parameter_t(sound_ray, soundray_comesfrom, mesh[j].normal, mesh[j].vertexes)
+            for j in range(mesh_count):
+                collision = False
 
-                if t > 0:
-                    node = mm.node_renew(sound_ray, soundray_comesfrom, t)
-                    collision, distance = mm.collision_distance(sound_ray, soundray_comesfrom, mesh[j].normal,
+                if np.dot(sound_ray, mesh[j].normal) < 0:
+                    t = mm.parameter_t(sound_ray, soundray_comesfrom, mesh[j].normal, mesh[j].vertexes)
+
+                    if t > 0:
+                        node = mm.node_renew(sound_ray, soundray_comesfrom, t)
+                        collision, distance = mm.collision_distance(sound_ray, soundray_comesfrom, mesh[j].normal,
                                                                 mesh[j].vertexes)
-                    if distance < min_distance:
-                        min_distance = distance
-                        mesh_nearestid = j
 
-        # ここから元コード649  音線基点・受音点間ベクトル 受音球に入っているかの判定
-        inside = rs.inside_sphere(sphere_radius, sound_ray, soundray_comesfrom, reciever_point, min_distance)
+                        if distance < min_distance:
+                            min_distance = distance
+                            mesh_nearestid = j
 
-        # if inside:
-        # 元コードのこれはtractmp(0か-1)で塗りつぶし？ 反射履歴に書き込み
-        # count = count + 1
-        # do j = 0, nref
-        #     traceff(count, j) = tractmp(j)
-        # end  do
+                # ここから元コード649  音線基点・受音点間ベクトル 受音球に入っているかの判定
+                inside = rs.inside_sphere(sphere_radius, sound_ray, soundray_comesfrom, reciever_point, min_distance)
 
-        if inside and collision:
-            reflectionmesh_idlist.append(mesh_nearestid)
-            t = mm.parameter_t(sound_ray, soundray_comesfrom, mesh[mesh_nearestid].normal,
+            # if inside:
+            # 元コードのこれはtractmp(0か-1)で塗りつぶし？なぜ？ 反射履歴に書き込み if inside and collisionの後＊の位置ではないのか
+            # count = count + 1
+            # do j = 0, nref
+            #     traceff(count, j) = tractmp(j)
+            # end  do
+
+            if inside and collision:
+                reflectionmesh_idlist.append(k)
+                #ここ＊
+                t = mm.parameter_t(sound_ray, soundray_comesfrom, mesh[mesh_nearestid].normal,
                                mesh[mesh_nearestid].vertexes)
-            node = mm.node_renew(sound_ray, soundray_comesfrom, t)
-            soundray_comesfrom = sr.soundraycomesfrom_renew(node)
-            sound_ray = sr.reflection_generator(sound_ray, mesh[mesh_nearestid].normal)
+                node = mm.node_renew(sound_ray, soundray_comesfrom, t)
+                soundray_comesfrom = sr.soundraycomesfrom_renew(node)
+                sound_ray = sr.reflection_generator(sound_ray, mesh[mesh_nearestid].normal)
 
     return
