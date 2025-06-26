@@ -1,6 +1,5 @@
 import numpy as np
 
-
 # 音源から出る音線を作成します
 def soundray_generator(ray_number):
     sound_rays = np.array([np.zeros(3), 3])
@@ -17,23 +16,18 @@ def soundray_generator(ray_number):
 
 # 音線の正規化
 def noramlized_soundray(sound_ray):
-    normalized_ray = np.array(np.zeros(3))
-
+    # normalized_ray = np.array(np.zeros(3))
     distance = np.linalg.norm(sound_ray, ord=2)
     normalized_ray = sound_ray / distance
-
     return normalized_ray
 
 
 # 反射音線ベクトルの作成と正規化 (バックトレースではこれはつかわない)
 def reflection_generator(sound_ray, normal):
-    reflection = np.array(np.zeros(3))
-
+    # reflection = np.array(np.zeros(3))
     t = np.dot(sound_ray, normal)
     reflection = sound_ray - 2.0 * t * normal
-
     reflection = noramlized_soundray(reflection)
-
     return reflection
 
 

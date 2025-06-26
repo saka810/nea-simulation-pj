@@ -1,7 +1,6 @@
 import numpy as np
 from numpy.random import normal
 
-
 # 注意として　音線ベクトルsound_rayは必ずしも音源から出ていない。
 # 壁面から反射した音についてsound_rayとしている場合がある（むしろ圧倒的にそっちが多い）
 # sound_ray: vrayに相当
