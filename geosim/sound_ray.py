@@ -1,5 +1,7 @@
 import numpy as np
 
+# 音源、虚音源に関するものをこちらに集めています
+
 # 音源から出る音線を作成します
 def soundray_generator(ray_number):
     sound_rays = np.array([np.zeros(3), 3])

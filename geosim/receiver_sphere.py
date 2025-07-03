@@ -1,5 +1,6 @@
 import numpy as np
 
+# 受音点に関わるものをこちらに記述します
 
 # 受音球の中を音線が通過したかを判定する
 def inside_sphere(sphere_radius, sound_ray, soundray_comesfrom, receiver_point, min_distance):

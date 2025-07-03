@@ -1,23 +1,18 @@
 import numpy as np
 import sound_ray as sr
 import mesh_method as mm
-from geosim.sound_ray import reflection_generator
 from mesh import Mesh
 import receiver_sphere as rs
 
-
 # 受音球の半径
 # sphere_radius = 0.1
-
 # 音線数
 # soundray_number = 100000
 # 反射回数
 # nref = 10000
-
 # soundray_list = np.zeros((soundray_number, 3))
 # soundsource_point = np.zeros(3)
 # reciever_point = np.zeros(3)
-
 # mesh_count = 1000  # メッシュの個数（ダミー）
 # mesh = []  # メッシュの個数分Meshオブジェクトを準備
 # for i in range(mesh_count):
@@ -25,6 +20,11 @@ import receiver_sphere as rs
 
 
 # 目的：音線を追跡した際、反射する面のインデックスを記録する
+# 音源位置、受音点、音源から出る音線全て持つ配列、反射回数、室形状のメッシュ全ての情報、受音球の半径
+# を用いて、
+# 面に反射する音線を追跡し、反射した面のインデックス（番号）を
+# 反射履歴　reflectionmeshid_history として記録する
+# このreflectionmeshid_historyを出力として返す
 # 元コード524
 def loop(soundsource_point, reciever_point, soundray_list, nref, mesh, sphere_radius):
     reflectionmeshid_history = []
@@ -37,7 +37,8 @@ def loop(soundsource_point, reciever_point, soundray_list, nref, mesh, sphere_ra
             sound_ray = sr.noramlized_soundray(sound_ray)
             soundray_comesfrom = soundsource_point
 
-            min_distance = 1000000000.0  # とりあえず大きい数字
+            # min_distance = 1000000000.0  # とりあえず大きい数字
+            min_distance = np.inf  # とりあえず大きい数字
 
             # for j in range(mesh_count):
             for j in range(len(mesh)):
