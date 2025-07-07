@@ -3,6 +3,12 @@ import sound_ray as sr
 import mesh_method as mm
 from mesh import Mesh
 
+
+# 7/9打ち合わせ用
+
+
+
+
 # 元コード721 重複経路の削除に該当
 # 何をしているか分からないでいます
 # 想像として、反射履歴の配列を重複のない配列にできれば問題ないように見えるが

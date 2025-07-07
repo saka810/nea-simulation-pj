@@ -5,6 +5,12 @@ import sound_ray as sr
 import loop_reflectionmesh as lr
 import loop_deleteredundancy as ld
 import loop_noredundancy as ln
+import impulse as ir
+
+
+
+# 7/9打ち合わせ用
+
 
 ###
 ###全体の流れをここに記述
@@ -43,6 +49,8 @@ def process(soundsource_point, reciever_point, dxf_filename, sphere_radius, nref
     # ln.loop(soundsource_point,reciever_point,absorption_list,reflection_history,mesh)
 
     # この後おそらく離散的なパルス列をより自然なインパルス応答に変換しているものと推測
-    # wavファイル保存だと応用しやすい
+    # ir.impulse_responce(filename, sound_velocity, reflection_timing, soundsourceenergy_list,
+    #                     frequency_number, count,
+    #                     nn, mf, fmax, dt)
 
     # インパルス応答に変換した後の残響時間を算出するプログラムは他ソフトでもよい？

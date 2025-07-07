@@ -3,6 +3,13 @@ from mesh import Mesh
 import sound_ray as sr
 import mesh_method as mm
 
+
+
+# 7/9打ち合わせ用
+
+
+
+
 # nref = 1000  # 反射回数（ダミー）
 # count_noredanduncy = 1000  # 非重複経路の個数（ダミー）
 #

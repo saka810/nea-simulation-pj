@@ -4,6 +4,13 @@ import mesh_method as mm
 from mesh import Mesh
 import receiver_sphere as rs
 
+
+
+# 7/9打ち合わせ用
+
+
+
+
 # 受音球の半径
 # sphere_radius = 0.1
 # 音線数

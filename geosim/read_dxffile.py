@@ -1,6 +1,12 @@
 import numpy as np
 from mesh import Mesh
 
+
+# 7/9打ち合わせ用
+
+
+
+
 # 目的 meshのリストを返すこと
 # Meshオブジェクトに
 # 各三角形メッシュの頂点座標(x,y,z)を合計3点分と、法線ベクトル
