@@ -2,7 +2,7 @@ import numpy as np
 import csv
 
 
-# 9月打ち合わせ用
+# 9月 打ち合わせ用
 
 # インパルス応答を作成する全体の流れ
 def impulse_responce(filename,

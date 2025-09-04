@@ -5,8 +5,7 @@ from mesh import Mesh
 import receiver_sphere as rs
 
 
-
-# 7/9打ち合わせ用
+# 9月 打ち合わせ用
 
 
 
