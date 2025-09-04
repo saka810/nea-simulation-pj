@@ -4,7 +4,6 @@ import numpy as np
 # 7/9打ち合わせ用
 
 
-
 # 注意として　音線ベクトルsound_rayは必ずしも音源から出ていない。
 # 壁面から反射した音についてsound_rayとしている場合がある（むしろ圧倒的にそっちが多い）
 # sound_ray: 元コードvrayに相当
@@ -14,6 +13,7 @@ import numpy as np
 
 # 壁に音線が衝突をしたかを判断する
 # 衝突判定collisionとその時の距離distanceを返す
+# OK
 def collision_distance(sound_ray, soundray_comesfrom, normal, vertexes):
     collision = False
     distance = 0.0
@@ -56,6 +56,7 @@ def collision_distance(sound_ray, soundray_comesfrom, normal, vertexes):
 
 
 # 内積を２つ計算し音線と壁が衝突しているかを判定する
+# OK
 def collision_detection(node, vertexes):
     collision = False
     inner_product_0 = innerproduct_from3vertexes(node, vertexes[0], vertexes[1], vertexes[2])
@@ -68,6 +69,7 @@ def collision_detection(node, vertexes):
 
 
 # 外積を2つ計算し、その外積の内積を計算する
+# OK
 def innerproduct_from3vertexes(node, vertex_origin, vertex_1, vertex_2):
     # 頂点 vertex_originを基準とした面を張るベクトルとと交点までのベクトルの外積の内積を算出
     # 三角形で　頂点　origin 1 2があり　vertex_originを引き算の後ろと仮定して書いた場合
@@ -94,6 +96,7 @@ def innerproduct_from3vertexes(node, vertex_origin, vertex_1, vertex_2):
 
 # 平面の方程式ax + by + cz + d = 0のdを算出
 # 頂点一つと法線の掛け算であっている。 頂点は任意で良い。
+# OK
 def parameter_d(normal, vertex):
     # d = -np.dot(normal, vertexes[0])
     d = -np.dot(normal, vertex)
@@ -101,6 +104,7 @@ def parameter_d(normal, vertex):
 
 
 # 直線と壁面が交わるときのパラメータtを算出
+# OK
 def parameter_t(sound_ray, soundray_comesfrom, normal, vertexes):
     # 平面の方程式ax + by + cz + d = 0のdを算出
     # 頂点一つと法線の掛け算であっている。 頂点は任意で良い。
@@ -108,14 +112,13 @@ def parameter_t(sound_ray, soundray_comesfrom, normal, vertexes):
     d = parameter_d(normal, vertexes[0])
 
     # 直線と壁面が交わるときのパラメータtを算出
-    t = sound_ray[0] * soundray_comesfrom[0] \
-        + sound_ray[1] * soundray_comesfrom[1] \
-        + sound_ray[2] * soundray_comesfrom[2] * d
-    t = -t / np.dot(sound_ray, soundray_comesfrom)
+    t = np.dot(normal, soundray_comesfrom) + d
+    t = -t / np.dot(normal, sound_ray)
     return t
 
-
+# 元コード 388行目
+# OK
 def node_renew(sound_ray, soundray_comesfrom, t):
-    new_node = np.array(np.zeros(3))
+    # new_node = np.array(np.zeros(3))
     new_node = soundray_comesfrom + t * sound_ray
     return new_node

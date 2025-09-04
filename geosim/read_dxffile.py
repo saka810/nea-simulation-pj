@@ -2,7 +2,7 @@ import numpy as np
 from mesh import Mesh
 
 
-# 7/9打ち合わせ用
+# 9月打ち合わせ用
 
 
 

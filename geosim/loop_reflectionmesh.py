@@ -39,10 +39,11 @@ def loop(soundsource_point, reciever_point, soundray_list, nref, mesh, sphere_ra
 
     for soundray_i in range(len(soundray_list)):
 
+        soundray_comesfrom = soundsource_point
+
         for k in range(nref):
             sound_ray = soundray_list[soundray_i, :]
             sound_ray = sr.noramlized_soundray(sound_ray)
-            soundray_comesfrom = soundsource_point
 
             # min_distance = 1000000000.0  # とりあえず大きい数字
             min_distance = np.inf  # とりあえず大きい数字
@@ -55,16 +56,17 @@ def loop(soundsource_point, reciever_point, soundray_list, nref, mesh, sphere_ra
                     t = mm.parameter_t(sound_ray, soundray_comesfrom, mesh[j].normal, mesh[j].vertexes)
 
                     if t > 0:
-                        node = mm.node_renew(sound_ray, soundray_comesfrom, t)
+                        soundray_comesfrom = mm.node_renew(sound_ray, soundray_comesfrom, t)
                         collision, distance = mm.collision_distance(sound_ray, soundray_comesfrom, mesh[j].normal,
                                                                     mesh[j].vertexes)
 
-                        if distance < min_distance:
-                            min_distance = distance
-                            mesh_nearestid = j
+                        if collision:
+                            if distance < min_distance:
+                                min_distance = distance
+                                mesh_nearestid = j
 
-                # ここから元コード649  音線基点・受音点間ベクトル 受音球に入っているかの判定
-                inside = rs.inside_sphere(sphere_radius, sound_ray, soundray_comesfrom, reciever_point, min_distance)
+            # ここから元コード649  音線基点・受音点間ベクトル 受音球に入っているかの判定
+            inside = rs.inside_sphere(sphere_radius, sound_ray, soundray_comesfrom, reciever_point, min_distance)
 
             # if inside:
             # 元コードのこれはtractmp(0か-1)で塗りつぶし？なぜ？ 反射履歴に書き込み if inside and collisionの後＊の位置ではないのか
@@ -73,13 +75,27 @@ def loop(soundsource_point, reciever_point, soundray_list, nref, mesh, sphere_ra
             #     traceff(count, j) = tractmp(j)
             # end  do
 
-            if inside and collision:
-                reflectionmeshid_history.append(k)
+
+            # 662行目以降　再度打ち合わせ
+            # 662~671は if inside内で行うもの ????
+            if inside:
+                # 元コード↓
+                # ! 一時反射履歴に壁面番号を書き込み
+                # tractmp(k + 1) = jtmp
+                # これはtractmpはnref個の配列だが、inside判定がない場合は0が入って、
+                # 入っている場合は最も近い交点になる壁番号が入る？
+                # 0の配列は必要なのか？必要ないなら以下のコードで書く　必要ならelseで0を足す　＊＊部分
+                reflectionmeshid_history.append(mesh_nearestid)
                 # ここ＊
                 t = mm.parameter_t(sound_ray, soundray_comesfrom, mesh[mesh_nearestid].normal,
                                    mesh[mesh_nearestid].vertexes)
                 node = mm.node_renew(sound_ray, soundray_comesfrom, t)
                 soundray_comesfrom = sr.soundraycomesfrom_renew(node)
                 sound_ray = sr.reflection_generator(sound_ray, mesh[mesh_nearestid].normal)
+
+            else:
+                # ＊＊0配列が必要な場合
+                reflectionmeshid_history.append(mesh_nearestid)
+
 
     return reflectionmeshid_history
