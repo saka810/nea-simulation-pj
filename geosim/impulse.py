@@ -86,7 +86,8 @@ def airdamping_coefficient():
     mair = np.array(np.zeros(32))
     for i in range(32):
         mf = np.pow(15.625 * 2, 1 / 3 * i)
-        mair = np.pow(1.81 - 8 * mf, 1.57)
+        mair = np.pow(1.81e-8 * mf, 1.57)
+        # 1.81e-8のeが抜けてました
     return mair
 
 
@@ -104,6 +105,7 @@ def power_airdamping(sound_velocity, reflection_timing, mair, soundsourceenergy_
 # 伝達関数
 # 元コード132行目
 # count はバックトレースで保存したときの何かの配列の個数　何か分かったら書き換え
+# countは虚音源の数
 def transfer_function(reflection_timing, frequency_number, count, p, sound_velocity):
     transfer = np.array(np.zeros((32, frequency_number), dtype=np.complex128))
 
@@ -114,8 +116,9 @@ def transfer_function(reflection_timing, frequency_number, count, p, sound_veloc
                 # for が0からだと不具合
                 transfer[j, i] = (transfer[j, i]
                                   * np.sqrt(p[j, k])
-                                  * np.exp(-1j * 2.0 * np.pi * (i - 1) * reflection_timing[k])
+                                  * np.exp(-1j * 2.0 * np.pi *df * (i - 1) * reflection_timing[k])
                                   / (reflection_timing[k] * sound_velocity))
+                # df （周波数離散化幅）が抜けていました。関数内に持ってくる必要あり。（一旦dfで数式上には追加）
 
     return transfer
 
@@ -126,12 +129,14 @@ def time_responce(nn, mf, fmax):
     ht = np.array(np.zeros(31, nn))
 
     # 元コード　nint　は元も近い整数を返す関数？
+    # OK
+    # minの場合の/fmaxが抜けてました
     for i in range(ht.shape[0] - 1):
-        min = np.pow(mf(i) * 2.0, (-1.0 / 6.0))
+        min = np.pow(mf(i) * 2.0, (-1.0 / 6.0))/fmax
         max = np.pow(mf(i) * 2.0, (-1.0 / 6.0 / fmax))
         ht[i, :] = filter_bandpass(nn, min, max)
 
-    min = np.pow(mf(31) * 2.0, (-1.0 / 6.0))
+    min = np.pow(mf(31) * 2.0, (-1.0 / 6.0))/fmax
     max = fmax * 0.99 / fmax
     # 上のfmaxは0.99ではだめなのか？
     ht[31, :] = filter_bandpass(31, min, max)
