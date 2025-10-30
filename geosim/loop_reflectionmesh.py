@@ -33,15 +33,20 @@ import receiver_sphere as rs
 # このreflectionmeshid_historyを出力として返す
 # 元コード524
 def loop(soundsource_point, reciever_point, soundray_list, nref, mesh, sphere_radius):
-    reflectionmeshid_history = []
-    reflectionmeshid_history.append(-1)  # 0番目は-1を入れてる 後で追加するときにインデックスをずらす必要があるみたい
+
 
     for soundray_i in range(len(soundray_list)):
+        # reflectionmeshid_historyは今のコードだと一時反射履歴なので，ここでいちど初期化する必要あり
+        # 「loop_deleteredundancy.py」に持って行くための二次元配列[受音数，受音するまでの反射経路（受音毎に変わる）]が別途必要
+        reflectionmeshid_history = []
+        reflectionmeshid_history.append(-1)  # 0番目は-1を入れてる 後で追加するときにインデックスをずらす必要があるみたい
 
         soundray_comesfrom = soundsource_point
 
+        # 一回目のみなので，外に出しました
+        sound_ray = soundray_list[soundray_i, :]
         for k in range(nref):
-            sound_ray = soundray_list[soundray_i, :]
+
             sound_ray = sr.noramlized_soundray(sound_ray)
 
             # min_distance = 1000000000.0  # とりあえず大きい数字
@@ -74,27 +79,40 @@ def loop(soundsource_point, reciever_point, soundray_list, nref, mesh, sphere_ra
             #     traceff(count, j) = tractmp(j)
             # end  do
 
+            if inside:
+                #受音した場合は，反射経路リストに保存する（重複経路削除に持って行く形式）
+                #ここの配列は2次元になるはず
 
             # 662行目以降　再度打ち合わせ
             # 662~671は if inside内で行うもの ????
-            if inside:
-                # 元コード↓
-                # ! 一時反射履歴に壁面番号を書き込み
-                # tractmp(k + 1) = jtmp
-                # これはtractmpはnref個の配列だが、inside判定がない場合は0が入って、
-                # 入っている場合は最も近い交点になる壁番号が入る？
-                # 0の配列は必要なのか？必要ないなら以下のコードで書く　必要ならelseで0を足す　＊＊部分
+
+            # 元コード↓
+            # ! 一時反射履歴に壁面番号を書き込み
+            # tractmp(k + 1) = jtmp
+            # これはtractmpはnref個の配列だが、inside判定がない場合は0が入って、
+            # 入っている場合は最も近い交点になる壁番号が入る？
+            # 0の配列は必要なのか？必要ないなら以下のコードで書く　必要ならelseで0を足す　＊＊部分
+
+            #　受音したかにかかわらず，次の壁に当たる場合に，衝突する壁・交点等を求める。
+            if collision:
                 reflectionmeshid_history.append(mesh_nearestid)
+                #　↑これは一時的な反射経路（1次元）
                 # ここ＊
                 t = mm.parameter_t(sound_ray, soundray_comesfrom, mesh[mesh_nearestid].normal,
                                    mesh[mesh_nearestid].vertexes)
                 node = mm.node_renew(sound_ray, soundray_comesfrom, t)
                 soundray_comesfrom = sr.soundraycomesfrom_renew(node)
                 sound_ray = sr.reflection_generator(sound_ray, mesh[mesh_nearestid].normal)
-
             else:
-                # ＊＊0配列が必要な場合
-                reflectionmeshid_history.append(mesh_nearestid)
+                break
+                #衝突する壁が無ければループを抜ける
+
+
+
+            #受音しない場合は，履歴に保存する必要はない
+            # else:
+            #     # ＊＊0配列が必要な場合
+            #     reflectionmeshid_history.append(mesh_nearestid)
 
 
     return reflectionmeshid_history
