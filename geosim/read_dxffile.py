@@ -2,7 +2,8 @@ import numpy as np
 from mesh import Mesh
 
 
-# 9月 打ち合わせ用
+# 1月以降 打ち合わせ用
+# cadのファイルの読み込み
 
 
 

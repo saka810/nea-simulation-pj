@@ -1,13 +1,10 @@
 import numpy as np
+from numpy.ma.core import count
+
 import sound_ray as sr
 import mesh_method as mm
 from mesh import Mesh
 import receiver_sphere as rs
-
-
-# 9月 打ち合わせ用
-
-
 
 
 # 受音球の半径
@@ -33,7 +30,8 @@ import receiver_sphere as rs
 # このreflectionmeshid_historyを出力として返す
 # 元コード524
 def loop(soundsource_point, reciever_point, soundray_list, nref, mesh, sphere_radius):
-
+    reflectionmeshid_history_2dim=[]
+    collision = False
 
     for soundray_i in range(len(soundray_list)):
         # reflectionmeshid_historyは今のコードだと一時反射履歴なので，ここでいちど初期化する必要あり
@@ -72,16 +70,52 @@ def loop(soundsource_point, reciever_point, soundray_list, nref, mesh, sphere_ra
             # ここから元コード649  音線基点・受音点間ベクトル 受音球に入っているかの判定
             inside = rs.inside_sphere(sphere_radius, sound_ray, soundray_comesfrom, reciever_point, min_distance)
 
+            # 12/04 追記メモ
+            # 確認したい点はこの if insideで保存する反射経路リストについて
             # if inside:
-            # 元コードのこれはtractmp(0か-1)で塗りつぶし？なぜ？ 反射履歴に書き込み if inside and collisionの後＊の位置ではないのか
-            # count = count + 1
-            # do j = 0, nref
-            #     traceff(count, j) = tractmp(j)
-            # end  do
-
-            if inside:
                 #受音した場合は，反射経路リストに保存する（重複経路削除に持って行く形式）
                 #ここの配列は2次元になるはず
+
+                # 12/04追記メモ
+                # 元コード662行目～677行目が理解ができていない部分です。申し訳ございません。
+                # ここのif insideは元コードtraceffに代入する部分と想像しています。
+                # 以下は662~671部分
+                # count = count + 1
+                # do j = 0, nref
+                #     traceff(count, j) = tractmp(j)
+                # end  do
+
+                # [疑問1]
+                # do jのループは
+                # このループ１個外側の
+                # !■反射回数ループ■　
+                # pythonコード for k in range(nref):　（元コード545行目do k = 0, nref）
+                # のループと同じ範囲なので else:breakの後にfor k in range(nref):を抜けてから記載しても良いでしょうか
+
+                # [疑問2]
+                # traceffに代入するtractmpのが元コード668行目
+                # tractmpに値を代入するのが元コード677行目
+                # 代入の順序がこの順番になっていて、668行目で毎回nrefまで代入をするのはどのような手順を想定されていますでしょうか。
+                # この部分は一つ外側　元コード545行目 do k = 0, nref　と　
+                # さらに外側の元コード527行目do i = 1, nrayと
+                # 元コード667行目 do j = 0, nref でnray*nref*nref回ループが回り
+                # 代入されるtraceffは
+                # 配列の行数がinside判定があるか無いかが関わるので countの数＜＝nray*nref　、
+                # 配列の列数がnref個のように見えたので、
+                # 元コード545行目do k = 0, nrefを抜けてからnref回のループでも良いものでしょうか。
+                # 今のループだと　nray*nref*nrefのループが行われていますでしょうか？
+                # 必要なループの個数はnray*nref個でしょうか。
+
+                # [疑問3]
+                # 545行目do k = 0, nrefを考えると
+                # do j = 0, nrefは do j = 0, kとしても良いものでしょうか。
+                # k+1~nref では traceff[k+1:nref]=0 ?
+
+                # [疑問4]
+                # 最終的にinside も collisionの条件を満たすものが残れば良いでしょうか。
+                # その場合、reflectionmeshid_history（元コードtractmp）追加条件をinside も collisionの条件を満たすに変更し
+                # reflectionmeshid_historyが一つのkに対して完成してからtraceffに追加しても良いか
+                # この場合の変更想定箇所　** 、***、****
 
             # 662行目以降　再度打ち合わせ
             # 662~671は if inside内で行うもの ????
@@ -95,9 +129,17 @@ def loop(soundsource_point, reciever_point, soundray_list, nref, mesh, sphere_ra
 
             #　受音したかにかかわらず，次の壁に当たる場合に，衝突する壁・交点等を求める。
             if collision:
-                reflectionmeshid_history.append(mesh_nearestid)
+                # 12/04追記メモ **
+                # reflectionmeshid_historyはここで追加はなしにして***で追加
+                # reflectionmeshid_history.append(mesh_nearestid)
                 #　↑これは一時的な反射経路（1次元）
-                # ここ＊
+
+
+                # 12/04追記メモ
+                # ***
+                if inside:
+                    reflectionmeshid_history.append(mesh_nearestid)
+
                 t = mm.parameter_t(sound_ray, soundray_comesfrom, mesh[mesh_nearestid].normal,
                                    mesh[mesh_nearestid].vertexes)
                 node = mm.node_renew(sound_ray, soundray_comesfrom, t)
@@ -108,11 +150,19 @@ def loop(soundsource_point, reciever_point, soundray_list, nref, mesh, sphere_ra
                 #衝突する壁が無ければループを抜ける
 
 
+            # 12/04追記メモ
+            # ****
+            # ここでtraceffに追加
+            reflectionmeshid_history_2dim.append(reflectionmeshid_history)
+
+
 
             #受音しない場合は，履歴に保存する必要はない
             # else:
             #     # ＊＊0配列が必要な場合
             #     reflectionmeshid_history.append(mesh_nearestid)
 
-
-    return reflectionmeshid_history
+    # 12/04追記メモ
+    # returnはtractmp(reflectionmeshid_history)ではなくtraceff(reflectionmeshid_history_2dim)でしょうか。
+    # return reflectionmeshid_history
+    return reflectionmeshid_history_2dim
