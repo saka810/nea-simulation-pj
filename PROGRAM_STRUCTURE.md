@@ -33,8 +33,9 @@ procedure.process()
 | `sound_ray.py` | 音線の生成・正規化・反射・エネルギー減衰 | 318〜326, 493〜503, 1091〜1110 行 | 実装済（2026-08-12 に転記ミス修正・動作確認済） |
 | `receiver_sphere.py` | 受音球の通過判定 | 649〜663 行 | 実装済（2026-08-12 に転記ミス修正・動作確認済） |
 | `read_dxffile.py` | DXF ファイルの読み込み | 132〜283 行 | スタブ（座標未取得） |
-| `loop_reflectionmesh.py` | 音線追跡ループ本体 | 524〜717 行 | 実装中（構造の疑問点をコメントで整理中） |
-| `loop_deleteredundancy.py` | 重複経路の削除 | 721〜841 行 | デモ実装済（set 方式） |
+| `loop_reflectionmesh.py` | 音線追跡ループ本体 | 524〜717 行 | **実装済**（2026-08-12 に traceff の扱いを確定し全面修正・動作確認済） |
+| `ray_recorder.py` | 可視化用の音線軌跡レコーダ | （移植元なし・新規） | 実装済（2026-08-12 新設） |
+| `loop_deleteredundancy.py` | 重複経路の削除 | 721〜841 行 | 実装済（2026-08-12 に整理・動作確認済） |
 | `loop_noredundancy.py` | バックトレースループ | 876〜1134 行 | 下書き段階 |
 | `impulse.py` | インパルス応答の合成・CSV 出力 | make_ipls_freq_monaural_fortran.f90 | 実装中（転記ミス多数） |
 | `__init__.py` | パッケージ化 | — | 空 |
@@ -196,29 +197,62 @@ DXF から Mesh リストを作るのが目的。現状は `POLYLINE` 行の検�
 ### loop_reflectionmesh.py
 
 ```python
-loop(soundsource_point, reciever_point, soundray_list, nref, mesh, sphere_radius)
-    -> list[list[int]]   # 受音した経路ごとの反射面ID履歴（先頭要素は -1）
+loop(soundsource_point, reciever_point, soundray_list, nref, mesh, sphere_radius,
+     recorder=None) -> list[list[int]]   # 受音した経路ごとの反射面ID履歴（先頭要素は -1）
 ```
 音線追跡の本体（元コード 524〜717 行）。3 重ループ構造:
 
 ```
 for 音線 i:                       # 元コード 527行 do i = 1, nray
-    履歴初期化（先頭に -1）
-    for 反射回数 k:               # 元コード 545行 do k = 0, nref
+    履歴初期化（先頭に番兵 -1）
+    for 反射回数 k in range(nref+1):   # 元コード 545行 do k = 0, nref（k=0 が直接音の区間）
         音線を正規化
+        collision / min_distance を初期化   ← 面ループの「外」
         for 面 j:                 # 元コード 576行 do j = 1, sfcount
-            前方かつ面に向かう場合に衝突判定 → 最寄り面 mesh_nearestid を更新
+            collision_distance() で衝突判定 → 最寄り面 mesh_nearestid を更新
         受音球判定 inside_sphere()
-        if 衝突あり: 交点へ基点を移動し、反射ベクトルを生成して継続
-        else: break（この音線は終了）
+        if 受音: 履歴のコピーを 2 次元リストへ保存      # ★壁ID追記より前
+        if 衝突なし: break
+        履歴に壁 ID を追記                             # ★無条件
+        交点を算出 → 基点を移動 → 反射ベクトルを生成
 ```
 
-現状の未確定点（コード内の 12/04 メモ・疑問 1〜4 で整理中）:
-- 元コードでは「衝突のたびに履歴へ壁番号追加」+「受音のたびに履歴のスナップショットを 2 次元リストへ保存」の 2 本立て。
-  現状は `if inside` の中でのみ履歴追加する形になっており、置き場所を検討中。
-- 履歴の 2 次元リストへの append が反射ループの毎周・同一リスト参照で行われている（コピーが必要）。
-- 面ループ内で `soundray_comesfrom` を上書きしている箇所あり（元コードでは最寄り面確定後に更新）。
-- 冒頭の `from numpy.ma.core import count` は不要な自動インポート。
+**2026-08-12 に traceff の扱いを確定し、全面的に書き直した**（詳細は `docs/技術説明書.md` 5.8 節）。
+
+修正点:
+
+| # | 修正前 | 修正後 |
+|---|---|---|
+| A-1 | 2 次元リストへの append が反射ループ毎周・同一リスト参照 | 受音時のみ `list()` でコピーして append |
+| A-2 | `if inside:` の中でのみ壁 ID を追記 | `if collision:` で**無条件に**追記（受音とは独立） |
+| A-3 | 面ループ内で `soundray_comesfrom` を上書き | 面ループは判定のみ。交点算出は最寄り面確定後に 1 回 |
+| A-4 | `collision` を面ループ**内**で初期化（最後の面の結果しか残らない） | 面ループの**外**で初期化 |
+| A-5 | 不要な `from numpy.ma.core import count` | 削除 |
+| A-7 | `for k in range(nref)` | `range(nref + 1)`（元コード `do k = 0, nref` は nref+1 周） |
+| A-8 | — | 可視化用の `recorder` フックを追加 |
+
+⚠ 戻り値の各履歴の**先頭要素は番兵 `-1`** で面 ID ではない（元コード `tractmp(0) = -1`）。
+反射回数 = `len(history) - 1`。下流で `mesh[history[k]]` とすると `-1` が最後の面を指すので注意
+（TODO A-9 で扱いを再検討予定）。
+
+### ray_recorder.py
+
+可視化用の音線軌跡レコーダ。移植元のない**新規モジュール**（`docs/出力・可視化方針.md` 参照）。
+
+```python
+class RayRecorder(total_rays, max_rays=2000, sound_velocity=343.0,
+                  band_number=6, record_energy=True)
+class RayTrajectory   # 音線 1 本分の軌跡
+```
+
+`loop()` に `recorder=` で渡すと、間引いた音線について
+**節点座標・累積距離・反射面 ID・バンド別エネルギー・受音イベント・終了理由**を記録する。
+本線（受音経路の反射面 ID 列）とは別チャンネルで、`recorder=None` なら一切動かない。
+
+- 受音しなかった音線も記録する（音の広がりを見るのが目的のため）
+- 間引きは「絶対本数の上限 `max_rays` ＋ 等間隔ストライド」が既定
+- `traj.times(c)` で到達時刻、`traj.position_at(t, c)` で任意時刻の音粒子位置（線形補間）
+- `recorder.save_npz(path)` で保存（可変長なので連結＋オフセット方式）
 
 ### loop_deleteredundancy.py
 
@@ -226,9 +260,19 @@ for 音線 i:                       # 元コード 527行 do i = 1, nray
 delete(reflectionhistory_redundancy: list[list[int]]) -> list[list[int]]
 ```
 反射履歴の重複経路削除（元コード 721〜841 行）。
-元コードの「反射回数でソート → 切替点探索 → 同一反射回数内で総当たり比較」を、
-Python では `list → tuple → set → list` の一括重複除去で置き換え（結果は等価、順序は不定）。
-`if __name__ == '__main__':` にデモ入力あり。
+
+**2026-08-12 に元コードの意図を確定**（それまで「何をしているか分からない」とコメントされていた）:
+
+- `traceffn(i)`（721〜741 行）は、固定長配列 `traceff` の各行を先頭から走査して最初の 0 の位置を探し、
+  **その経路の有効反射回数（＝行の実質的な長さ）**を求めている。
+  Python のリストは可変長なので `len()` がそのまま相当し、この処理自体が不要。
+- その後の「反射回数でソート → 切替点探索 → 同一反射回数内で総当たり比較」は、
+  **「反射回数が違えば絶対に重複しない」ことを使って比較対象を絞る高速化**。
+  Python では tuple 化してハッシュで一括除去すれば同じ結果が O(n) で得られる。
+
+実装は `list → tuple → dict.fromkeys → list`。**`set` ではなく `dict.fromkeys` を使うのは
+入力順を保って結果を決定的にするため**（`set` だと実行のたびに順序が変わり、
+結果の突き合わせやデバッグがしづらい）。毎回数百行を吐いていたデバッグ print も削除した。
 
 ### loop_noredundancy.py
 

@@ -9,40 +9,39 @@ from mesh import Mesh
 
 
 
-# 元コード721 重複経路の削除に該当
-# 何をしているか分からないでいます
-# 想像として、反射履歴の配列を重複のない配列にできれば問題ないように見えるが
-# 実際にどのようなことをしているか分からない
-# 以下のコードは
-# 重複ありの反射履歴　reflectionhistory_redundancy　を
-# 重複なしの反射履歴　reflection_history　に変更するデモ
+# 元コード721〜841 重複経路の削除
+#
+# 【なぜ必要か】
+# 隣り合う音線は同じ壁面列を辿ることがよくあるが、幾何学的にはそれは 1 本の経路。
+# 虚像法では経路 1 つにつき虚音源 1 組なので、重複したまま渡すと同じ計算を何度も繰り返す。
+# 書籍『建築音響物理学』式(2.66) のとおり虚音源の総数は指数的に増えるため、ここで削るのが要。
+#
+# 【元コードが何をしているか】2026-08-12 に確定
+#   1. traceffn(i) を作る（721〜741行）
+#      traceff は固定長 (count, 0:nref) の配列で、使っていない後ろの要素は 0 のまま。
+#      そこで各行を先頭から走査して最初の 0 が出た位置を探し、それを
+#      「その経路の有効反射回数」として traceffn(i) に入れている。
+#      最後まで 0 が出なければ nref + 1。つまり traceffn は「行の実質的な長さ」。
+#      → Python のリストは可変長なので len() がそのまま traceffn に当たる。この処理自体が不要。
+#   2. 反射回数でソートし、切替点を探し、同一反射回数のグループ内で総当たり比較して重複を除く
+#      → ソートしているのは「反射回数が違えば絶対に重複しない」ので比較対象を絞るための高速化。
+#        Python では tuple 化してハッシュで一括除去すれば同じ結果が O(n) で得られる。
 def delete(reflectionhistory_redundancy):
-    # 反射履歴traceffn=0の部分以外はnref+1としてインデックス範囲外の値を代入する意図？
-    # 初めからtraceffnを作成するようにはできないのか
-    # do i = 1, count
-    #     do j = 0, nref
-    #         if (traceff(i, j).eq. 0) then
-    #             traceffn(i) = j
-    #             exit
-    #         end if
-    #         traceffn(i) = nref + 1
-    #     end do
-    # end do
+    """反射履歴の重複経路を削除する。
 
-    # もし重複だけ除くのであれば以下の記述を採用します
-    # reflectionhistory_redundancy
-    # reflectionhistory_redundancy = [[0, 1, 2], [0, 1, 1], [0, 1, 2], [0, 2, 3]]
-    print("重複あり")
-    print(reflectionhistory_redundancy)
+    引数・戻り値とも list[list[int]]（各要素の先頭は番兵 -1）。
+    入力順を保ったまま、初出のものだけを残す。
+
+    ※ set ではなく dict.fromkeys を使っているのは順序を決定的にするため。
+      set だと実行のたびに順序が変わり、結果の突き合わせやデバッグがしづらい。
+    """
     tuple_dummy = [tuple(data) for data in reflectionhistory_redundancy]
-    tuple_dummy = set(tuple_dummy)
-    reflection_history = [list(data) for data in tuple_dummy]
-    print("重複なし")
-    print(reflection_history)
+    reflection_history = [list(data) for data in dict.fromkeys(tuple_dummy)]
 
     return reflection_history
 
 
 if __name__ == '__main__':
     test = [[0, 1, 2], [0, 1, 1], [0, 1, 2], [0, 2, 3]]
-    delete(test)
+    print("重複あり:", test)
+    print("重複なし:", delete(test))
