@@ -17,8 +17,17 @@ from ray_recorder import RayRecorder
 ### を元に（def process()内の順に記載）
 ### パルス列、または、インパルス応答（wavファイル）を保存する
 def process(soundsource_point, reciever_point, dxf_filename, sphere_radius, nref, soundray_number,
+            absorption_csv=None, unit=None,
             raylog_filename=None, raylog_max_rays=2000):
     """
+    soundsource_point / reciever_point : (3,) | None
+        None を渡すと DXF の src / rec レイヤの POINT から取る。
+        CAD 側で音源・受音点まで作図しておけば、ここでの指定は不要。
+    absorption_csv : str | None
+        吸音率テーブルの CSV パス（1列目=レイヤ名, 2〜7列目=バンド別吸音率）。
+        None ならレイヤ全部が既定値になり警告が出る。data/absorption_sample.csv を参照。
+    unit : None | str | float
+        None なら DXF ヘッダの $INSUNITS から自動判定。'mm' / 'm' などで明示指定も可。
     raylog_filename : str | None
         可視化用の音線軌跡を npz で保存するパス。None なら記録しない。
         出力①音線の可視化・②音粒子の可視化（動画）に使う。docs/出力・可視化方針.md 参照。
@@ -28,13 +37,19 @@ def process(soundsource_point, reciever_point, dxf_filename, sphere_radius, nref
     frequencies = np.array([63.0, 125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0])
     print(frequencies)
 
-    # コマンドプロンプトで入力、ＵＩから読み込み、別ｃｓｖファイルから読み込み
-    # このファイルに直接書き込みなど
-    # 音源、受音点、形状、「吸音率のリスト」が必要
-    # soundsource_point=
-    # reciever_point=
-    mesh = rd.read(dxf_filename)
-    # absorption_list
+    # 室形状・吸音率・音源・受音点をまとめて DXF から読む
+    # 元コード132〜283行目に対応
+    model = rd.read_model(dxf_filename, unit=unit, absorption_table=absorption_csv)
+    mesh = model.mesh
+
+    if soundsource_point is None:
+        if not model.source_points:
+            raise ValueError("音源が指定されておらず、DXF に src レイヤの POINT もありません")
+        soundsource_point = model.source_points[0]
+    if reciever_point is None:
+        if not model.receiver_points:
+            raise ValueError("受音点が指定されておらず、DXF に rec レイヤの POINT もありません")
+        reciever_point = model.receiver_points[0]
 
     # 音線ベクトルを作成
     soundray_list = sr.soundray_generator(soundray_number)

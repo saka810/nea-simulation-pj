@@ -32,7 +32,7 @@ procedure.process()
 | `mesh_method.py` | 音線と面の交差判定の幾何計算 | 376〜447 行ほか | 実装済（2026-08-12 に転記ミス修正・動作確認済） |
 | `sound_ray.py` | 音線の生成・正規化・反射・エネルギー減衰 | 318〜326, 493〜503, 1091〜1110 行 | 実装済（2026-08-12 に転記ミス修正・動作確認済） |
 | `receiver_sphere.py` | 受音球の通過判定 | 649〜663 行 | 実装済（2026-08-12 に転記ミス修正・動作確認済） |
-| `read_dxffile.py` | DXF ファイルの読み込み | 132〜283 行 | スタブ（座標未取得） |
+| `read_dxffile.py` | DXF ファイルの読み込み | 132〜283 行 | **実装済**（2026-08-12。実 DXF で動作確認済） |
 | `loop_reflectionmesh.py` | 音線追跡ループ本体 | 524〜717 行 | **実装済**（2026-08-12 に traceff の扱いを確定し全面修正・動作確認済） |
 | `ray_recorder.py` | 可視化用の音線軌跡レコーダ | （移植元なし・新規） | 実装済（2026-08-12 新設） |
 | `loop_deleteredundancy.py` | 重複経路の削除 | 721〜841 行 | 実装済（2026-08-12 に整理・動作確認済） |
@@ -185,14 +185,55 @@ inside_sphere(sphere_radius, sound_ray, soundray_comesfrom, receiver_point, min_
 
 ### read_dxffile.py
 
+**2026-08-12 に本実装**（それまではスタブ）。作図ルールは `docs/DXFデータの作り方.md` に別途記載。
+
 ```python
-read(file_name: str) -> list[Mesh]
+read_model(file_name, unit=None, absorption_table=None, default_absorption=None,
+           orient_normals="auto", band_number=6,
+           source_layers=("src","source","音源"),
+           receiver_layers=("rec","receiver","受音点"), verbose=True) -> DxfModel
+read(file_name, ...) -> list[Mesh]          # mesh だけ返す簡易版（procedure.py から使う）
+read_absorption_csv(file_name, band_number=6) -> dict[str, ndarray]
+face_normal(v1, v2, v3) -> ndarray | None   # 外積→正規化。縮退面なら None
+signed_volume(triangles) -> float           # 法線の向き判定に使う
 ```
-DXF から Mesh リストを作るのが目的。現状は `POLYLINE` 行の検出と直後数行の print までで、
-座標・法線・吸音材の取得は未実装（戻り値は常に空リスト）。
-元コード（132〜283 行）で行っている処理: グループコード 70 のフラグで頂点(192)/面(128)を判別、
-レイヤ名から吸音材 ID 取得、mm→m 変換、縮退面（法線ゼロ）の除去、外積による法線計算と正規化。
-`if __name__ == "__main__":` で単体テスト実行可（テスト用パスがハードコード）。
+
+`DxfModel` の属性: `mesh` / `source_points` / `receiver_points` / `unit_scale` /
+`unit_source` / `layer_counts` / `skipped` / `extents`、および `summary()`。
+
+**パーサは自前**（`ezdxf` などの外部依存なし）。ASCII DXF は「グループコード / 値」が
+1 行ずつ交互に並ぶだけなので、2 行ずつ読んで `(code, value)` のタプル列にすれば済む。
+エンコーディングは UTF-8 → CP932 → latin-1 の順に試す（日本語レイヤ名対応）。
+
+読むエンティティ:
+
+| エンティティ | 条件 | 扱い |
+|---|---|---|
+| `POLYLINE` | `70` に 64（ポリフェイスメッシュ） | 後続の `VERTEX` を集め `SEQEND` で終了 |
+| └ `VERTEX` | `70 = 192` | 頂点座標（`10`/`20`/`30`） |
+| └ `VERTEX` | `70 = 128`（64 が立っていない） | 面レコード。`71`〜`74` が頂点番号（1 始まり、符号は辺の可視性なので `abs()`） |
+| `3DFACE` | — | `10`〜`13` 系の 3〜4 頂点。4 点目が 3 点目と同じなら三角形 |
+| `POINT` | レイヤが `src` 系 | 音源座標 |
+| `POINT` | レイヤが `rec` 系 | 受音点座標 |
+
+四角形以上の面は扇状（fan）に三角形分割する。縮退面（`|n| < 1e-12`）は捨てて件数を記録。
+
+**単位換算**: ヘッダ `$INSUNITS` のコード（4=mm, 6=m など、`INSUNITS_TO_METER` に 18 種）から
+m へ換算する。`unit='mm'` / `unit=0.001` のような明示指定が優先される
+（`$INSUNITS=0` の unitless 対策）。
+
+**法線の向き**: 音線追跡は内向き法線を前提とするので、`orient_normals` で揃える。
+
+| 値 | 挙動 |
+|---|---|
+| `'auto'`（既定） | 符号付き体積 V=(1/6)Σx₁·(x₂×x₃) の符号で判定。V>0 なら外向きなので全反転。**閉じた形状なら非凸でも正しい** |
+| `'cad'` | CAD の巻き順をそのまま信じる |
+| `'inward'` / `'outward'` | 面ごとに重心方向で強制（凸形状限定） |
+
+**吸音率**: レイヤ名を材料名として `absorption_table`（dict または CSV パス）と突き合わせる。
+未登録のレイヤは既定値（0.1）を使い、レイヤ名を列挙して警告する。
+
+`if __name__ == "__main__":` でリポジトリ直下の `test.dxf` を読むテストが走る。
 
 ### loop_reflectionmesh.py
 
@@ -331,8 +372,8 @@ impulse_responce(filename, sound_velocity, reflection_timing, soundsourceenergy_
 
 | 元コードの機能 | Python 側の状況 |
 |---|---|
-| 吸音率 CSV（absorption.csv）読み込み | 未実装（procedure.py にメモのみ） |
-| DXF 形状読み込み・法線計算 | スタブ（read_dxffile.py） |
+| 吸音率 CSV（absorption.csv）読み込み | 実装済（`read_absorption_csv()`。サンプル `data/absorption_sample.csv`） |
+| DXF 形状読み込み・法線計算 | 実装済（`read_dxffile.py`。単位換算・法線向き自動判定・音源受音点の読み込みは元コードにない追加機能） |
 | 有効経路カウント用の事前ループ（backtrace.f90 330〜515 行） | 不要（Python はリストの動的伸長で代替） |
 | 音線追跡ループ | 実装中（loop_reflectionmesh.py） |
 | クイックソート + 重複削除 | set 方式で代替済み（loop_deleteredundancy.py） |
