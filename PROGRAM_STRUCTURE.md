@@ -28,10 +28,10 @@ procedure.process()
 | ファイル | 役割 | 対応する元コード | 状態 |
 |---|---|---|---|
 | `procedure.py` | 全体フローのオーケストレーション | backtrace.f90 全体 | 骨格のみ（後半はコメントアウト） |
-| `mesh.py` | 三角形メッシュのデータクラス | vwpt/surf/vwnm/absper 配列群 | 実装済（vertexes の形状に難あり） |
-| `mesh_method.py` | 音線と面の交差判定の幾何計算 | 376〜447 行ほか | 実装済 |
-| `sound_ray.py` | 音線の生成・正規化・反射・エネルギー減衰 | 318〜326, 493〜503, 1091〜1110 行 | 実装済（バグ数件） |
-| `receiver_sphere.py` | 受音球の通過判定 | 649〜663 行 | 実装済（条件1つ転記ミス） |
+| `mesh.py` | 三角形メッシュのデータクラス | vwpt/surf/vwnm/absper 配列群 | 実装済（2026-08-12 に vertexes の形状を修正） |
+| `mesh_method.py` | 音線と面の交差判定の幾何計算 | 376〜447 行ほか | 実装済（2026-08-12 に転記ミス修正・動作確認済） |
+| `sound_ray.py` | 音線の生成・正規化・反射・エネルギー減衰 | 318〜326, 493〜503, 1091〜1110 行 | 実装済（2026-08-12 に転記ミス修正・動作確認済） |
+| `receiver_sphere.py` | 受音球の通過判定 | 649〜663 行 | 実装済（2026-08-12 に転記ミス修正・動作確認済） |
 | `read_dxffile.py` | DXF ファイルの読み込み | 132〜283 行 | スタブ（座標未取得） |
 | `loop_reflectionmesh.py` | 音線追跡ループ本体 | 524〜717 行 | 実装中（構造の疑問点をコメントで整理中） |
 | `loop_deleteredundancy.py` | 重複経路の削除 | 721〜841 行 | デモ実装済（set 方式） |
@@ -96,7 +96,7 @@ class Mesh:
 
 | 属性 | 型（想定） | 意味 |
 |---|---|---|
-| `vertexes` | ndarray | 頂点 3 点の座標。現状 `np.array(([v1],[v2],[v3]))` で **(3,1,3)** になる点に注意（意図は (3,3) と思われる） |
+| `vertexes` | ndarray (3,3) | 頂点 3 点の座標。~~`np.array(([v1],[v2],[v3]))` で (3,1,3)~~ → 2026-08-12 に `np.array([v1,v2,v3])` に修正し (3,3) に |
 | `normal` | ndarray (3,) | 単位法線ベクトル（CAD になければ別途計算予定） |
 | `material` | str | 吸音材の名前 |
 | `absorption_coefficient` | ndarray | バンド別吸音率 |
@@ -117,13 +117,14 @@ collision_distance(sound_ray, soundray_comesfrom, normal, vertexes) -> (collisio
 collision_detection(node, vertexes) -> bool
 ```
 交点が三角形の内側かを、基準頂点を変えた 2 回の `innerproduct_from3vertexes` の符号で判定
-（両方負なら内側。元コードは `<= 0` なので境界の扱いが異なる）。
+（両方 0 以下なら内側）。2026-08-12 に `< 0` → `<= 0` へ修正し元コード 625 行と一致させた。
 
 ```python
 innerproduct_from3vertexes(node, vertex_origin, vertex_1, vertex_2) -> float
 ```
 基準頂点から面を張る 2 辺ベクトルと交点ベクトルの外積 2 つを作り、その内積を返す（内外判定の素材）。
-※内部の作業配列が `np.zeros((3, 2))` で転置になっている（(2,3) が正しい形）。
+※2026-08-12 に作業配列の形状を `np.zeros((3, 2))` → `np.zeros((2, 3))` に修正（旧形状では代入時に ValueError）。
+なお 2 回目の呼び出しは元コードと外積の引数順が入れ替わっているが、内積は可換なので結果は同値。
 
 ```python
 parameter_d(normal, vertex) -> float          # 平面方程式 ax+by+cz+d=0 の d = -normal・vertex
@@ -141,8 +142,9 @@ node_renew(sound_ray, soundray_comesfrom, t) -> ndarray (3,)
 soundray_generator(ray_number: int) -> ndarray (ray_number, 3)
 ```
 Fibonacci スパイラルで球面上に均等分布する単位音線ベクトル群を生成（元コード 318〜326 行）。
-※`np.zeros(ray_number, 3)` と `sound_rays(i, 2)` の 2 か所に構文エラーあり。
+※2026-08-12 に `np.zeros(ray_number, 3)` → `np.zeros((ray_number, 3))`、`sound_rays(i, 2)` → `sound_rays[i, 2]`（2 か所）を修正。
 ※添字は 0 始まりで、Fortran（1 始まり、最終音線が z>1 で NaN 化）と 1 本ずれるが数学的には Python 側が正しい形。
+検証: nray=1000 で NaN なし・全ベクトルのノルム 1.0・重心が原点。
 
 ```python
 noramlized_soundray(sound_ray) -> ndarray (3,)          # L2ノルムで正規化（関数名は normalized の綴りミス）
@@ -153,9 +155,21 @@ soundray_renew(imaginarysound_point, soundray_comesfrom) -> ndarray (3,)
 energy_decay(sound_ray, normal, absorption, initial_energy) -> float
 ```
 `energy_decay` は斜入射を考慮した反射エネルギー減衰（元コード 1091〜1094 行）。
-反射係数 R = |((1+√(1-α))cosθ − (1−√(1-α))) / ((1+√(1-α))cosθ + (1−√(1-α)))| として R² × 累積エネルギー を返す設計。
-※現状は式中の `(1−√(1-α))` が 2 か所とも `(1+√(1-α))` になっている転記ミスあり。
-※想定は垂直入射吸音率。残響室法吸音率を使う場合は式の変更が必要（コード内メモ）。
+反射係数 R = |((1+√(1-α))cosθ − (1−√(1-α))) / ((1+√(1-α))cosθ + (1−√(1-α)))| として R² × 累積エネルギー を返す。
+
+**元の数式の妥当性（2026-08-12 検証済み）**: これは局所反応性（locally reacting）壁面の斜入射圧力反射率で、導出は
+法線入射吸音率 α₀ → |R₀| = √(1−α₀) → 規格化音響インピーダンス（実数と仮定）z = (1+|R₀|)/(1−|R₀|)
+→ R(θ) = (z·cosθ − 1)/(z·cosθ + 1) の分母分子に (1−|R₀|) を掛けたもの。**式として正しい**。
+θ→90° で |R|→1（掠め入射は吸音されない）、θ=0 で残存エネルギー = 1−α₀ となり整合。
+
+※2026-08-12 修正: 式中の `(1−√(1-α))` が 2 か所とも `(1+√(1-α))` になっていた。
+　旧実装は分母分子の共通因子 (1+√(1-α)) が約分され R = (cosθ−1)/(cosθ+1) となり、
+　**吸音率に一切依存せず・垂直入射で常に R=0（＝どんな材料でも完全吸音）** という致命的な挙動だった。
+※`abs(...)**2 * enertmp` の「2 乗の後に自身を掛けている＝3 乗では？」というコード内の疑問は誤読。
+　2 乗するのは圧力反射率 R、最後に掛けるのは累積エネルギー `enertmp` で別物。3 乗ではない。
+※想定は垂直入射（法線入射）吸音率。残響室法吸音率は 1 を超えることがあり √(1−α) が NaN になるため、
+　使う場合は Paris の式を逆解きして α₀ / z を求める前処理が必要。
+検証: α₀ = 0.0/0.2/0.5/0.9 で垂直入射の残存エネルギーが厳密に 1−α₀。掠め入射(89.9°)で 0.96。6 バンド一括計算も動作。
 
 ### receiver_sphere.py
 
@@ -164,7 +178,9 @@ inside_sphere(sphere_radius, sound_ray, soundray_comesfrom, receiver_point, min_
 ```
 音線（線分）が受音球を通過したかの判定（元コード 649〜663 行）。
 判定 3 条件: ①受音点から音線への垂線距離 ≤ 球半径、②足までの射影距離が最寄り壁より手前、③射影距離 ≥ 0（前方）。
-※現状②の比較に垂線距離を使っており、射影距離（`inner_product`）と比較すべき転記ミスあり。
+※2026-08-12 修正: ②の比較に垂線距離を使っていたのを射影距離（`inner_product`）に変更（元コード 663 行 `distd .le. disttmp`）。
+　旧実装では壁の向こう側にある受音球でも受音と誤判定しうる状態だった。
+検証: 壁より手前の受音点 → True、壁の向こうの受音点 → False（旧実装は True）、後方の受音点 → False。
 
 ### read_dxffile.py
 

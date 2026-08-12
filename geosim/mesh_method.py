@@ -62,7 +62,9 @@ def collision_detection(node, vertexes):
     inner_product_0 = innerproduct_from3vertexes(node, vertexes[0], vertexes[1], vertexes[2])
     inner_product_1 = innerproduct_from3vertexes(node, vertexes[1], vertexes[2], vertexes[0])
 
-    if inner_product_0 < 0 and inner_product_1 < 0:
+    # 2026-08-12 修正: 元コード625行は inpro(1) .le. 0 .and. inpro(2) .le. 0。
+    # 旧実装は < 0 で、辺・頂点ちょうどに当たった音線（inpro = 0）を取りこぼしていた。
+    if inner_product_0 <= 0 and inner_product_1 <= 0:
         collision = True
 
     return collision
@@ -76,7 +78,10 @@ def innerproduct_from3vertexes(node, vertex_origin, vertex_1, vertex_2):
 
     # vertexes_origin = np.array([np.zeros(3)], [np.zeros(3)])
     # 書き方変更
-    vertexes_toorigin = np.array(np.zeros((3, 2)))
+    # 2026-08-12 修正: (3, 2) → (2, 3)。3 次元ベクトル 2 本を格納するので行が 2・列が 3。
+    # 旧実装のままだと vertexes_toorigin[0] = vertex_1 - vertex_origin で
+    # 形状 (3,) を (2,) に代入することになり ValueError。
+    vertexes_toorigin = np.zeros((2, 3))
 
     # node_origin = np.array(np.zeros(3))
 

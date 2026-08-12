@@ -29,7 +29,9 @@ class Mesh:
     # absorption_coefficient = np.zeros(frequencies.size)
 
     def __init__(self, vertex_1, vertex_2, vertex_3, normal, material, absorption_coefficient):
-        self.vertexes = np.array(([vertex_1], [vertex_2], [vertex_3]))
+        # 2026-08-12 修正: ([v1], [v2], [v3]) だと形状が (3, 1, 3) になっていた。
+        # 意図は「頂点3点 × xyz」の (3, 3)。mesh_method 側は vertexes[0] が (3,) 前提。
+        self.vertexes = np.array([vertex_1, vertex_2, vertex_3])
         self.normal = normal
         # normalはcadにデータがあればそのまま代入　なければ何か計算
         self.material = material

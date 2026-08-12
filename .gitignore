@@ -1,1 +1,3 @@
 fortran/
+__pycache__/
+*.pyc
