@@ -195,11 +195,13 @@ read_model(file_name, unit=None, absorption_table=None, default_absorption=None,
 read(file_name, ...) -> list[Mesh]          # mesh だけ返す簡易版（procedure.py から使う）
 read_absorption_csv(file_name, band_number=6) -> dict[str, ndarray]
 face_normal(v1, v2, v3) -> ndarray | None   # 外積→正規化。縮退面なら None
-signed_volume(triangles) -> float           # 法線の向き判定に使う
+signed_volume(triangles) -> float           # 閉形状の法線の向き判定に使う
+open_edge_count(triangles, tol=1e-9) -> int # 開いた辺の本数。0 なら閉じている
 ```
 
 `DxfModel` の属性: `mesh` / `source_points` / `receiver_points` / `unit_scale` /
-`unit_source` / `layer_counts` / `skipped` / `extents`、および `summary()`。
+`unit_source` / `layer_counts` / `skipped` / `extents` / `is_closed` / `open_edges` /
+`volume`、および `summary()`。
 
 **パーサは自前**（`ezdxf` などの外部依存なし）。ASCII DXF は「グループコード / 値」が
 1 行ずつ交互に並ぶだけなので、2 行ずつ読んで `(code, value)` のタプル列にすれば済む。
@@ -222,13 +224,21 @@ signed_volume(triangles) -> float           # 法線の向き判定に使う
 m へ換算する。`unit='mm'` / `unit=0.001` のような明示指定が優先される
 （`$INSUNITS=0` の unitless 対策）。
 
-**法線の向き**: 音線追跡は内向き法線を前提とするので、`orient_normals` で揃える。
+**法線の向き**: 面は片側だけ反射する（`v·n < 0` のときのみ衝突と判定）ため、
+**閉じた室でも、一面だけの反射板のような開いた形状でも計算できる**。
+ただし開いた形状では向きが逆だとその面で一切反射しなくなるので、`orient_normals` で制御する。
 
 | 値 | 挙動 |
 |---|---|
-| `'auto'`（既定） | 符号付き体積 V=(1/6)Σx₁·(x₂×x₃) の符号で判定。V>0 なら外向きなので全反転。**閉じた形状なら非凸でも正しい** |
+| `'auto'`（既定） | `open_edge_count()` で閉/開を判定。**閉なら**符号付き体積 V=(1/6)Σx₁·(x₂×x₃) の符号で内向きに揃える（V>0 なら全反転。非凸でも正しい）。**開なら何もしない**（体積が無意味なので勝手に反転しない） |
 | `'cad'` | CAD の巻き順をそのまま信じる |
-| `'inward'` / `'outward'` | 面ごとに重心方向で強制（凸形状限定） |
+| `'flip'` | 全反転。**元コード 276行 `ynnmrev='y'` に相当** |
+| `'toward'` / `'away'` | `reference_point`（省略時は DXF の `src`）の側／反対側へ面ごとに向ける。**開いた反射板はこれ** |
+| `'inward'` / `'outward'` | 面ごとに重心方向で強制（凸の閉形状限定） |
+
+閉/開の判定は**開いた辺（三角形 1 枚にしか属さない辺）の本数**で行う
+（`open_edge_count()`。閉じた多面体では全ての辺がちょうど 2 枚に共有される）。
+結果は `DxfModel.is_closed` / `.open_edges` / `.volume` に入り、`summary()` にも出る。
 
 **吸音率**: レイヤ名を材料名として `absorption_table`（dict または CSV パス）と突き合わせる。
 未登録のレイヤは既定値（0.1）を使い、レイヤ名を列挙して警告する。

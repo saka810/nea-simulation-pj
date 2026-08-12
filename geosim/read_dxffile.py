@@ -89,6 +89,9 @@ class DxfModel:
         layer_counts    dict        レイヤ名 → 三角形の枚数
         skipped         dict        読み飛ばした要素の内訳
         extents         (2,3)       バウンディングボックス（m）
+        is_closed       bool        閉じた形状か（開いた辺が 0 本か）
+        open_edges      int         開いた辺（三角形1枚にしか属さない辺）の本数
+        volume          float|None  閉じている場合の室容積 [m³]
     """
 
     def __init__(self):
@@ -100,6 +103,9 @@ class DxfModel:
         self.layer_counts = {}
         self.skipped = {"縮退面": 0, "非対応エンティティ": 0, "面レコード不正": 0}
         self.extents = None
+        self.is_closed = False
+        self.open_edges = 0
+        self.volume = None
 
     def summary(self):
         lines = [
@@ -109,6 +115,12 @@ class DxfModel:
             f"音源: {[np.round(p, 4).tolist() for p in self.source_points]}",
             f"受音点: {[np.round(p, 4).tolist() for p in self.receiver_points]}",
         ]
+        if self.is_closed:
+            lines.append(f"形状: 閉じている（室容積 {self.volume:.4f} m³）"
+                         if self.volume is not None else "形状: 閉じている")
+        else:
+            lines.append(f"形状: 開いている（開いた辺 {self.open_edges} 本）"
+                         f" ※一面反射などの開いた形状も計算可能")
         if self.extents is not None:
             size = self.extents[1] - self.extents[0]
             lines.append(f"寸法: {np.round(size, 4).tolist()} m "
@@ -299,6 +311,9 @@ def signed_volume(triangles):
       V > 0 … 法線（v12×v13）が外向き
       V < 0 … 法線が内向き
     凸でなくても成り立つのが利点（重心との比較より汎用）。
+
+    ★開いた形状（閉じていない形状）では意味を持たない。必ず open_edge_count() で
+      閉じているかを確認してから使うこと。
     """
     total = 0.0
     for x1, x2, x3 in triangles:
@@ -306,25 +321,58 @@ def signed_volume(triangles):
     return total / 6.0
 
 
+def open_edge_count(triangles, tol=1.0e-9):
+    """開いた辺（三角形 1 枚にしか属さない辺）の本数を返す。0 なら閉じている。
+
+    閉じた多面体では、すべての辺がちょうど 2 枚の三角形に共有される。
+    この本数を数えるだけで「閉じているか」が判定できる。
+    一面だけの壁のような開いた形状では、外周の辺が 1 回しか現れないので 0 にならない。
+    """
+    digits = int(round(-np.log10(tol)))
+
+    def key(point):
+        return tuple(np.round(np.asarray(point, dtype=float), digits))
+
+    counts = {}
+    for x1, x2, x3 in triangles:
+        for a, b in ((x1, x2), (x2, x3), (x3, x1)):
+            ka, kb = key(a), key(b)
+            edge = (ka, kb) if ka <= kb else (kb, ka)
+            counts[edge] = counts.get(edge, 0) + 1
+    return sum(1 for c in counts.values() if c != 2)
+
+
 # ------------------------------------------------------------------------------
 # 本体
 # ------------------------------------------------------------------------------
 
 def read_model(file_name, unit=None, absorption_table=None, default_absorption=None,
-               orient_normals="auto", band_number=6,
+               orient_normals="auto", reference_point=None, band_number=6,
                source_layers=DEFAULT_SOURCE_LAYERS,
                receiver_layers=DEFAULT_RECEIVER_LAYERS,
                verbose=True):
     """DXF を読んで DxfModel を返す。
 
+    **閉じた室でも、一面だけの壁のような開いた形状でも読める**（音線追跡側も
+    開いた形状に対応している。当たる壁がなくなった音線はそこで打ち切られる）。
+
     引数:
         unit              None なら $INSUNITS から自動判定。'mm' / 'm' などで明示指定も可
         absorption_table  {レイヤ名: ndarray} または吸音率 CSV のパス
         default_absorption テーブルに無いレイヤに使う値（None なら 0.1 で警告）
-        orient_normals    'auto'    … 符号付き体積で内向きに揃える（既定）
-                          'cad'     … CAD の巻き順をそのまま信じる
-                          'inward'  … 重心方向へ強制（凸形状のみ）
-                          'outward' … 重心の逆へ強制（凸形状のみ）
+        orient_normals    法線の向きの決め方。開いた形状では**これが結果を左右する**
+                          （法線が音源と反対を向いている面は一切反射しない）
+          'auto'（既定）… 閉じているかを開いた辺の本数で判定し、
+                          閉じていれば符号付き体積で内向きに揃える。
+                          **開いていれば何もしない（CAD の巻き順のまま）**
+          'cad'         … CAD の巻き順をそのまま信じる
+          'flip'        … 全反転（元コード 276行 ynnmrev='y' に相当）
+          'toward'      … reference_point の側へ面ごとに向ける。
+                          **開いた反射面はこれ（reference_point に音源位置を渡す）**
+          'away'        … reference_point の反対側へ面ごとに向ける
+          'inward'      … 重心方向へ面ごとに向ける（凸の閉形状のみ）
+          'outward'     … 重心の逆へ（凸の閉形状のみ）
+        reference_point   'toward' / 'away' のときの基準点。通常は音源位置
         source_layers     音源として扱う POINT のレイヤ名
         receiver_layers   受音点として扱う POINT のレイヤ名
     """
@@ -418,30 +466,71 @@ def read_model(file_name, unit=None, absorption_table=None, default_absorption=N
             continue
         kept.append((layer, x1, x2, x3, n))
 
-    # --- 法線の向きを内向きに揃える ---
-    flip = False
+    # --- 法線の向きを決める ---
+    # ★閉じた室にも、一面だけの壁のような開いた形状にも対応する必要がある。
+    #   開いた形状では符号付き体積が意味を持たないので、'auto' は閉じているかを先に判定する。
+    #   なお開いた形状では「法線をどちら向きにするか」が結果を決める
+    #   （法線が音源と反対を向いていると、その面では一切反射しなくなる）。
+    triangles = [(f[1], f[2], f[3]) for f in kept]
+    flip_all = False
+    pivot = None            # 'toward'/'away'/'inward'/'outward' の基準点
+    want_toward = True
     note = ""
-    if orient_normals == "auto" and kept:
-        v = signed_volume([(f[1], f[2], f[3]) for f in kept])
-        if v > 0.0:
-            flip = True
-            note = f"符号付き体積 {v:+.4f} m³ > 0 → 外向きだったので全反転"
+
+    if kept:
+        model.open_edges = open_edge_count(triangles)
+        model.is_closed = (model.open_edges == 0)
+
+    mode = orient_normals
+    if mode == "auto" and kept:
+        if model.is_closed:
+            v = signed_volume(triangles)
+            flip_all = v > 0.0
+            model.volume = abs(v)
+            note = (f"閉じた形状（開いた辺 0 本）/ 符号付き体積 {v:+.4f} m³ → "
+                    + ("外向きだったので全反転" if flip_all else "すでに内向き"))
         else:
-            note = f"符号付き体積 {v:+.4f} m³ < 0 → すでに内向き"
-        if abs(v) < 1.0e-9:
-            note += "（体積がほぼ 0。閉じていないか巻き順が不揃いの可能性あり）"
-    elif orient_normals in ("inward", "outward"):
-        center = np.mean([f[1] for f in kept] + [f[2] for f in kept] + [f[3] for f in kept], axis=0)
-        note = f"重心 {np.round(center, 3).tolist()} を基準に面ごとに {orient_normals} へ強制（凸形状前提）"
+            note = (f"開いた形状（開いた辺 {model.open_edges} 本）→ "
+                    f"CAD の巻き順をそのまま使う（反転しない）。"
+                    f"\n  ※期待した反射音が出ない場合、その面の法線が音源と反対を向いている。"
+                    f" orient_normals='flip'（全反転）または "
+                    f"orient_normals='toward', reference_point=音源位置 を試すこと")
+    elif mode == "flip":
+        flip_all = True
+        note = "全反転（元コード backtrace.f90 276行 ynnmrev='y' と同じ）"
+    elif mode == "cad":
+        note = "CAD の巻き順をそのまま使う"
+    elif mode in ("toward", "away"):
+        # reference_point の指定がなければ、DXF の src レイヤの音源をそのまま基準にする
+        # （POINT はこの時点で読み終わっているので使える）
+        if reference_point is None:
+            if not model.source_points:
+                raise ValueError(
+                    f"orient_normals='{mode}' には reference_point が必要です。"
+                    f"（通常は音源位置。DXF に src レイヤの POINT があれば省略できます）")
+            reference_point = model.source_points[0]
+        pivot = np.asarray(reference_point, dtype=float)
+        want_toward = (mode == "toward")
+        note = (f"基準点 {np.round(pivot, 3).tolist()} に対して面ごとに "
+                f"{'向ける' if want_toward else '背ける'}"
+                f"（開いた形状の反射面に使う）")
+    elif mode in ("inward", "outward"):
+        if kept:
+            pivot = np.mean(np.concatenate(
+                [np.array([f[1], f[2], f[3]]) for f in kept]), axis=0)
+        want_toward = (mode == "inward")
+        note = (f"重心 {np.round(pivot, 3).tolist()} を基準に面ごとに {mode} へ強制"
+                f"（凸形状前提）")
+    else:
+        raise ValueError(f"orient_normals に未知の値: {orient_normals!r}"
+                         f"（'auto'/'cad'/'flip'/'toward'/'away'/'inward'/'outward'）")
 
     for layer, x1, x2, x3, n in kept:
-        if orient_normals in ("inward", "outward"):
-            to_center = center - x1
-            facing_in = np.dot(n, to_center) > 0
-            want_in = (orient_normals == "inward")
-            if facing_in != want_in:
+        if pivot is not None:
+            facing_pivot = np.dot(n, pivot - x1) > 0
+            if facing_pivot != want_toward:
                 n = -n
-        elif flip:
+        elif flip_all:
             n = -n
         absorption = _resolve_absorption(layer, absorption_table, default_absorption,
                                          band_number, unresolved)
@@ -465,15 +554,15 @@ def read_model(file_name, unit=None, absorption_table=None, default_absorption=N
 
 
 def read(file_name, unit=None, absorption_table=None, default_absorption=None,
-         orient_normals="auto", band_number=6, verbose=True):
+         orient_normals="auto", reference_point=None, band_number=6, verbose=True):
     """メッシュのリストだけを返す簡易版（procedure.py から使う）。
 
-    音源・受音点も欲しい場合は read_model() を使う。
+    音源・受音点や、閉じているかの判定結果も欲しい場合は read_model() を使う。
     """
     return read_model(file_name, unit=unit, absorption_table=absorption_table,
                       default_absorption=default_absorption,
-                      orient_normals=orient_normals, band_number=band_number,
-                      verbose=verbose).mesh
+                      orient_normals=orient_normals, reference_point=reference_point,
+                      band_number=band_number, verbose=verbose).mesh
 
 
 if __name__ == "__main__":
