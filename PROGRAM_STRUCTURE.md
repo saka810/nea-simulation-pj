@@ -200,11 +200,13 @@ open_edge_count(triangles, tol=1e-9) -> int # 開いた辺の本数。0 なら�
 winding_is_consistent(triangles) -> bool    # 巻き順の一貫性
 mesh_shells(triangles) -> list[list[int]]   # 辺の共有で連結成分に分割
 analyse_shells(triangles) -> list[dict]     # シェルごとの 閉/開・体積・法線の向き・外殻か
+triangulate_polygon(points) -> (tris, info) # 多角形→三角形。凹み対応・ねじれ検出
+quad_warp(points) -> float                  # 四角形のねじれ量（平面からのずれ÷代表辺長）
 ```
 
 `DxfModel` の属性: `mesh` / `source_points` / `receiver_points` / `unit_scale` /
 `unit_source` / `layer_counts` / `skipped` / `extents` / `is_closed` / `open_edges` /
-`volume` / `shells` / `winding_consistent`、および `summary()`。
+`volume` / `shells` / `winding_consistent` / `polygon_notes`、および `summary()`。
 
 **パーサは自前**（`ezdxf` などの外部依存なし）。ASCII DXF は「グループコード / 値」が
 1 行ずつ交互に並ぶだけなので、2 行ずつ読んで `(code, value)` のタプル列にすれば済む。
@@ -221,7 +223,19 @@ analyse_shells(triangles) -> list[dict]     # シェルごとの 閉/開・体�
 | `POINT` | レイヤが `src` 系 | 音源座標 |
 | `POINT` | レイヤが `rec` 系 | 受音点座標 |
 
-四角形以上の面は扇状（fan）に三角形分割する。縮退面（`|n| < 1e-12`）は捨てて件数を記録。
+**多角形 → 三角形の分割**（`triangulate_polygon()`）。CAD 側で三角形に割る必要はない。
+DXF の面レコード（`71`〜`74`）と 3DFACE はどちらも**最大 4 頂点**なので、
+実質「四角形 → 三角形 2 枚」だけを正しく処理すればよい。
+
+- **凹んだ四角形**: 素朴な扇状分割だと多角形の外に三角形ができる。
+  `_diagonal_is_inside()` で**内側を通る対角線を選ぶ**（他の 2 頂点が対角線の両側に分かれるか）。
+  片方が対角線上（符号 0）の退化ケースも内側扱いにする（面積ゼロの三角形は後段で捨てられる）
+- **ねじれた四角形**: `quad_warp()` で平面からのずれを測り、`WARP_TOLERANCE` を超えたら警告。
+  どの対角線で切るかで形が変わるため、CAD 側で直してもらう
+- **5 角形以上**: DXF では出ないが保険として耳刈り法で分割
+- 縮退面（`|n| < 1e-12`）は `face_normal()` が None を返すので捨てて件数を記録
+
+結果は `DxfModel.polygon_notes`（ねじれた四角形の枚数・最大ねじれ量・対角線変更の枚数）に入る。
 
 **単位換算**: ヘッダ `$INSUNITS` のコード（4=mm, 6=m など、`INSUNITS_TO_METER` に 18 種）から
 m へ換算する。`unit='mm'` / `unit=0.001` のような明示指定が優先される

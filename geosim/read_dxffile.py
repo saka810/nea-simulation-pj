@@ -110,6 +110,8 @@ class DxfModel:
         self.volume = None
         self.shells = []
         self.winding_consistent = True
+        self.polygon_notes = {"ねじれた四角形": 0, "最大ねじれ量": 0.0,
+                             "凹み対応で対角線を変更": 0}
 
     def summary(self):
         lines = [
@@ -141,6 +143,18 @@ class DxfModel:
                              f"（開いた辺{s['open_edges']}本）法線=CAD のまま 寸法{size}")
         if not self.is_closed:
             lines.append("  ※開いた形状（一面反射など）も計算できます")
+
+        if self.polygon_notes["凹み対応で対角線を変更"]:
+            lines.append(f"三角形分割: 凹んだ四角形 "
+                         f"{self.polygon_notes['凹み対応で対角線を変更']} 枚を"
+                         f"内側を通る対角線で分割しました")
+        if self.polygon_notes["ねじれた四角形"]:
+            lines.append(
+                f"★三角形分割: **ねじれた四角形 {self.polygon_notes['ねじれた四角形']} 枚**"
+                f"（4 点が同一平面上にない。最大ねじれ量 "
+                f"{self.polygon_notes['最大ねじれ量']:.3e}）。"
+                f"\n  どの対角線で切るかで形が変わるので、CAD 側で平面に直すか"
+                f"三角形で作り直してください")
         if any(self.skipped.values()):
             lines.append(f"読み飛ばし: {self.skipped}")
         return "\n".join(lines)
@@ -290,6 +304,22 @@ def read_absorption_csv(file_name, band_number=6):
     return table
 
 
+def _add_triangles(model, faces, layer, points):
+    """多角形を三角形に分割して faces に追加し、ねじれ等を model 側に記録する。"""
+    tris, info = triangulate_polygon(points)
+    if not tris:
+        model.skipped["縮退面"] += 1
+        return
+    if info["warp"] > WARP_TOLERANCE:
+        model.polygon_notes["ねじれた四角形"] += 1
+        model.polygon_notes["最大ねじれ量"] = max(model.polygon_notes["最大ねじれ量"],
+                                                 info["warp"])
+    if info["diagonal_changed"]:
+        model.polygon_notes["凹み対応で対角線を変更"] += 1
+    for t in tris:
+        faces.append((layer, t[0], t[1], t[2]))
+
+
 def _resolve_absorption(layer, absorption_table, default_absorption, band_number, unresolved):
     if absorption_table and layer in absorption_table:
         return absorption_table[layer]
@@ -335,6 +365,122 @@ def signed_volume(triangles):
     for x1, x2, x3 in triangles:
         total += float(np.dot(x1, np.cross(x2, x3)))
     return total / 6.0
+
+
+# ------------------------------------------------------------------------------
+# 多角形 → 三角形への分割
+# ------------------------------------------------------------------------------
+#
+# CAD 側で三角形を手作りする必要はない。四角形で描いてよく、ここで 2 枚に分割する。
+#
+# そもそも DXF から入ってくる面は最大 4 頂点しかない：
+#   ・POLYLINE ポリフェイスメッシュの面レコードは頂点番号がグループコード 71〜74 の 4 つ
+#   ・3DFACE も 4 隅まで
+# したがって 5 角形以上は考えなくてよい（下のコードは保険として一般の n 角形も扱う）。
+#
+# 注意すべきは 2 つだけ：
+#   ・ねじれた四角形（4 点が同一平面上にない）… どの対角線で切るかで形が変わる。警告を出す
+#   ・凹んだ四角形                            … 単純な扇状分割だと多角形の外に三角形ができる。
+#                                              内側を通る対角線を選んで対処する
+
+WARP_TOLERANCE = 1.0e-6      # 平面からのずれ / 代表辺長 がこれを超えたら「ねじれ」とみなす
+
+
+def _dedupe_consecutive(points, tol=1.0e-12):
+    """連続する重複頂点を落とす（3DFACE が三角形を表すときに 4 点目を 3 点目と同じにする等）。"""
+    out = []
+    for p in points:
+        if not out or not np.allclose(out[-1], p, atol=tol):
+            out.append(p)
+    if len(out) > 1 and np.allclose(out[0], out[-1], atol=tol):
+        out.pop()
+    return out
+
+
+def quad_warp(points):
+    """四角形のねじれ具合（平面からのずれ ÷ 代表辺長）を返す。0 なら完全に平面。"""
+    p0, p1, p2, p3 = [np.asarray(p, dtype=float) for p in points[:4]]
+    n = np.cross(p1 - p0, p2 - p0)
+    length = np.linalg.norm(n)
+    scale = max(np.linalg.norm(p1 - p0), np.linalg.norm(p2 - p0),
+                np.linalg.norm(p3 - p0), 1.0e-30)
+    if length < DEGENERATE_EPS:
+        return 0.0
+    return abs(float(np.dot(n / length, p3 - p0))) / scale
+
+
+def _diagonal_is_inside(points, i, j, normal):
+    """対角線 points[i]-points[j] が多角形の内側を通るか。
+
+    他の 2 頂点が対角線の両側に分かれていれば内側を通る。
+    どちらかが対角線上に乗っている（符号 0）場合も内側扱いにする
+    ― その側の三角形が面積ゼロになるだけで、残る三角形が多角形を正しく覆う
+    （面積ゼロの三角形は後段の face_normal() で縮退面として捨てられる）。
+    """
+    a, b = np.asarray(points[i], dtype=float), np.asarray(points[j], dtype=float)
+    others = [k for k in range(len(points)) if k not in (i, j)]
+    signs = []
+    for k in others:
+        c = np.asarray(points[k], dtype=float)
+        signs.append(float(np.dot(np.cross(b - a, c - a), normal)))
+    if all(abs(s) < DEGENERATE_EPS for s in signs):
+        return False        # 全頂点が一直線＝退化した多角形
+    return signs[0] * signs[1] <= 0.0
+
+
+def triangulate_polygon(points):
+    """多角形（同一平面・単純多角形を想定）を三角形のリストに分割する。
+
+    戻り値: (三角形のリスト, 情報dict)
+      情報dict のキー: 'warp'（ねじれ量。四角形のみ）, 'diagonal_changed'（対角線を変えたか）
+    """
+    pts = _dedupe_consecutive(list(points))
+    info = {"warp": 0.0, "diagonal_changed": False}
+
+    if len(pts) < 3:
+        return [], info
+    if len(pts) == 3:
+        return [(pts[0], pts[1], pts[2])], info
+
+    # 多角形の代表法線（面積重み付き。凹んでいても向きが安定する）
+    normal = np.zeros(3)
+    for k in range(len(pts)):
+        normal += np.cross(np.asarray(pts[k], dtype=float),
+                           np.asarray(pts[(k + 1) % len(pts)], dtype=float))
+    if np.linalg.norm(normal) < DEGENERATE_EPS:
+        return [], info
+    normal = normal / np.linalg.norm(normal)
+
+    if len(pts) == 4:
+        info["warp"] = quad_warp(pts)
+        # 内側を通る対角線を選ぶ。0-2 が使えなければ 1-3 を使う（凹んだ四角形への対処）
+        if _diagonal_is_inside(pts, 0, 2, normal):
+            tris = [(pts[0], pts[1], pts[2]), (pts[0], pts[2], pts[3])]
+        else:
+            info["diagonal_changed"] = True
+            tris = [(pts[1], pts[2], pts[3]), (pts[1], pts[3], pts[0])]
+        return tris, info
+
+    # 5 角形以上（DXF の面レコード・3DFACE では出ない。保険）
+    # 耳刈り法：内側を通る対角線を持つ頂点から三角形を切り落としていく
+    ring = list(range(len(pts)))
+    tris = []
+    guard = 0
+    while len(ring) > 3 and guard < 4 * len(pts):
+        guard += 1
+        for m in range(len(ring)):
+            i, j, k = ring[m - 1], ring[m], ring[(m + 1) % len(ring)]
+            sub = [pts[idx] for idx in ring]
+            mi, mk = ring.index(i), ring.index(k)
+            if _diagonal_is_inside(sub, mi, mk, normal) if len(sub) > 3 else True:
+                tris.append((pts[i], pts[j], pts[k]))
+                ring.remove(j)
+                break
+        else:
+            break
+    if len(ring) == 3:
+        tris.append((pts[ring[0]], pts[ring[1]], pts[ring[2]]))
+    return tris, info
 
 
 def _point_key(point, digits):
@@ -547,20 +693,15 @@ def read_model(file_name, unit=None, absorption_table=None, default_absorption=N
                     model.skipped["面レコード不正"] += 1
                     continue
                 pts = [coords[k - 1] for k in idx]
-                # 四角形以上は扇状に三角形分割する
-                for k in range(1, len(pts) - 1):
-                    faces.append((layer, pts[0], pts[k], pts[k + 1]))
+                _add_triangles(model, faces, layer, pts)
             continue
 
         if etype == "3DFACE":
             layer = _tag(etags, 8, "0")
             pts = [np.array([_float(etags, 10 + k), _float(etags, 20 + k),
                              _float(etags, 30 + k)]) * scale for k in range(4)]
-            # 4 点目が 3 点目と同じなら三角形
-            if np.allclose(pts[3], pts[2]):
-                pts = pts[:3]
-            for k in range(1, len(pts) - 1):
-                faces.append((layer, pts[0], pts[k], pts[k + 1]))
+            # 三角形を表すときは 4 点目が 3 点目と同じになる（_add_triangles 側で重複を落とす）
+            _add_triangles(model, faces, layer, pts)
             i += 1
             continue
 
