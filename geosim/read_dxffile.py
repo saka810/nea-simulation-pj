@@ -89,9 +89,11 @@ class DxfModel:
         layer_counts    dict        レイヤ名 → 三角形の枚数
         skipped         dict        読み飛ばした要素の内訳
         extents         (2,3)       バウンディングボックス（m）
-        is_closed       bool        閉じた形状か（開いた辺が 0 本か）
+        is_closed       bool        全体が閉じているか（開いた辺が 0 本か）
         open_edges      int         開いた辺（三角形1枚にしか属さない辺）の本数
-        volume          float|None  閉じている場合の室容積 [m³]
+        volume          float|None  全体が閉じている場合の体積 [m³]
+        shells          list[dict]  シェル（連結成分）ごとの診断。analyse_shells() を参照
+        winding_consistent bool     頂点の巻き順が一貫しているか
     """
 
     def __init__(self):
@@ -106,6 +108,8 @@ class DxfModel:
         self.is_closed = False
         self.open_edges = 0
         self.volume = None
+        self.shells = []
+        self.winding_consistent = True
 
     def summary(self):
         lines = [
@@ -115,16 +119,28 @@ class DxfModel:
             f"音源: {[np.round(p, 4).tolist() for p in self.source_points]}",
             f"受音点: {[np.round(p, 4).tolist() for p in self.receiver_points]}",
         ]
-        if self.is_closed:
-            lines.append(f"形状: 閉じている（室容積 {self.volume:.4f} m³）"
-                         if self.volume is not None else "形状: 閉じている")
-        else:
-            lines.append(f"形状: 開いている（開いた辺 {self.open_edges} 本）"
-                         f" ※一面反射などの開いた形状も計算可能")
         if self.extents is not None:
             size = self.extents[1] - self.extents[0]
             lines.append(f"寸法: {np.round(size, 4).tolist()} m "
                          f"(min={np.round(self.extents[0], 4).tolist()})")
+
+        # シェルごとの診断。法線の向きの正しさはここを見て判断する
+        lines.append(f"シェル（連結した面のかたまり）: {len(self.shells)} 個"
+                     + ("" if self.winding_consistent
+                        else "  ★巻き順が一貫していません（隣り合う面で法線が反対を向いている）"))
+        for k, s in enumerate(self.shells):
+            tag = "外殻" if s["is_outer"] else "内側"
+            size = np.round(s["bbox"][1] - s["bbox"][0], 3).tolist()
+            if s["closed"]:
+                want = "inward" if s["is_outer"] else "outward"
+                mark = "OK" if s["normals"] == want else f"★要確認（{want} が空気側）"
+                lines.append(f"  シェル{k} [{tag}] 面{len(s['faces'])}枚 閉 "
+                             f"体積{s['volume']:.4f}m³ 法線={s['normals']} {mark} 寸法{size}")
+            else:
+                lines.append(f"  シェル{k} [{tag}] 面{len(s['faces'])}枚 開"
+                             f"（開いた辺{s['open_edges']}本）法線=CAD のまま 寸法{size}")
+        if not self.is_closed:
+            lines.append("  ※開いた形状（一面反射など）も計算できます")
         if any(self.skipped.values()):
             lines.append(f"読み飛ばし: {self.skipped}")
         return "\n".join(lines)
@@ -321,6 +337,24 @@ def signed_volume(triangles):
     return total / 6.0
 
 
+def _point_key(point, digits):
+    return tuple(np.round(np.asarray(point, dtype=float), digits))
+
+
+def _edge_map(triangles, tol=1.0e-9):
+    """無向辺 → その辺を持つ面インデックスのリスト、および有向辺の出現回数を返す。"""
+    digits = int(round(-np.log10(tol)))
+    undirected = {}
+    directed = {}
+    for j, (x1, x2, x3) in enumerate(triangles):
+        for a, b in ((x1, x2), (x2, x3), (x3, x1)):
+            ka, kb = _point_key(a, digits), _point_key(b, digits)
+            directed[(ka, kb)] = directed.get((ka, kb), 0) + 1
+            edge = (ka, kb) if ka <= kb else (kb, ka)
+            undirected.setdefault(edge, []).append(j)
+    return undirected, directed
+
+
 def open_edge_count(triangles, tol=1.0e-9):
     """開いた辺（三角形 1 枚にしか属さない辺）の本数を返す。0 なら閉じている。
 
@@ -328,18 +362,105 @@ def open_edge_count(triangles, tol=1.0e-9):
     この本数を数えるだけで「閉じているか」が判定できる。
     一面だけの壁のような開いた形状では、外周の辺が 1 回しか現れないので 0 にならない。
     """
-    digits = int(round(-np.log10(tol)))
+    undirected, _ = _edge_map(triangles, tol)
+    return sum(1 for faces in undirected.values() if len(faces) != 2)
 
-    def key(point):
-        return tuple(np.round(np.asarray(point, dtype=float), digits))
 
-    counts = {}
-    for x1, x2, x3 in triangles:
-        for a, b in ((x1, x2), (x2, x3), (x3, x1)):
-            ka, kb = key(a), key(b)
-            edge = (ka, kb) if ka <= kb else (kb, ka)
-            counts[edge] = counts.get(edge, 0) + 1
-    return sum(1 for c in counts.values() if c != 2)
+def winding_is_consistent(triangles, tol=1.0e-9):
+    """頂点の巻き順が一貫しているかを返す。
+
+    巻き順が一貫した面同士が辺を共有するとき、その辺は互いに逆向きに現れる
+    （面 A が a→b なら面 B は b→a）。同じ向きで 2 回現れる辺があれば、
+    その 2 面の巻き順は裏返っている＝法線が反対を向いている。
+    """
+    _, directed = _edge_map(triangles, tol)
+    return not any(count > 1 for count in directed.values())
+
+
+def mesh_shells(triangles, tol=1.0e-9):
+    """辺の共有で連結成分（シェル）に分割し、面インデックスのリストを返す。
+
+    室の外殻と、室内に置いた厚みのある家具などは別々のシェルになる。
+    法線の望ましい向きがシェルごとに違う（外殻は内向き、家具は外向き＝空気側）ので、
+    診断や自動補正はシェル単位で行う必要がある。
+    """
+    undirected, _ = _edge_map(triangles, tol)
+    neighbours = {j: set() for j in range(len(triangles))}
+    for faces in undirected.values():
+        for a in faces:
+            for b in faces:
+                if a != b:
+                    neighbours[a].add(b)
+
+    seen = set()
+    shells = []
+    for start in range(len(triangles)):
+        if start in seen:
+            continue
+        stack = [start]
+        seen.add(start)
+        group = []
+        while stack:
+            j = stack.pop()
+            group.append(j)
+            for k in neighbours[j]:
+                if k not in seen:
+                    seen.add(k)
+                    stack.append(k)
+        shells.append(sorted(group))
+    return shells
+
+
+def _bbox(points):
+    p = np.asarray(points, dtype=float)
+    return p.min(axis=0), p.max(axis=0)
+
+
+def _bbox_contains(outer, inner, eps=1.0e-9):
+    return bool(np.all(outer[0] - eps <= inner[0]) and np.all(inner[1] <= outer[1] + eps))
+
+
+def analyse_shells(triangles, tol=1.0e-9):
+    """シェルごとに閉/開・体積・法線の向き・外殻かどうかを調べる。
+
+    戻り値: list[dict]  キーは
+        faces      … 面インデックスのリスト
+        closed     … そのシェルが閉じているか
+        open_edges … 開いた辺の本数
+        volume     … 閉じている場合の体積 [m³]（開いていれば None）
+        normals    … 'inward' / 'outward' / 'unknown'（そのシェル自身から見た向き）
+        is_outer   … 他のすべてのシェルを内包する外殻か
+    """
+    shells = mesh_shells(triangles, tol)
+    result = []
+    for faces in shells:
+        tris = [triangles[j] for j in faces]
+        oe = open_edge_count(tris, tol)
+        closed = (oe == 0)
+        vol = signed_volume(tris) if closed else None
+        if vol is None:
+            normals = "unknown"
+        elif vol > 0.0:
+            normals = "outward"
+        else:
+            normals = "inward"
+        pts = np.concatenate([np.array(t) for t in tris])
+        result.append({"faces": faces, "closed": closed, "open_edges": oe,
+                       "volume": None if vol is None else abs(vol),
+                       "normals": normals, "is_outer": False, "bbox": _bbox(pts)})
+
+    # 他のすべてを内包するシェルを外殻とする
+    for i, s in enumerate(result):
+        if all(_bbox_contains(s["bbox"], o["bbox"]) for k, o in enumerate(result) if k != i):
+            s["is_outer"] = True
+            break
+    else:
+        if result:
+            # 内包関係がはっきりしなければ、いちばん大きいものを外殻とみなす
+            biggest = max(range(len(result)),
+                          key=lambda k: float(np.prod(result[k]["bbox"][1] - result[k]["bbox"][0])))
+            result[biggest]["is_outer"] = True
+    return result
 
 
 # ------------------------------------------------------------------------------
@@ -347,7 +468,7 @@ def open_edge_count(triangles, tol=1.0e-9):
 # ------------------------------------------------------------------------------
 
 def read_model(file_name, unit=None, absorption_table=None, default_absorption=None,
-               orient_normals="auto", reference_point=None, band_number=6,
+               orient_normals="cad", reference_point=None, band_number=6,
                source_layers=DEFAULT_SOURCE_LAYERS,
                receiver_layers=DEFAULT_RECEIVER_LAYERS,
                verbose=True):
@@ -356,25 +477,28 @@ def read_model(file_name, unit=None, absorption_table=None, default_absorption=N
     **閉じた室でも、一面だけの壁のような開いた形状でも読める**（音線追跡側も
     開いた形状に対応している。当たる壁がなくなった音線はそこで打ち切られる）。
 
+    【法線の向きの大原則】法線は「音が通る空気側」を向く。この正解を持っているのは
+    CAD モデル自身なので、既定は 'cad'（モデルを信じる）。
+      ・両面で反射させたい物体（机など）は CAD 側で厚みを持たせる
+        → 上面は上向き法線、下面は下向き法線となり、どちらも空気側を向く
+      ・片面だけで良ければ、反射させたい側に法線を向けてモデルを作る
+    法線を「音源方向へ向ける」ような補正はしない（凸凹の壁や宙に浮いた家具で破綻する）。
+
     引数:
         unit              None なら $INSUNITS から自動判定。'mm' / 'm' などで明示指定も可
         absorption_table  {レイヤ名: ndarray} または吸音率 CSV のパス
         default_absorption テーブルに無いレイヤに使う値（None なら 0.1 で警告）
-        orient_normals    法線の向きの決め方。開いた形状では**これが結果を左右する**
-                          （法線が音源と反対を向いている面は一切反射しない）
-          'auto'（既定）… 閉じているかを開いた辺の本数で判定し、
-                          閉じていれば符号付き体積で内向きに揃える。
-                          **開いていれば何もしない（CAD の巻き順のまま）**
-          'cad'         … CAD の巻き順をそのまま信じる
-          'flip'        … 全反転（元コード 276行 ynnmrev='y' に相当）
-          'toward'      … reference_point の側へ面ごとに向ける。
-                          **開いた反射面はこれ（reference_point に音源位置を渡す）**
-          'away'        … reference_point の反対側へ面ごとに向ける
-          'inward'      … 重心方向へ面ごとに向ける（凸の閉形状のみ）
-          'outward'     … 重心の逆へ（凸の閉形状のみ）
-        reference_point   'toward' / 'away' のときの基準点。通常は音源位置
+        orient_normals    法線の向きの扱い
+          'cad'（既定）… CAD の巻き順をそのまま使う
+          'flip'       … 全反転（元コード 276行 ynnmrev='y' に相当）
+          'shells'     … シェル（連結成分）単位で空気側へ揃える。
+                         外殻は内向き、内側の物体は外向き。
+                         巻き順が一貫していない場合は補正を中止して 'cad' と同じ挙動になる
+        reference_point   使わない（旧 'toward' 用。渡すと警告する）
         source_layers     音源として扱う POINT のレイヤ名
         receiver_layers   受音点として扱う POINT のレイヤ名
+
+    どの向きになっているかは戻り値の `summary()` のシェル診断で確認できる。
     """
     if isinstance(absorption_table, str):
         absorption_table = read_absorption_csv(absorption_table, band_number)
@@ -467,69 +591,67 @@ def read_model(file_name, unit=None, absorption_table=None, default_absorption=N
         kept.append((layer, x1, x2, x3, n))
 
     # --- 法線の向きを決める ---
-    # ★閉じた室にも、一面だけの壁のような開いた形状にも対応する必要がある。
-    #   開いた形状では符号付き体積が意味を持たないので、'auto' は閉じているかを先に判定する。
-    #   なお開いた形状では「法線をどちら向きにするか」が結果を決める
-    #   （法線が音源と反対を向いていると、その面では一切反射しなくなる）。
+    # ★大原則：法線は「音が通る空気側」を向く。この向きの正解を持っているのは CAD モデル自身。
+    #   したがって既定は 'cad'（モデルを信じる）。
+    #
+    #   ・両面で反射させたい物体（机など）は CAD 側で厚みを持たせる。
+    #     上面は上向き法線、下面は下向き法線となり、どちらも空気側を向く
+    #   ・片面だけで良ければ、反射させたい側に法線を向けてモデルを作る
+    #
+    #   「面ごとに音源へ向ける」ようなことをしてはいけない。凸凹の壁や宙に浮いた家具で
+    #   向きが破綻し、衝突判定がおかしくなる。
     triangles = [(f[1], f[2], f[3]) for f in kept]
     flip_all = False
-    pivot = None            # 'toward'/'away'/'inward'/'outward' の基準点
-    want_toward = True
+    per_face_flip = None    # 'shells' モードで反転する面インデックスの集合
     note = ""
 
     if kept:
         model.open_edges = open_edge_count(triangles)
         model.is_closed = (model.open_edges == 0)
+        model.winding_consistent = winding_is_consistent(triangles)
+        model.shells = analyse_shells(triangles)
+        if model.is_closed:
+            model.volume = abs(signed_volume(triangles))
 
     mode = orient_normals
-    if mode == "auto" and kept:
-        if model.is_closed:
-            v = signed_volume(triangles)
-            flip_all = v > 0.0
-            model.volume = abs(v)
-            note = (f"閉じた形状（開いた辺 0 本）/ 符号付き体積 {v:+.4f} m³ → "
-                    + ("外向きだったので全反転" if flip_all else "すでに内向き"))
-        else:
-            note = (f"開いた形状（開いた辺 {model.open_edges} 本）→ "
-                    f"CAD の巻き順をそのまま使う（反転しない）。"
-                    f"\n  ※期待した反射音が出ない場合、その面の法線が音源と反対を向いている。"
-                    f" orient_normals='flip'（全反転）または "
-                    f"orient_normals='toward', reference_point=音源位置 を試すこと")
+    if mode == "cad":
+        note = "CAD の巻き順をそのまま使う（既定。モデルが法線の正解を持っている前提）"
     elif mode == "flip":
         flip_all = True
         note = "全反転（元コード backtrace.f90 276行 ynnmrev='y' と同じ）"
-    elif mode == "cad":
-        note = "CAD の巻き順をそのまま使う"
-    elif mode in ("toward", "away"):
-        # reference_point の指定がなければ、DXF の src レイヤの音源をそのまま基準にする
-        # （POINT はこの時点で読み終わっているので使える）
-        if reference_point is None:
-            if not model.source_points:
-                raise ValueError(
-                    f"orient_normals='{mode}' には reference_point が必要です。"
-                    f"（通常は音源位置。DXF に src レイヤの POINT があれば省略できます）")
-            reference_point = model.source_points[0]
-        pivot = np.asarray(reference_point, dtype=float)
-        want_toward = (mode == "toward")
-        note = (f"基準点 {np.round(pivot, 3).tolist()} に対して面ごとに "
-                f"{'向ける' if want_toward else '背ける'}"
-                f"（開いた形状の反射面に使う）")
-    elif mode in ("inward", "outward"):
-        if kept:
-            pivot = np.mean(np.concatenate(
-                [np.array([f[1], f[2], f[3]]) for f in kept]), axis=0)
-        want_toward = (mode == "inward")
-        note = (f"重心 {np.round(pivot, 3).tolist()} を基準に面ごとに {mode} へ強制"
-                f"（凸形状前提）")
+    elif mode == "shells":
+        # シェル（連結成分）単位で「空気側」に揃える。
+        # 外殻は内向き、内側にある物体（家具など）は外向きが空気側になる。
+        if not model.winding_consistent:
+            note = ("巻き順が一貫していないため補正を中止し、CAD のまま使う"
+                    "（同じ向きで 2 回現れる辺がある＝隣り合う面の法線が反対を向いている）")
+        else:
+            per_face_flip = set()
+            details = []
+            for k, shell in enumerate(model.shells):
+                tag = "外殻" if shell["is_outer"] else "内側"
+                if not shell["closed"]:
+                    details.append(f"シェル{k}({tag}, 開): 補正せず")
+                    continue
+                want = "inward" if shell["is_outer"] else "outward"
+                if shell["normals"] != want:
+                    per_face_flip.update(shell["faces"])
+                    details.append(f"シェル{k}({tag}): {shell['normals']}→{want} 反転")
+                else:
+                    details.append(f"シェル{k}({tag}): {shell['normals']} のまま")
+            note = "シェル単位で空気側へ揃える / " + " , ".join(details)
     else:
         raise ValueError(f"orient_normals に未知の値: {orient_normals!r}"
-                         f"（'auto'/'cad'/'flip'/'toward'/'away'/'inward'/'outward'）")
+                         f"（使えるのは 'cad' / 'flip' / 'shells'）")
 
-    for layer, x1, x2, x3, n in kept:
-        if pivot is not None:
-            facing_pivot = np.dot(n, pivot - x1) > 0
-            if facing_pivot != want_toward:
-                n = -n
+    if reference_point is not None:
+        print("[read_dxffile] 警告: reference_point は使われません。"
+              "法線を音源方向に向ける方式は凸凹の壁や宙に浮いた家具で破綻するため廃止しました。"
+              "CAD 側で法線が空気側を向くようにモデルを作ってください。")
+
+    for j, (layer, x1, x2, x3, n) in enumerate(kept):
+        if per_face_flip is not None and j in per_face_flip:
+            n = -n
         elif flip_all:
             n = -n
         absorption = _resolve_absorption(layer, absorption_table, default_absorption,
@@ -554,10 +676,10 @@ def read_model(file_name, unit=None, absorption_table=None, default_absorption=N
 
 
 def read(file_name, unit=None, absorption_table=None, default_absorption=None,
-         orient_normals="auto", reference_point=None, band_number=6, verbose=True):
+         orient_normals="cad", reference_point=None, band_number=6, verbose=True):
     """メッシュのリストだけを返す簡易版（procedure.py から使う）。
 
-    音源・受音点や、閉じているかの判定結果も欲しい場合は read_model() を使う。
+    音源・受音点や、シェルごとの法線診断も欲しい場合は read_model() を使う。
     """
     return read_model(file_name, unit=unit, absorption_table=absorption_table,
                       default_absorption=default_absorption,

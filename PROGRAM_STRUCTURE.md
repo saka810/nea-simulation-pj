@@ -197,11 +197,14 @@ read_absorption_csv(file_name, band_number=6) -> dict[str, ndarray]
 face_normal(v1, v2, v3) -> ndarray | None   # 外積→正規化。縮退面なら None
 signed_volume(triangles) -> float           # 閉形状の法線の向き判定に使う
 open_edge_count(triangles, tol=1e-9) -> int # 開いた辺の本数。0 なら閉じている
+winding_is_consistent(triangles) -> bool    # 巻き順の一貫性
+mesh_shells(triangles) -> list[list[int]]   # 辺の共有で連結成分に分割
+analyse_shells(triangles) -> list[dict]     # シェルごとの 閉/開・体積・法線の向き・外殻か
 ```
 
 `DxfModel` の属性: `mesh` / `source_points` / `receiver_points` / `unit_scale` /
 `unit_source` / `layer_counts` / `skipped` / `extents` / `is_closed` / `open_edges` /
-`volume`、および `summary()`。
+`volume` / `shells` / `winding_consistent`、および `summary()`。
 
 **パーサは自前**（`ezdxf` などの外部依存なし）。ASCII DXF は「グループコード / 値」が
 1 行ずつ交互に並ぶだけなので、2 行ずつ読んで `(code, value)` のタプル列にすれば済む。
@@ -224,21 +227,33 @@ open_edge_count(triangles, tol=1e-9) -> int # 開いた辺の本数。0 なら�
 m へ換算する。`unit='mm'` / `unit=0.001` のような明示指定が優先される
 （`$INSUNITS=0` の unitless 対策）。
 
-**法線の向き**: 面は片側だけ反射する（`v·n < 0` のときのみ衝突と判定）ため、
-**閉じた室でも、一面だけの反射板のような開いた形状でも計算できる**。
-ただし開いた形状では向きが逆だとその面で一切反射しなくなるので、`orient_normals` で制御する。
+**法線の向き**: 面は片側だけ反射する（`v·n < 0` のときのみ衝突と判定）。したがって
+**法線は「音が通る空気側」を向く**のが作図ルール（室の外殻は内向き、室内の物体は外向き、
+両面反射させたいものは厚みを持たせる）。**この正解を持っているのは CAD モデル自身**なので、
+既定は `'cad'`（そのまま使う）。
+また面の片側性により**閉じた室でなくても計算できる**（一面反射の検証など）。
 
 | 値 | 挙動 |
 |---|---|
-| `'auto'`（既定） | `open_edge_count()` で閉/開を判定。**閉なら**符号付き体積 V=(1/6)Σx₁·(x₂×x₃) の符号で内向きに揃える（V>0 なら全反転。非凸でも正しい）。**開なら何もしない**（体積が無意味なので勝手に反転しない） |
-| `'cad'` | CAD の巻き順をそのまま信じる |
+| `'cad'`（既定） | CAD の巻き順をそのまま使う |
 | `'flip'` | 全反転。**元コード 276行 `ynnmrev='y'` に相当** |
-| `'toward'` / `'away'` | `reference_point`（省略時は DXF の `src`）の側／反対側へ面ごとに向ける。**開いた反射板はこれ** |
-| `'inward'` / `'outward'` | 面ごとに重心方向で強制（凸の閉形状限定） |
+| `'shells'` | シェル単位で空気側へ揃える（外殻は内向き、内側は外向き）。巻き順が一貫していなければ補正を中止 |
 
-閉/開の判定は**開いた辺（三角形 1 枚にしか属さない辺）の本数**で行う
-（`open_edge_count()`。閉じた多面体では全ての辺がちょうど 2 枚に共有される）。
-結果は `DxfModel.is_closed` / `.open_edges` / `.volume` に入り、`summary()` にも出る。
+⚠ かつてあった `'auto'` / `'toward'` / `'away'` / `'inward'` / `'outward'` は**廃止**（`ValueError`）。
+法線を音源方向や重心方向へ面ごとに向ける方式は、**凸凹の壁や宙に浮いた家具で破綻する**ため。
+
+**診断関数**（GUI から法線を調整するための土台。TODO G-8）:
+
+| 関数 | 内容 |
+|---|---|
+| `open_edge_count()` | 開いた辺（三角形 1 枚にしか属さない辺）の本数。0 なら閉じている |
+| `winding_is_consistent()` | 同じ有向辺が 2 回現れないかで巻き順の一貫性を判定 |
+| `mesh_shells()` | 辺の共有で連結成分（シェル）に分割 |
+| `analyse_shells()` | シェルごとに 閉/開・体積・法線の向き（inward/outward）・外殻かどうかを返す |
+| `signed_volume()` | 閉じたシェルの法線の向き判定に使う（V>0 で外向き） |
+
+結果は `DxfModel.shells` / `.winding_consistent` / `.is_closed` / `.open_edges` / `.volume`
+に入り、`summary()` がシェルごとに「OK」「★要確認（outward が空気側）」まで表示する。
 
 **吸音率**: レイヤ名を材料名として `absorption_table`（dict または CSV パス）と突き合わせる。
 未登録のレイヤは既定値（0.1）を使い、レイヤ名を列挙して警告する。

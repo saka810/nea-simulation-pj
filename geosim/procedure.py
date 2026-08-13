@@ -17,7 +17,7 @@ from ray_recorder import RayRecorder
 ### を元に（def process()内の順に記載）
 ### パルス列、または、インパルス応答（wavファイル）を保存する
 def process(soundsource_point, reciever_point, dxf_filename, sphere_radius, nref, soundray_number,
-            absorption_csv=None, unit=None, orient_normals="auto",
+            absorption_csv=None, unit=None, orient_normals="cad",
             raylog_filename=None, raylog_max_rays=2000):
     """
     閉じた室でも、一面だけの壁のような**開いた形状**でも計算できる
@@ -32,9 +32,10 @@ def process(soundsource_point, reciever_point, dxf_filename, sphere_radius, nref
     unit : None | str | float
         None なら DXF ヘッダの $INSUNITS から自動判定。'mm' / 'm' などで明示指定も可。
     orient_normals : str
-        法線の向きの決め方。既定 'auto' は閉じていれば内向きに揃え、開いていれば
-        CAD の巻き順のまま使う。開いた反射面で反射音が出ないときは 'flip' か
-        'toward'（音源側へ向ける）を試す。詳細は read_dxffile.read_model() を参照。
+        法線の向きの扱い。既定 'cad' は CAD の巻き順をそのまま使う
+        （法線が空気側を向くようにモデルを作るのは CAD 側の責任）。
+        'flip' で全反転、'shells' でシェル単位の自動補正。
+        詳細は read_dxffile.read_model() を参照。
     raylog_filename : str | None
         可視化用の音線軌跡を npz で保存するパス。None なら記録しない。
         出力①音線の可視化・②音粒子の可視化（動画）に使う。docs/出力・可視化方針.md 参照。
@@ -47,8 +48,7 @@ def process(soundsource_point, reciever_point, dxf_filename, sphere_radius, nref
     # 室形状・吸音率・音源・受音点をまとめて DXF から読む
     # 元コード132〜283行目に対応
     model = rd.read_model(dxf_filename, unit=unit, absorption_table=absorption_csv,
-                          orient_normals=orient_normals,
-                          reference_point=soundsource_point)
+                          orient_normals=orient_normals)
     mesh = model.mesh
 
     if soundsource_point is None:
