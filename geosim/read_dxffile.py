@@ -1,3 +1,4 @@
+import collections
 import csv
 import os
 
@@ -69,7 +70,9 @@ VERTEX_FLAG_POLYFACE_MESH = 64      # 3D ポリゴンメッシュ頂点
 VERTEX_FLAG_FACE_RECORD = 128       # ポリフェイスメッシュ頂点
 
 # POLYLINE の 70 フラグ
-POLYLINE_FLAG_POLYFACE_MESH = 64
+POLYLINE_FLAG_CLOSED = 1            # 閉じたポリライン
+POLYLINE_FLAG_3D = 8                # 3D ポリライン
+POLYLINE_FLAG_POLYFACE_MESH = 64    # ポリフェイスメッシュ
 
 DEGENERATE_EPS = 1.0e-12
 
@@ -103,7 +106,9 @@ class DxfModel:
         self.unit_scale = 1.0
         self.unit_source = ""
         self.layer_counts = {}
-        self.skipped = {"縮退面": 0, "非対応エンティティ": 0, "面レコード不正": 0}
+        self.skipped = {"縮退面": 0, "非対応エンティティ": collections.Counter(),
+                        "面レコード不正": 0}
+        self.face_sources = collections.Counter()
         self.extents = None
         self.is_closed = False
         self.open_edges = 0
@@ -111,7 +116,9 @@ class DxfModel:
         self.shells = []
         self.winding_consistent = True
         self.polygon_notes = {"ねじれた四角形": 0, "最大ねじれ量": 0.0,
-                             "凹み対応で対角線を変更": 0}
+                             "凹み対応で対角線を変更": 0,
+                             "耳刈り法で分割": 0, "分割に失敗": 0,
+                             "最大面積誤差": 0.0}
 
     def summary(self):
         lines = [
@@ -144,6 +151,16 @@ class DxfModel:
         if not self.is_closed:
             lines.append("  ※開いた形状（一面反射など）も計算できます")
 
+        if self.face_sources:
+            lines.append(f"面の元になったエンティティ: {dict(self.face_sources)}")
+        if self.polygon_notes["耳刈り法で分割"]:
+            lines.append(f"三角形分割: 5角形以上を {self.polygon_notes['耳刈り法で分割']} 枚"
+                         f"耳刈り法で分割（面積の相対誤差 最大 "
+                         f"{self.polygon_notes['最大面積誤差']:.2e}）")
+        if self.polygon_notes["分割に失敗"]:
+            lines.append(f"★三角形分割に失敗した多角形が "
+                         f"{self.polygon_notes['分割に失敗']} 枚あります"
+                         f"（自己交差しているか、同一平面上にない可能性）")
         if self.polygon_notes["凹み対応で対角線を変更"]:
             lines.append(f"三角形分割: 凹んだ四角形 "
                          f"{self.polygon_notes['凹み対応で対角線を変更']} 枚を"
@@ -155,8 +172,11 @@ class DxfModel:
                 f"{self.polygon_notes['最大ねじれ量']:.3e}）。"
                 f"\n  どの対角線で切るかで形が変わるので、CAD 側で平面に直すか"
                 f"三角形で作り直してください")
-        if any(self.skipped.values()):
-            lines.append(f"読み飛ばし: {self.skipped}")
+        skipped = {k: (dict(v) if isinstance(v, collections.Counter) else v)
+                   for k, v in self.skipped.items()
+                   if (len(v) if isinstance(v, collections.Counter) else v)}
+        if skipped:
+            lines.append(f"読み飛ばし: {skipped}")
         return "\n".join(lines)
 
 
@@ -242,6 +262,11 @@ def _int(entity_tags, code, default=0):
     return default if v is None else int(float(v))
 
 
+def _tags_all(entity_tags, code):
+    """同じグループコードが複数回現れるもの（LWPOLYLINE の頂点など）を全部返す。"""
+    return [v for c, v in entity_tags if c == code]
+
+
 # ------------------------------------------------------------------------------
 # 単位
 # ------------------------------------------------------------------------------
@@ -280,27 +305,70 @@ def resolve_unit_scale(tags, unit=None):
 # ------------------------------------------------------------------------------
 
 def read_absorption_csv(file_name, band_number=6):
-    """吸音率 CSV を読んで {材料名: ndarray(band_number,)} を返す。
+    """吸音率 CSV を読んで {キー: ndarray(band_number,)} を返す。
 
-    想定フォーマット（1 行目がヘッダでもよい。数値に変換できなければヘッダとみなす）:
-        材料名, a1, a2, a3, a4, a5, a6
-        コンクリート, 0.02, 0.02, 0.03, 0.03, 0.04, 0.05
+    2 つの形式を自動判別する。
+
+    (A) 元コードの absorption.csv 形式（ID + 材料名 + 吸音率）:
+            1,Concrete wall,0.01,0.02,0.02,0.02,0.03,0.04
+        → **ID と材料名の両方をキーに登録する**ので、DXF のレイヤ名がどちらでも引ける
+    (B) 材料名 + 吸音率:
+            コンクリート,0.02,0.02,0.03,0.03,0.04,0.05
+
+    1 行目がヘッダでもよい（数値に変換できない行は読み飛ばす）。
+    行頭 # の行と空行も読み飛ばす。
     """
+    # 元コード付属の absorption.csv は CP932（Shift-JIS）なので、順に試してデコードする
+    last_error = None
+    text = None
+    for encoding in ("utf-8-sig", "cp932", "latin-1"):
+        try:
+            with open(file_name, encoding=encoding, newline="") as f:
+                text = f.read()
+            break
+        except UnicodeDecodeError as e:
+            last_error = e
+    if text is None:
+        raise last_error
+
     table = {}
-    with open(file_name, encoding="utf-8-sig", newline="") as f:
-        for row in csv.reader(f):
-            if not row or not row[0].strip() or row[0].lstrip().startswith("#"):
-                continue
-            name = row[0].strip()
+    for row in csv.reader(text.splitlines()):
+        if not row or not row[0].strip() or row[0].lstrip().startswith("#"):
+            continue
+        cells = [c.strip() for c in row]
+
+        # 2 列目が数値なら形式 (B)、数値でなければ形式 (A)（ID + 材料名）
+        second_is_number = False
+        if len(cells) >= 2:
             try:
-                values = [float(x) for x in row[1:1 + band_number]]
+                float(cells[1])
+                second_is_number = True
             except ValueError:
-                continue  # ヘッダ行
-            if len(values) < band_number:
-                print(f"[read_dxffile] 警告: 吸音率の列が {len(values)} 個しかありません "
-                      f"(材料 '{name}')。最後の値で埋めます。")
-                values += [values[-1]] * (band_number - len(values)) if values else [0.0] * band_number
-            table[name] = np.array(values[:band_number], dtype=float)
+                second_is_number = False
+
+        if second_is_number:
+            keys, values_raw = [cells[0]], cells[1:1 + band_number]
+        elif len(cells) >= 3:
+            keys, values_raw = [cells[0], cells[1]], cells[2:2 + band_number]
+        else:
+            continue
+
+        try:
+            values = [float(x) for x in values_raw]
+        except ValueError:
+            continue  # ヘッダ行
+
+        if not values:
+            continue
+        if len(values) < band_number:
+            print(f"[read_dxffile] 警告: 吸音率の列が {len(values)} 個しかありません "
+                  f"({keys[-1]!r})。最後の値で埋めます。")
+            values = values + [values[-1]] * (band_number - len(values))
+
+        arr = np.array(values[:band_number], dtype=float)
+        for key in keys:
+            if key:
+                table[key] = arr
     return table
 
 
@@ -316,6 +384,12 @@ def _add_triangles(model, faces, layer, points):
                                                  info["warp"])
     if info["diagonal_changed"]:
         model.polygon_notes["凹み対応で対角線を変更"] += 1
+    if info["ear_clipped"]:
+        model.polygon_notes["耳刈り法で分割"] += 1
+        model.polygon_notes["最大面積誤差"] = max(model.polygon_notes["最大面積誤差"],
+                                               info["area_error"])
+    if info["failed"]:
+        model.polygon_notes["分割に失敗"] += 1
     for t in tris:
         faces.append((layer, t[0], t[1], t[2]))
 
@@ -435,7 +509,8 @@ def triangulate_polygon(points):
       情報dict のキー: 'warp'（ねじれ量。四角形のみ）, 'diagonal_changed'（対角線を変えたか）
     """
     pts = _dedupe_consecutive(list(points))
-    info = {"warp": 0.0, "diagonal_changed": False}
+    info = {"warp": 0.0, "diagonal_changed": False,
+            "ear_clipped": False, "area_error": 0.0, "failed": False}
 
     if len(pts) < 3:
         return [], info
@@ -461,26 +536,83 @@ def triangulate_polygon(points):
             tris = [(pts[1], pts[2], pts[3]), (pts[1], pts[3], pts[0])]
         return tris, info
 
-    # 5 角形以上（DXF の面レコード・3DFACE では出ない。保険）
-    # 耳刈り法：内側を通る対角線を持つ頂点から三角形を切り落としていく
-    ring = list(range(len(pts)))
+    # 5 角形以上 … 耳刈り法（ear clipping）
+    # 「耳」＝ 凸な頂点で、その両隣を結んだ三角形の中に他の頂点が入らないもの。
+    # 耳を 1 つずつ切り落としていけば、凹んだ多角形でも正しく分割できる。
+    tris, ok = _ear_clip(pts, normal)
+    info["ear_clipped"] = True
+    info["area_error"] = _area_mismatch(pts, tris, normal)
+    if not ok or info["area_error"] > 1.0e-6:
+        info["failed"] = True
+    return tris, info
+
+
+def polygon_area(points, normal):
+    """多角形の面積（法線方向に射影した符号なし面積）。"""
+    total = np.zeros(3)
+    n = len(points)
+    for k in range(n):
+        total = total + np.cross(np.asarray(points[k], dtype=float),
+                                 np.asarray(points[(k + 1) % n], dtype=float))
+    return abs(float(np.dot(total, normal))) / 2.0
+
+
+def _area_mismatch(points, triangles, normal):
+    """三角形分割の面積が元の多角形と合っているかの相対誤差。
+
+    分割が正しければ 0 になる。自己交差した多角形などで破綻すると大きくなるので、
+    分割の妥当性チェックとしてそのまま使える。
+    """
+    truth = polygon_area(points, normal)
+    if truth < DEGENERATE_EPS:
+        return 0.0
+    got = sum(0.5 * float(np.linalg.norm(np.cross(np.asarray(t[1]) - np.asarray(t[0]),
+                                                  np.asarray(t[2]) - np.asarray(t[0]))))
+              for t in triangles)
+    return abs(got - truth) / truth
+
+
+def _is_convex_corner(prev_p, cur_p, next_p, normal):
+    return float(np.dot(np.cross(np.asarray(cur_p) - np.asarray(prev_p),
+                                 np.asarray(next_p) - np.asarray(cur_p)), normal)) > 0.0
+
+
+def _point_in_triangle(p, a, b, c, normal, eps=1.0e-12):
+    """点 p が三角形 abc の内部（辺上を含む）にあるか。すべて同一平面上を仮定。"""
+    p, a, b, c = [np.asarray(x, dtype=float) for x in (p, a, b, c)]
+    d1 = float(np.dot(np.cross(b - a, p - a), normal))
+    d2 = float(np.dot(np.cross(c - b, p - b), normal))
+    d3 = float(np.dot(np.cross(a - c, p - c), normal))
+    return (d1 >= -eps and d2 >= -eps and d3 >= -eps) or \
+           (d1 <= eps and d2 <= eps and d3 <= eps)
+
+
+def _ear_clip(points, normal):
+    """耳刈り法で多角形を三角形に分割する。戻り値: (三角形のリスト, 成功したか)。"""
+    ring = list(range(len(points)))
     tris = []
     guard = 0
-    while len(ring) > 3 and guard < 4 * len(pts):
+    while len(ring) > 3 and guard < len(points) * len(points) + 10:
         guard += 1
         for m in range(len(ring)):
-            i, j, k = ring[m - 1], ring[m], ring[(m + 1) % len(ring)]
-            sub = [pts[idx] for idx in ring]
-            mi, mk = ring.index(i), ring.index(k)
-            if _diagonal_is_inside(sub, mi, mk, normal) if len(sub) > 3 else True:
-                tris.append((pts[i], pts[j], pts[k]))
-                ring.remove(j)
-                break
-        else:
+            i = ring[m - 1]
+            j = ring[m]
+            k = ring[(m + 1) % len(ring)]
+            if not _is_convex_corner(points[i], points[j], points[k], normal):
+                continue
+            # 他の頂点が三角形 ijk の中に入っていないこと
+            if any(_point_in_triangle(points[q], points[i], points[j], points[k], normal)
+                   for q in ring if q not in (i, j, k)):
+                continue
+            tris.append((points[i], points[j], points[k]))
+            ring.pop(m)
             break
+        else:
+            return tris, False      # 耳が見つからない＝自己交差などで分割できない
     if len(ring) == 3:
-        tris.append((pts[ring[0]], pts[ring[1]], pts[ring[2]]))
-    return tris, info
+        tris.append((points[ring[0]], points[ring[1]], points[ring[2]]))
+        return tris, True
+    return tris, False
 
 
 def _point_key(point, digits):
@@ -684,9 +816,18 @@ def read_model(file_name, unit=None, absorption_table=None, default_absorption=N
                 i += 1
 
             if not (flag & POLYLINE_FLAG_POLYFACE_MESH):
-                model.skipped["非対応エンティティ"] += 1
+                # ポリフェイスメッシュではない POLYLINE。
+                # 「閉じたポリライン」は面の輪郭を描いたものとみなして三角形に分割する
+                # （CAD で輪郭だけ描くのはよくある作り方。test2.dxf がこの形式）。
+                if flag & POLYLINE_FLAG_CLOSED and len(coords) >= 3:
+                    _add_triangles(model, faces, layer, coords)
+                    model.face_sources["閉じたポリライン"] += 1
+                else:
+                    model.skipped["非対応エンティティ"][
+                        "POLYLINE(開いた線)"] += 1
                 continue
 
+            model.face_sources["ポリフェイスメッシュ"] += 1
             for record in records:
                 idx = [abs(v) for v in record if v != 0]
                 if len(idx) < 3 or max(idx) > len(coords):
@@ -702,6 +843,29 @@ def read_model(file_name, unit=None, absorption_table=None, default_absorption=N
                              _float(etags, 30 + k)]) * scale for k in range(4)]
             # 三角形を表すときは 4 点目が 3 点目と同じになる（_add_triangles 側で重複を落とす）
             _add_triangles(model, faces, layer, pts)
+            model.face_sources["3DFACE"] += 1
+            i += 1
+            continue
+
+        if etype == "LWPOLYLINE":
+            # 軽量ポリライン（AutoCAD の既定の 2D ポリライン）。閉じていれば面として読む。
+            layer = _tag(etags, 8, "0")
+            flag = _int(etags, 70)
+            xs = _tags_all(etags, 10)
+            ys = _tags_all(etags, 20)
+            elevation = _float(etags, 38, 0.0)
+            extrusion = np.array([_float(etags, 210, 0.0), _float(etags, 220, 0.0),
+                                  _float(etags, 230, 1.0)])
+            if not (flag & 1) or min(len(xs), len(ys)) < 3:
+                model.skipped["非対応エンティティ"]["LWPOLYLINE(開いた線)"] += 1
+            elif not np.allclose(extrusion, [0.0, 0.0, 1.0]):
+                # 押し出し方向が Z 以外だと OCS→WCS の変換が必要。未対応なので読み飛ばす
+                model.skipped["非対応エンティティ"]["LWPOLYLINE(押し出し方向がZ以外)"] += 1
+            else:
+                pts = [np.array([float(x), float(y), elevation]) * scale
+                       for x, y in zip(xs, ys)]
+                _add_triangles(model, faces, layer, pts)
+                model.face_sources["閉じたLWPOLYLINE"] += 1
             i += 1
             continue
 
@@ -714,12 +878,12 @@ def read_model(file_name, unit=None, absorption_table=None, default_absorption=N
             elif low in [s.lower() for s in receiver_layers]:
                 model.receiver_points.append(p)
             else:
-                model.skipped["非対応エンティティ"] += 1
+                model.skipped["非対応エンティティ"][f"POINT(レイヤ'{layer}')"] += 1
             i += 1
             continue
 
         if etype not in ("VERTEX", "SEQEND"):
-            model.skipped["非対応エンティティ"] += 1
+            model.skipped["非対応エンティティ"][etype] += 1
         i += 1
 
     # --- 法線を計算し、縮退面を除く ---

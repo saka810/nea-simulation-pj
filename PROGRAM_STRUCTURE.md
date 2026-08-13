@@ -200,13 +200,15 @@ open_edge_count(triangles, tol=1e-9) -> int # 開いた辺の本数。0 なら�
 winding_is_consistent(triangles) -> bool    # 巻き順の一貫性
 mesh_shells(triangles) -> list[list[int]]   # 辺の共有で連結成分に分割
 analyse_shells(triangles) -> list[dict]     # シェルごとの 閉/開・体積・法線の向き・外殻か
-triangulate_polygon(points) -> (tris, info) # 多角形→三角形。凹み対応・ねじれ検出
+triangulate_polygon(points) -> (tris, info) # 多角形→三角形。凹み対応・ねじれ検出・耳刈り法
 quad_warp(points) -> float                  # 四角形のねじれ量（平面からのずれ÷代表辺長）
+polygon_area(points, normal) -> float       # 多角形の面積（分割の妥当性チェックに使う）
 ```
 
 `DxfModel` の属性: `mesh` / `source_points` / `receiver_points` / `unit_scale` /
 `unit_source` / `layer_counts` / `skipped` / `extents` / `is_closed` / `open_edges` /
-`volume` / `shells` / `winding_consistent` / `polygon_notes`、および `summary()`。
+`volume` / `shells` / `winding_consistent` / `polygon_notes` / `face_sources`、
+および `summary()`。
 
 **パーサは自前**（`ezdxf` などの外部依存なし）。ASCII DXF は「グループコード / 値」が
 1 行ずつ交互に並ぶだけなので、2 行ずつ読んで `(code, value)` のタプル列にすれば済む。
@@ -219,23 +221,33 @@ quad_warp(points) -> float                  # 四角形のねじれ量（平面�
 | `POLYLINE` | `70` に 64（ポリフェイスメッシュ） | 後続の `VERTEX` を集め `SEQEND` で終了 |
 | └ `VERTEX` | `70 = 192` | 頂点座標（`10`/`20`/`30`） |
 | └ `VERTEX` | `70 = 128`（64 が立っていない） | 面レコード。`71`〜`74` が頂点番号（1 始まり、符号は辺の可視性なので `abs()`） |
+| `POLYLINE` | `70` に 1（閉じている）でポリフェイスメッシュでない | **閉じたポリライン＝面の輪郭**とみなして三角形分割（`test2.dxf` がこの形式。頂点数の制限なし） |
 | `3DFACE` | — | `10`〜`13` 系の 3〜4 頂点。4 点目が 3 点目と同じなら三角形 |
+| `LWPOLYLINE` | `70` に 1（閉じている） | 面の輪郭とみなす。頂点は `10`/`20` の繰り返し、高さは `38`。**押し出し方向（`210`〜`230`）が Z 以外は未対応**（読み飛ばして報告） |
 | `POINT` | レイヤが `src` 系 | 音源座標 |
 | `POINT` | レイヤが `rec` 系 | 受音点座標 |
 
-**多角形 → 三角形の分割**（`triangulate_polygon()`）。CAD 側で三角形に割る必要はない。
-DXF の面レコード（`71`〜`74`）と 3DFACE はどちらも**最大 4 頂点**なので、
-実質「四角形 → 三角形 2 枚」だけを正しく処理すればよい。
+面がどのエンティティ由来かは `DxfModel.face_sources`（Counter）に記録し `summary()` で報告。
+読み飛ばした非対応エンティティも**種類別に Counter で数える**（原因が分かるように）。
 
-- **凹んだ四角形**: 素朴な扇状分割だと多角形の外に三角形ができる。
-  `_diagonal_is_inside()` で**内側を通る対角線を選ぶ**（他の 2 頂点が対角線の両側に分かれるか）。
-  片方が対角線上（符号 0）の退化ケースも内側扱いにする（面積ゼロの三角形は後段で捨てられる）
+**多角形 → 三角形の分割**（`triangulate_polygon()`）。CAD 側で三角形に割る必要はない。
+
+- **三角形**: そのまま通す
+- **四角形**: `_diagonal_is_inside()` で**内側を通る対角線を選ぶ**
+  （他の 2 頂点が対角線の両側に分かれるか。素朴な扇状分割は凹んだ四角形で多角形の外に
+  三角形を作ってしまう）。片方が対角線上（符号 0）の退化ケースも内側扱いにする
+  （面積ゼロの三角形は後段で捨てられる）
 - **ねじれた四角形**: `quad_warp()` で平面からのずれを測り、`WARP_TOLERANCE` を超えたら警告。
   どの対角線で切るかで形が変わるため、CAD 側で直してもらう
-- **5 角形以上**: DXF では出ないが保険として耳刈り法で分割
+- **5 角形以上**: `_ear_clip()` で耳刈り法。「耳」＝凸な頂点で、その両隣を結んだ三角形に
+  他の頂点が入らないもの。これを 1 つずつ切り落とすので**凹んだ多角形でも正しく分割できる**。
+  閉じたポリラインで面を描くと 5 角形以上が普通に来る（`test2.dxf` は 9 角形）
+- **分割の妥当性チェック**: `polygon_area()`（靴ひも公式に相当）と三角形の合計面積を
+  `_area_mismatch()` で照合する。自己交差した多角形などで破綻すると誤差が出るので検出できる
 - 縮退面（`|n| < 1e-12`）は `face_normal()` が None を返すので捨てて件数を記録
 
-結果は `DxfModel.polygon_notes`（ねじれた四角形の枚数・最大ねじれ量・対角線変更の枚数）に入る。
+結果は `DxfModel.polygon_notes`（ねじれた四角形の枚数・最大ねじれ量・対角線変更の枚数・
+耳刈り法の枚数・最大面積誤差・分割失敗の枚数）に入る。
 
 **単位換算**: ヘッダ `$INSUNITS` のコード（4=mm, 6=m など、`INSUNITS_TO_METER` に 18 種）から
 m へ換算する。`unit='mm'` / `unit=0.001` のような明示指定が優先される
@@ -269,8 +281,14 @@ m へ換算する。`unit='mm'` / `unit=0.001` のような明示指定が優先
 結果は `DxfModel.shells` / `.winding_consistent` / `.is_closed` / `.open_edges` / `.volume`
 に入り、`summary()` がシェルごとに「OK」「★要確認（outward が空気側）」まで表示する。
 
-**吸音率**: レイヤ名を材料名として `absorption_table`（dict または CSV パス）と突き合わせる。
+**吸音率**: レイヤ名を材料の識別子として `absorption_table`（dict または CSV パス）と突き合わせる。
 未登録のレイヤは既定値（0.1）を使い、レイヤ名を列挙して警告する。
+`read_absorption_csv()` は 2 形式を自動判別する。
+
+| 形式 | 列 | 備考 |
+|---|---|---|
+| (A) 元コード付属 `absorption.csv` | `ID, 材料名, a1〜a6` | **ID と材料名の両方をキーに登録**するのでレイヤ名がどちらでも引ける。CP932 なので UTF-8 → CP932 → latin-1 の順にデコードを試す |
+| (B) `data/absorption_sample.csv` | `材料名, a1〜a6` | 2 列目が数値かどうかで (A) と判別 |
 
 `if __name__ == "__main__":` でリポジトリ直下の `test.dxf` を読むテストが走る。
 
