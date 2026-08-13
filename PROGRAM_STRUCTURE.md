@@ -35,6 +35,7 @@ procedure.process()
 | `read_dxffile.py` | DXF ファイルの読み込み | 132〜283 行 | **実装済**（2026-08-12。実 DXF で動作確認済） |
 | `loop_reflectionmesh.py` | 音線追跡ループ本体 | 524〜717 行 | **実装済**（2026-08-12 に traceff の扱いを確定し全面修正・動作確認済） |
 | `ray_recorder.py` | 可視化用の音線軌跡レコーダ | （移植元なし・新規） | 実装済（2026-08-12 新設） |
+| `view_model.py` | モデルの 3D ビューア（HTML + WebGL を書き出す） | （移植元なし・新規） | 実装済（2026-08-14 新設） |
 | `loop_deleteredundancy.py` | 重複経路の削除 | 721〜841 行 | 実装済（2026-08-12 に整理・動作確認済） |
 | `loop_noredundancy.py` | バックトレースループ | 876〜1134 行 | 下書き段階 |
 | `impulse.py` | インパルス応答の合成・CSV 出力 | make_ipls_freq_monaural_fortran.f90 | 実装中（転記ミス多数） |
@@ -295,6 +296,50 @@ m へ換算する。`unit='mm'` / `unit=0.001` のような明示指定が優先
 | (B) `data/absorption_sample.csv` | `材料名, a1〜a6` | 2 列目が数値かどうかで (A) と判別 |
 
 `if __name__ == "__main__":` でリポジトリ直下の `test.dxf` を読むテストが走る。
+
+### view_model.py
+
+読み込んだモデルを 3D 表示するビューア。移植元のない**新規モジュール**。
+
+```python
+view(dxf_path, out_path=None, absorption=None, unit=None,
+     orient_normals="cad", open_browser=True) -> (out_path, DxfModel)
+export_html(model, out_path, title="", subtitle="") -> out_path
+build_payload(model, normal_ratio=0.06) -> dict     # HTML に埋め込む JSON
+```
+
+コマンドラインからも使える。
+
+```
+cd geosim
+python view_model.py ..\test2.dxf --absorption ..\absorption.csv
+```
+
+**自己完結した HTML（WebGL）を書き出してブラウザで開く方式**。理由は、この環境に
+matplotlib / pyvista / PyQt が入っておらず（`tkinter` のみ）、`pip install` を前提に
+したくなかったため。将来 GUI を Web ベースにするならそのまま土台になる。
+
+表示するもの:
+
+| 要素 | 表現 |
+|---|---|
+| 三角形要素 | 面 + **辺を描く**ので分割が見える |
+| 法線 | 重心から伸びる矢印（矢じり付き。長さはモデル対角の 6%） |
+| **法線の向き** | **裏側（法線と反対から見ている側）を赤で塗る**。音線が通り抜ける側が一目で分かる |
+| レイヤ | 色分け + 表示/非表示の切り替え |
+| 音源・受音点 | 赤 / 青の点 |
+| 読み込み結果 | `DxfModel.summary()` をパネルに表示 |
+
+操作: ドラッグで回転、ホイールで拡大縮小、右ドラッグ（または Shift+ドラッグ）で平行移動、
+視点プリセット（等角 / 上 / 正面 / 側面）。
+
+実装上の要点:
+
+- 表裏の判定は `gl_FrontFacing`（頂点の巻き順）ではなく**保持している法線と視線の内積**で行う。
+  読み込み側は巻き順を変えずに法線だけ反転することがあるため
+- レイヤの表示切り替えは、**頂点をレイヤ順に並べて描画範囲を飛ばす**方式。
+  シェーダで uniform 配列を動的インデックスする実装は GLSL ES の移植性に不安があるため避けた
+- 出力 HTML（`*_view.html`）は `view_model.py` で再生成できるので `.gitignore` で除外
 
 ### loop_reflectionmesh.py
 
