@@ -202,6 +202,7 @@ mesh_shells(triangles) -> list[list[int]]   # 辺の共有で連結成分に分�
 analyse_shells(triangles) -> list[dict]     # シェルごとの 閉/開・体積・法線の向き・外殻か
 triangulate_polygon(points) -> (tris, info) # 多角形→三角形。凹み対応・ねじれ検出・耳刈り法
 quad_warp(points) -> float                  # 四角形のねじれ量（平面からのずれ÷代表辺長）
+quad_warp_distance(points) -> float         # 四角形のねじれ量の実寸 [m]
 polygon_area(points, normal) -> float       # 多角形の面積（分割の妥当性チェックに使う）
 ```
 
@@ -237,8 +238,11 @@ polygon_area(points, normal) -> float       # 多角形の面積（分割の妥�
   （他の 2 頂点が対角線の両側に分かれるか。素朴な扇状分割は凹んだ四角形で多角形の外に
   三角形を作ってしまう）。片方が対角線上（符号 0）の退化ケースも内側扱いにする
   （面積ゼロの三角形は後段で捨てられる）
-- **ねじれた四角形**: `quad_warp()` で平面からのずれを測り、`WARP_TOLERANCE` を超えたら警告。
-  どの対角線で切るかで形が変わるため、CAD 側で直してもらう
+- **ねじれた四角形**: `quad_warp()`（相対）と `quad_warp_distance()`（実寸 [m]）で
+  平面からのずれを測り、`WARP_TOLERANCE` を超えたら警告。
+  どの対角線で切るかで形が変わるため CAD 側で直してもらうが、**実寸を mm で示して
+  影響の目安（1mm 未満なら無視できる／20mm 超は作図ミスの可能性）まで報告する**。
+  作図方法は `docs/DXFデータの作り方.md` 1b 節（UCS + PLINE / 押し出し / 三角形）
 - **5 角形以上**: `_ear_clip()` で耳刈り法。「耳」＝凸な頂点で、その両隣を結んだ三角形に
   他の頂点が入らないもの。これを 1 つずつ切り落とすので**凹んだ多角形でも正しく分割できる**。
   閉じたポリラインで面を描くと 5 角形以上が普通に来る（`test2.dxf` は 9 角形）

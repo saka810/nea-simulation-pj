@@ -116,6 +116,7 @@ class DxfModel:
         self.shells = []
         self.winding_consistent = True
         self.polygon_notes = {"ねじれた四角形": 0, "最大ねじれ量": 0.0,
+                             "最大ねじれ実寸": 0.0,
                              "凹み対応で対角線を変更": 0,
                              "耳刈り法で分割": 0, "分割に失敗": 0,
                              "最大面積誤差": 0.0}
@@ -166,12 +167,18 @@ class DxfModel:
                          f"{self.polygon_notes['凹み対応で対角線を変更']} 枚を"
                          f"内側を通る対角線で分割しました")
         if self.polygon_notes["ねじれた四角形"]:
+            mm = self.polygon_notes["最大ねじれ実寸"] * 1000.0
+            impact = ("音響的には無視できる大きさです" if mm < 1.0
+                      else "音響計算に影響しうる大きさです" if mm < 20.0
+                      else "★形状が意図とずれている可能性があります")
             lines.append(
-                f"★三角形分割: **ねじれた四角形 {self.polygon_notes['ねじれた四角形']} 枚**"
-                f"（4 点が同一平面上にない。最大ねじれ量 "
-                f"{self.polygon_notes['最大ねじれ量']:.3e}）。"
-                f"\n  どの対角線で切るかで形が変わるので、CAD 側で平面に直すか"
-                f"三角形で作り直してください")
+                f"三角形分割: ねじれた四角形 {self.polygon_notes['ねじれた四角形']} 枚"
+                f"（4 点が同一平面上にない）"
+                f"\n  最大ねじれ {mm:.3f} mm（相対 "
+                f"{self.polygon_notes['最大ねじれ量']:.2e}）… {impact}"
+                f"\n  切る対角線によって形が変わります。気になる場合は CAD 側で"
+                f"平面に直すか三角形で作り直してください"
+                f"（作図方法は docs/DXFデータの作り方.md 1節）")
         skipped = {k: (dict(v) if isinstance(v, collections.Counter) else v)
                    for k, v in self.skipped.items()
                    if (len(v) if isinstance(v, collections.Counter) else v)}
@@ -382,6 +389,8 @@ def _add_triangles(model, faces, layer, points):
         model.polygon_notes["ねじれた四角形"] += 1
         model.polygon_notes["最大ねじれ量"] = max(model.polygon_notes["最大ねじれ量"],
                                                  info["warp"])
+        model.polygon_notes["最大ねじれ実寸"] = max(model.polygon_notes["最大ねじれ実寸"],
+                                                   info["warp_distance"])
     if info["diagonal_changed"]:
         model.polygon_notes["凹み対応で対角線を変更"] += 1
     if info["ear_clipped"]:
@@ -471,16 +480,26 @@ def _dedupe_consecutive(points, tol=1.0e-12):
     return out
 
 
-def quad_warp(points):
-    """四角形のねじれ具合（平面からのずれ ÷ 代表辺長）を返す。0 なら完全に平面。"""
+def quad_warp_distance(points):
+    """四角形のねじれ量を**実寸**で返す [m]。
+
+    最初の 3 点が作る平面から 4 点目までの距離。0 なら完全に平面。
+    相対値より実寸のほうが「CAD で直すべきか」の判断がしやすい。
+    """
     p0, p1, p2, p3 = [np.asarray(p, dtype=float) for p in points[:4]]
     n = np.cross(p1 - p0, p2 - p0)
     length = np.linalg.norm(n)
-    scale = max(np.linalg.norm(p1 - p0), np.linalg.norm(p2 - p0),
-                np.linalg.norm(p3 - p0), 1.0e-30)
     if length < DEGENERATE_EPS:
         return 0.0
-    return abs(float(np.dot(n / length, p3 - p0))) / scale
+    return abs(float(np.dot(n / length, p3 - p0)))
+
+
+def quad_warp(points):
+    """四角形のねじれ具合（平面からのずれ ÷ 代表辺長）を返す。0 なら完全に平面。"""
+    p0, p1, p2, p3 = [np.asarray(p, dtype=float) for p in points[:4]]
+    scale = max(np.linalg.norm(p1 - p0), np.linalg.norm(p2 - p0),
+                np.linalg.norm(p3 - p0), 1.0e-30)
+    return quad_warp_distance(points) / scale
 
 
 def _diagonal_is_inside(points, i, j, normal):
@@ -509,7 +528,7 @@ def triangulate_polygon(points):
       情報dict のキー: 'warp'（ねじれ量。四角形のみ）, 'diagonal_changed'（対角線を変えたか）
     """
     pts = _dedupe_consecutive(list(points))
-    info = {"warp": 0.0, "diagonal_changed": False,
+    info = {"warp": 0.0, "warp_distance": 0.0, "diagonal_changed": False,
             "ear_clipped": False, "area_error": 0.0, "failed": False}
 
     if len(pts) < 3:
@@ -528,6 +547,7 @@ def triangulate_polygon(points):
 
     if len(pts) == 4:
         info["warp"] = quad_warp(pts)
+        info["warp_distance"] = quad_warp_distance(pts)
         # 内側を通る対角線を選ぶ。0-2 が使えなければ 1-3 を使う（凹んだ四角形への対処）
         if _diagonal_is_inside(pts, 0, 2, normal):
             tris = [(pts[0], pts[1], pts[2]), (pts[0], pts[2], pts[3])]
