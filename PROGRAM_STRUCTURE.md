@@ -16,18 +16,30 @@
 入力: 音源位置・受音点・DXF形状・受音球半径・反射回数・音線数・吸音率リスト
 
 procedure.process()
- ├─ 1. read_dxffile.read()            … DXF → Meshオブジェクトのリスト
+ ├─ 1. read_dxffile.read_model()      … DXF → Meshオブジェクトのリスト
  ├─ 2. sound_ray.soundray_generator() … 球面上に均等な音線ベクトル群を生成
  ├─ 3. loop_reflectionmesh.loop()     … 音線追跡。受音した経路の反射面ID履歴を記録
  │                                       （元コード backtrace.f90 524行〜）
  ├─ 4. loop_deleteredundancy.delete() … 反射履歴の重複経路を削除（元コード 721行〜）
- ├─ 5. loop_noredundancy.loop()       … 虚音源法バックトレース。到来時間・エネルギーの
- │                                       パルス列を出力（元コード 876行〜）※未接続
- └─ 6. impulse.impulse_responce()     … パルス列 → バンド合成でインパルス応答CSV
-                                         （元コード make_ipls_freq_monaural_fortran.f90）※未接続
+ ├─ 5. loop_noredundancy.loop()       … 虚音源法バックトレース。到来時刻・到来方向・
+ │                                       バンド別エネルギーのパルス列（元コード 876行〜）
+ ├─ 6. impulse.impulse_responce()     … パルス列 → バンド合成でインパルス応答CSV
+ │                                       （元コード make_ipls_freq_monaural_fortran.f90）
+ └─ 7. reverberation.reverberation_time() … 減衰曲線と残響時間 T30
+                                         （元コード ipls2rt_fortran.f90）
 
-未着手: 残響時間算出（ipls2rt_fortran.f90 相当）
+2026-08-14 に 5〜7 を実装して全段つながった。
 ```
+
+**3 と 5 の役割分担**（この設計の要）
+
+音線法（3）は「どの壁をどの順に反射する経路がありそうか」を**発見**するだけ。
+受音球に入ったかどうかで判定するので、経路そのものには誤差がある。
+虚音源法（5）は経路が分かっていれば到来時刻とエネルギーを**厳密**に出せるが、
+経路の候補を自力で探すことはできない（反射回数が増えると組み合わせが爆発する）。
+そこで「探索は音線法、計算は虚音源法」と分担している。
+5 は受け取った経路を幾何的に検算し直すので、音線法が拾った偽の経路はここで却下される
+（実測: 972 本 → 582 本が生き残り、390 本は却下）。
 
 ## ファイル一覧
 
@@ -44,7 +56,8 @@ procedure.process()
 | `view_model.py` | モデルの 3D ビューア（HTML + WebGL を書き出す） | （移植元なし・新規） | 実装済（2026-08-14 新設） |
 | `view_model_gui.py` | モデルの 3D ビューア（PyVista のネイティブウィンドウ） | （移植元なし・新規） | 実装済（2026-08-14 新設・描画確認済） |
 | `loop_deleteredundancy.py` | 重複経路の削除 | 721〜841 行 | 実装済（2026-08-12 に整理・動作確認済） |
-| `loop_noredundancy.py` | バックトレースループ | 876〜1134 行 | 下書き段階 |
+| `loop_noredundancy.py` | バックトレースループ（虚音源法） | 876〜1134 行 | **実装済**（2026-08-14 全面書き直し・解析解と一致） |
+| `reverberation.py` | 残響時間・減衰曲線 | ipls2rt_fortran.f90 | **実装済**（2026-08-14 新設・既知の減衰と一致） |
 | `impulse.py` | インパルス応答の合成・CSV 出力 | make_ipls_freq_monaural_fortran.f90 | 実装中（転記ミス多数） |
 | `__init__.py` | パッケージ化 | — | 空 |
 
@@ -77,24 +90,40 @@ procedure.process()
 
 ### procedure.py
 
-全体フローの記述。エントリポイント。
+全体フローの記述。エントリポイント。**1〜7 が全部つながっている**（2026-08-14）。
 
 ```python
-process(soundsource_point, reciever_point, dxf_filename, sphere_radius, nref, soundray_number) -> None
+process(soundsource_point, reciever_point, dxf_filename, sphere_radius, nref, soundray_number,
+        absorption_csv=None, unit=None, orient_normals="cad",
+        raylog_filename=None, raylog_max_rays=2000, sound_velocity=340.0,
+        pulse_filename=None, impulse_filename=None,
+        sampling_frequency=44100.0, max_time=1.0, compensate_filter_delay=False,
+        reverberation_filename=None, decay_filename=None)
+    -> {"model", "pulses", "impulse", "reverberation"}
 ```
 
-| 引数 | 型（想定） | 意味 |
+| 引数 | 型 | 意味 |
 |---|---|---|
-| `soundsource_point` | ndarray (3,) | 音源座標 [m] |
-| `reciever_point` | ndarray (3,) | 受音点座標 [m] |
+| `soundsource_point` | (3,) \| None | 音源座標 [m]。None なら DXF の src レイヤから |
+| `reciever_point` | (3,) \| None | 受音点座標 [m]。None なら DXF の rec レイヤから |
 | `dxf_filename` | str | 形状 DXF ファイルパス |
 | `sphere_radius` | float | 受音球半径 [m] |
 | `nref` | int | 最大反射回数 |
 | `soundray_number` | int | 音線数 |
+| `sound_velocity` | float | 音速 [m/s]。既定 340（元コード c0）。**軌跡・バックトレース・空気吸収で共用** |
+| `*_filename` | str \| None | 各段の出力先。None なら**その段の計算自体を行わない** |
 
-- 冒頭でオクターブバンド中心周波数 `[63, 125, 250, 500, 1k, 2k, 4k, 8k]`（8 バンド）を定義。
-  ※元コードの吸音率は 6 バンド（absorption.csv の a1〜a6）なので不整合あり。要調整。
-- ステップ 5（バックトレース）以降は呼び出しがコメントアウト。吸音率リストの読み込み処理も未定。
+- オクターブバンドは `impulse.OCTAVE_BAND_FREQUENCIES` = **125/250/500/1k/2k/4k の 6 バンド**。
+  以前は 63〜8000 Hz の 8 バンドを定義していたが、吸音率もバックトレースも 6 バンドなので
+  不整合だった。6 バンドである根拠は make_ipls の 6→32 展開表（94〜125 行）。
+- `nref` に達した経路があると警告を出す（後部残響が切れている＝残響時間が信用できない合図）。
+- `main()` があり、コマンドラインから通し実行できる。
+
+```
+cd geosim
+python procedure.py ..\test.dxf --absorption ..\absorption.csv --out ..\結果 ^
+       --rays 20000 --nref 8 --compensate-delay
+```
 
 ### mesh.py
 
@@ -484,54 +513,180 @@ delete(reflectionhistory_redundancy: list[list[int]]) -> list[list[int]]
 
 ### loop_noredundancy.py
 
+虚音源法バックトレース（元コード 876〜1134 行）。**2026-08-14 に全面書き直し**。
+
 ```python
-loop(soundsource_point, reciever_point, absorption_list, reflectionmeshid_history, mesh) -> None
+loop(soundsource_point, reciever_point, reflectionmeshid_history, mesh,
+     sound_velocity=340.0, band_number=None, filename=None, verbose=True) -> PulseList
+backtrace_path(soundsource_point, reciever_point, wall_ids, mesh,
+               band_number, sound_velocity) -> dict | None
+image_sources(soundsource_point, wall_ids, mesh) -> ndarray (n+1, 3)
 ```
-虚音源法バックトレース（元コード 876〜1134 行）。**下書き段階**。意図する処理:
+
+処理:
 
 ```
 for 非重複経路 i:
-    反射履歴に沿って虚音源列 isrc(k) を鏡映で順次生成    # 元コード 900〜926行
-    受音点から最終虚音源へ向けて逆向きに追跡:            # 元コード 948行 do k = ktmp, 0, -1
-        各段で最寄り面を探索し、履歴の面と一致するか検証
+    反射履歴に沿って虚音源列 isrc(k) を鏡像で順次生成      # 元コード 900〜926行
+    受音点から最終虚音源へ向けて逆向きに追跡:              # 元コード 948行 do k = ktmp, 0, -1
+        各段で最寄り面を探索し、履歴の面と一致するか検証   # 違えば却下
         一致すれば energy_decay() でバンド別エネルギーを減衰、基点と音線を更新
-        k=0 で遮蔽チェック → 通れば「反射回数, 到来時間, 方向ベクトル, バンド別エネルギー」を出力
+        k=0 で遮蔽チェック（音源より手前に壁があれば却下）
+    通れば「反射回数, 到来時刻, 到来方向, バンド別エネルギー」を記録
 ```
 
-出力形式（元コード 1080 行）: `ktmp, rtime, -vtgt(1:3), enertmp(1:6)` の 11 列テキスト。
-現状は履歴を ndarray 前提（`.shape`）で扱う一方 delete() はリストを返す、
-`mesh[mesh_id[i, k]]` のスカラー添字、`energy_decay` の引数不足、衝突判定ブロックの位置など、骨格から要整理。
-ファイル出力は print のダミー。戻り値なし（ファイル保存が目的）。
+**`PulseList`**（元コード 1080 行の 11 列出力に対応）
+
+| 属性 | 形状 | 元コード | 内容 |
+|---|---|---|---|
+| `reflection_count` | (n,) | ktmp | 反射回数 |
+| `time` | (n,) | rtime | 到来時刻 [s] |
+| `distance` | (n,) | — | 経路長 [m] |
+| `direction` | (n,3) | -vtgt | 到来方向の**単位ベクトル**（受音点→虚音源） |
+| `energy` | (n,6) | enertmp | バンド別エネルギー |
+
+元コードの `-vtgt` は正規化されておらず長さが経路長そのものなので、「方向」と「距離」が
+1 列に混ざっていた。分けておくと**出力⑤（伝搬方向の可視化）にそのまま使える**。
+`direction * distance` が元コードの `-vtgt` に一致する。
+
+**元コードとの相違点：鏡像の式に abs() を使わない**
+
+元コード 911 行は面までの距離に `abs()` を掛けている。
+
+```
+temp = |n・p + d| / |n|          →  isrc(k) = isrc(k-1) - 2 * temp * n
+```
+
+鏡像の正しい式は符号付きで `p - 2 (n・p + d)/|n|^2 * n`。両者が一致するのは
+p が面の**表側**（n・p + d > 0）にあるときだけで、裏側の虚音源に abs() を使うと
+面を跨がずに**遠ざかる方向へ動いてしまう**。凸な部屋なら実害は出にくいが、
+凹んだ形状や法線を反転させたモデルでは崩れるので、符号付きで実装した。
+
+**検証**（2026-08-14、test.dxf = 2×3×1 m 直方体）
+
+| 項目 | 結果 |
+|---|---|
+| 直接音の距離 | 解析解と**誤差 0.000e+00** |
+| 1 次反射 6 本（6 面ぶんちょうど） | 全て解析解と**誤差 0.000e+00** |
+| 2 次反射 18 本 | 全て虚音源の解析距離と一致 |
+| 到来方向 | 受音点→音源の単位ベクトルと一致 |
+| エネルギー | 入射角と吸音率から手計算した \|R(θ)\|² と**誤差 0.000e+00** |
 
 ### impulse.py
 
 パルス列 → インパルス応答の合成（元コード make_ipls_freq_monaural_fortran.f90 全体）。
+**2026-08-14 に全面書き直し**。
 
 ```python
-impulse_responce(filename, sound_velocity, reflection_timing, soundsourceenergy_list,
-                 frequency_number, count, nn, mf, fmax, dt) -> None
+impulse_responce(filename, pulses, sound_velocity=340.0, sampling_frequency=44100.0,
+                 max_time=1.0, compensate_filter_delay=False, verbose=True) -> (t, ir)
+impulse_response(time, energy6, ...) -> (t, ir)      # ファイル出力なし
 ```
-全体フロー関数。以下を順に呼ぶ:
 
-| 関数 | 対応元コード | 処理 | 主な入出力 |
+| 関数 | 対応元コード | 処理 |
+|---|---|---|
+| `third_octave_bands()` | 46 行 | 1/3 オクターブ 32 バンドの中心周波数（15.625 Hz〜20 kHz） |
+| `airdamping_coefficient(mf)` | 47 行 | 空気吸収係数 `mair = 1.81e-8 * mf^1.57`（20℃・湿度 40%） |
+| `expand_6_to_32(energy6)` | 94〜125 行 | **6 オクターブバンド → 32 バンドの展開表** |
+| `apply_air_absorption(...)` | 127 行 | `E * exp(-mair * c0 * t)` |
+| `transfer_function(...)` | 136〜143 行 | `Σ √E · e^(−j2πf·t) / (t·c0)` の重ね合わせ |
+| `bandpass_edges(mf, fmax)` | 152〜154 行 | 各バンドの遮断周波数 `mf * 2^(±1/6)` |
+| `filter_bandpass(numtaps, wmin, wmax)` | fir1_bandpass | ハミング窓付き FIR バンドパス |
+| `extend_to_negative(hfp, nn)` | 173〜180 行 | 伝達関数を負の周波数へエルミート拡張 |
+| `write_impulseresponce(...)` | 232〜235 行 | 時間ベクトルを付けて CSV 出力 |
+
+**6 バンドの中心周波数が 125/250/500/1k/2k/4k である根拠**
+
+元コードの展開表（94〜125 行）で 32 バンド側の 10 番目（125 Hz）が `enerred(1)` を
+参照していることから確定できる。以降 3 バンドおきに 250 / 500 / 1k / 2k / 4k。
+`procedure.py` が以前 63〜8000 Hz の 8 バンドを持っていたのは誤り。
+
+**直したもの（E-3 / E-4 / E-7）**
+
+| 箇所 | 旧実装 | 正 |
+|---|---|---|
+| ハミング窓 | `0.54 * 0.46 * cos(...)` | `0.54 + 0.46 * cos(...)` |
+| 伝達関数の重ね合わせ | `transfer = transfer * ...`（積） | `+=`（和）。積だと初期値 0 に掛かり全部 0 になる |
+| 空気吸収係数 | `(15.625*2)^(i/3)` かつスカラー代入 | `15.625 * 2^(i/3)` の配列 |
+| 空気吸収の時刻 | `reflection_timing[i]`（i はバンド添字） | 全パルスの時刻ベクトル |
+| バンド端 | `(mf*2)^(-1/6)`、指数に fmax が混入 | `mf * 2^(∓1/6) / fmax` |
+| 負周波数の添字 | `transfer[j, nn-i+1]` | 0 始まりでは `hfp[nn - i]` |
+| フィルタのタップ添字 | `n_shift = i - 1.0 - m`（1 始まり前提） | `k - m` |
+| 逆 FFT | 呼ばずに合算していた | `np.fft.ifft` してから実部を合算 |
+| `df` | `transfer_function` に渡っておらず未定義参照 | 引数で受け取る |
+
+**E-6（自作 FFT / フィルタの置き換え）の判断**
+
+- **FFT は `np.fft` に置き換えた。** 自作版は `m = 0` 始まりでゼロ除算になるなど動かない状態だった。
+  元コードの `fft(x,n,1)` は `exp(-i…)` なので `np.fft.fft`、`fft(x,n,-1)` は `exp(+i…)` かつ
+  1/n 正規化なので `np.fft.ifft` とそれぞれ一致する。
+- **バンドパスは自作のまま残した。** `scipy.signal.firwin(..., window='hamming',
+  pass_zero=False, scale=False)` と**相対誤差 1e-16 で一致**することを確認済み。
+  一致するなら、依存を増やさず元コードとの対応が見える自作版のほうがよい
+  （scipy は既定で通過域ゲインを正規化する `scale=True` なので、置き換えるなら注意が要る）。
+
+**バンドパスの遅れについて（要注意）**
+
+元コードのバンドパスは**タップ数 = データ点数 nn** の直線位相 FIR なので、
+出力は (nn-1)/2 サンプル ≒ **1.486 秒**遅れる。元コードは補正していないので、
+出てくる CSV は「1.49 秒あたりから音が始まる」形になる。
+`compensate_filter_delay=True` を渡すと巻き戻したうえで、
+巡回畳み込みで末尾に回り込むプリリンギングを切り落として返す
+（有効長 nn - (nn-1)/2 = 1.486 秒ぶん）。**残響時間や音響指標を出すときは補正が必要**。
+
+**検証**（2026-08-14）
+
+| 項目 | 結果 |
+|---|---|
+| `filter_bandpass` vs `scipy.signal.firwin` | 相対誤差 1e-16 |
+| 32 バンドの総和（40 Hz〜15 kHz） | 振幅 1.0000（過不足なく全帯域を覆う） |
+| 6→32 展開表 | 各オクターブ中心で期待どおり |
+| 単一パルスのピーク位置 | 期待位置と**ずれ 0 サンプル** |
+| 遅れ補正後のピーク時刻 | 10.0000 ms（入力どおり） |
+| 距離減衰 | `1/(t·c0)` と誤差 1e-12 未満 |
+
+### reverberation.py
+
+インパルス応答 → 減衰曲線・残響時間（元コード ipls2rt_fortran.f90）。
+移植元はあるが Python 側は**新規モジュール**（2026-08-14）。
+
+```python
+reverberation_time(time, ir, rt_filename=None, decay_filename=None,
+                   frequencies=None, db_max=-5.0, db_min=-35.0, numtaps=4096) -> dict
+decay_curves(...) -> dict          # 保存なし
+bandpass(signal, numtaps, lower, upper) -> ndarray
+schroeder_integral(x) -> ndarray
+```
+
+戻り値の dict は `frequencies` / `time` / `decay` (nf, n) [dB] / `reverberation_time` (nf,) /
+`curvature` (nf,) [%]。`db_max` / `db_min` を変えれば T20（-5/-25）や EDT（0/-10）も出せる。
+
+**元コードとの相違点：巡回畳み込み → 線形畳み込み** ★重要
+
+元コードは FFT の掛け算だけで済ませているので**巡回畳み込み**になる。
+バンドパスは左右対称な直線位相 FIR なので入力の立ち上がりより**前の時刻**から応答が始まり
+（プリリンギング）、巡回畳み込みではそれが**バッファ末尾に回り込む**。
+しかもタップ数 = nn なので回り込みはバッファの半分に及ぶ。
+結果、減衰曲線の後半がまるごとプリリンギングで埋まり、Schroeder 積分に -20 dB 程度の
+**床**ができて -35 dB まで落ちなくなる。
+
+減衰率が既知の合成インパルス応答（指数減衰させた白色雑音）で確かめた結果:
+
+| 方式 | T60 = 0.3 s | 0.5 s | 1.0 s |
 |---|---|---|---|
-| `airdamping_coefficient()` | 41 行 | 空気吸収係数 mair（1/3 オクターブ 32 バンド、20℃湿度40%の近似） | → ndarray (32,) |
-| `power_airdamping(sound_velocity, reflection_timing, mair, soundsourceenergy_list)` | 92 行 | 各パルスのエネルギーに exp(−mair·c·t) を乗算 | → ndarray (32, パルス数) |
-| `transfer_function(reflection_timing, frequency_number, count, p, sound_velocity)` | 132 行 | パルス列を周波数領域の伝達関数に変換（√E · e^(−j2πf·t) / (t·c) の重ね合わせ） | → complex ndarray (32, nfreq) |
-| `time_responce(nn, mf, fmax)` | 147 行 | バンドごとの時間領域バンドパスフィルタ生成 | → ndarray (32, nn) |
-| `filter_bandpass(n, min, max)` | fir1_bandpass | Hamming 窓付き FIR バンドパス（sinc の差 × 窓） | → ndarray (n+1,) |
-| `fft_timeresponce(ht, nn)` | 158 行 | フィルタの FFT | → ndarray (32, nn) |
-| `fft_negativerange(transfer, nn)` | 169 行 | 伝達関数の負周波数側を複素共役で拡張 | → ndarray (32, nn) |
-| `convolution_hfhtf(hf, htf, nn)` | 184 行 | 周波数領域の乗算（= 時間領域の畳み込み） | → ndarray (32, nn) |
-| `inversefft_responce(hfcc, nn)` | 196〜216 行 | 逆 FFT 後に 32 バンドを合算して IR に | → ndarray (nn,) |
-| `write_impulseresponce(filename, ir, dt, nn)` | 220, 230 行 | 時間ベクトルを付けて CSV 出力 | ファイル出力 |
-| `fft_filter(x, n, sign)` | subroutine fft | 自作 Cooley-Tukey FFT（sign=1 順変換 / −1 逆変換+正規化） | → ndarray |
+| 巡回畳み込み（元コード, タップ数 = nn） | 算出不可 or 5.89 s | 算出不可 or 5.85 s | 5.77 s |
+| **線形畳み込み（本実装, 4096 タップ）** | **0.29〜0.34 s** | **0.48〜0.52 s** | **0.98〜1.02 s** |
 
-既知の課題（前回レビューで詳細指摘済み）:
-- 転記ミス: Hamming 窓の `+`→`*`、伝達関数の `+`→`*`、空気吸収の括弧位置と配列代入、負周波数の添字、逆 FFT 呼び出しの欠落 ほか
-- `df`（周波数離散化幅）が `transfer_function` に未受け渡し（コード内メモあり）
-- Fortran 側にある 6 バンド吸音率 → 32 バンドへの展開表が未移植
-- 自作 FFT は `np.fft`、バンドパスは `scipy.signal.firwin` への置き換えを検討中（コード内メモあり）
+そこで本実装は線形畳み込み（ゼロ詰めして畳み込み、遅れぶんを切り落とす）に変え、
+タップ数も既定 4096 にした。同じ検証で**誤差の中央値 1.2 %**（125 Hz で減衰が短いときだけ
+14 % 程度になるが、これは帯域幅×減衰時間が小さいことによる手法の限界で ISO 3382 でも既知）。
+
+**曲率（curvature）**
+
+評価区間を半分にした推定値との食い違いを % で返す（ISO 3382 の C）。
+0 に近ければ減衰が直線。**10 % を超えたら結果を疑う**。
+`nref` が足りずに後部残響が途中で切れているときの検知に使える。
+`procedure.py` 側でも「nref に達した経路がある」場合に警告を出している。
 
 ---
 

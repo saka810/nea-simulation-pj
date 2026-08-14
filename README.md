@@ -66,9 +66,29 @@ python view_model_gui.py ..\test.dxf --absorption ..\absorption.csv
 # モデルビューア（HTML + WebGL を書き出してブラウザで開く。依存ライブラリ不要）
 python view_model.py ..\test.dxf --absorption ..\absorption.csv
 
-# シミュレーション本体
-python procedure.py
+# シミュレーション本体（DXF → パルス列 → インパルス応答 → 残響時間）
+python procedure.py ..\test.dxf --absorption ..\absorption.csv --out ..\結果 ^
+       --rays 20000 --nref 8 --compensate-delay
 ```
+
+`--out` に以下が書き出される。
+
+| ファイル | 内容 |
+|---|---|
+| `*_raylog.npz` | 可視化用の音線軌跡 |
+| `*_pulses.csv` | パルス列（反射回数・到来時刻・到来方向・バンド別エネルギー） |
+| `*_ir.csv` | インパルス応答 |
+| `*_rt.csv` | 残響時間 T30（オクターブバンド別） |
+| `*_decay.csv` | 減衰曲線 |
+
+## 検証
+
+```powershell
+.\.venv\Scripts\python tests\test_geosim.py
+```
+
+解析的に答えが分かる問題（直方体の虚音源距離、減衰率が既知の応答など）で
+数式レベルの正しさを確かめる。**数式に関わるコードを変更したら必ず走らせること。**
 
 ## 動作確認用の DXF
 

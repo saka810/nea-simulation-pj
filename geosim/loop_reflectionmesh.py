@@ -49,10 +49,15 @@ def loop(soundsource_point, reciever_point, soundray_list, nref, mesh, sphere_ra
 
     戻り値:
         list[list[int]] 受音した経路ごとの反射面 ID 履歴（元コード traceff 相当）
+        反射した順に面 ID が並ぶ。**反射回数 = len(history)**。
+        直接音（無反射）で受音した経路は空リストになる。
 
-        ⚠ 各履歴の先頭要素は元コード tractmp(0) = -1 に対応する番兵で、面 ID ではない。
-          反射回数 = len(history) - 1。下流で mesh[history[k]] のように使うと
-          -1 が「最後の面」を指してしまうので、必ず先頭を除いてから扱うこと。
+        【番兵 -1 について】2026-08-14 に廃止（TODO A-9）。
+        元コードは `tractmp(0) = -1`、`tractmp(k+1) = jtmp` と 1 つずらして詰めており、
+        バックトレース側は `tracred(i,k)` を **k = 1 から** 読む（元コード 903行）。
+        つまり添字 0 の -1 は**一度も参照されない固定長配列のパディング**でしかない。
+        Python は可変長リストなので持つ意味がなく、持っていると
+        `mesh[history[0]]` が -1 で最後の面を指す事故のもとになるため落とした。
     """
     reflectionmeshid_history_2dim = []
 
@@ -60,8 +65,8 @@ def loop(soundsource_point, reciever_point, soundray_list, nref, mesh, sphere_ra
     for soundray_i in range(len(soundray_list)):
 
         # 一時反射履歴の初期化。音線 1 本ごとにリセットする（元コード 535〜542行）
-        # 先頭の -1 は元コード tractmp(0) = -1 に対応する番兵
-        reflectionmeshid_history = [-1]
+        # 元コードの番兵 tractmp(0) = -1 は持たない（上の docstring 参照）
+        reflectionmeshid_history = []
 
         soundray_comesfrom = np.asarray(soundsource_point, dtype=float)
         sound_ray = soundray_list[soundray_i, :]
