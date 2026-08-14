@@ -663,7 +663,7 @@ def test_normals():
           len(to_flip) == len(flipped_all.mesh) and ambiguous == 0,
           f"{len(to_flip)}/{len(flipped_all.mesh)} 判定割れ {ambiguous}")
 
-    # flip_faces で手動指定した面だけが反転する
+    # flip_faces は「CAD の巻き順から反転する面」の絶対集合
     manual = rd.read_model(TEST_DXF, orient_normals="cad", flip_faces=[0, 3],
                            verbose=False)
     base = rd.read_model(TEST_DXF, orient_normals="cad", verbose=False)
@@ -671,6 +671,42 @@ def test_normals():
              for j, (m, b) in enumerate(zip(manual.mesh, base.mesh)))
     check("flip_faces で指定した面だけが反転する", ok,
           f"反転 {sorted(manual.flipped_faces)}")
+
+    # ★自動判定 → 保存 → 読み直しで**同じ法線に戻る**こと。
+    #   ここが差分扱いだと、自動が反転した面を手動指定が二度反転して元に戻ってしまう
+    #   （実際にそれで残響時間が半分近く変わった。2026-08-15）
+    for dxf in (TEST_DXF, os.path.join(ROOT, "test2.dxf")):
+        if not os.path.exists(dxf):
+            continue
+        auto = rd.read_model(dxf, orient_normals="auto", verbose=False)
+        saved = sorted(auto.flipped_faces)
+        again = rd.read_model(dxf, orient_normals="auto", flip_faces=saved,
+                              verbose=False)
+        same = all(np.allclose(a.normal, b.normal)
+                   for a, b in zip(auto.mesh, again.mesh))
+        check(f"自動判定を保存して読み直すと同じ法線になる（{os.path.basename(dxf)}）",
+              same and sorted(again.flipped_faces) == saved,
+              f"反転 {len(saved)}/{len(auto.mesh)} 枚")
+
+    # **実際に反転が起きるケース**で往復を見る（test.dxf は自動反転が 0 枚なので
+    # そのままだと二重反転の不具合を踏まない）。'flip' は全 12 枚を反転する
+    flipped_model = rd.read_model(TEST_DXF, orient_normals="flip", verbose=False)
+    saved = sorted(flipped_model.flipped_faces)
+    restored = rd.read_model(TEST_DXF, orient_normals="flip", flip_faces=saved,
+                             verbose=False)
+    check("反転が起きるモデルでも保存→読み直しで同じ法線になる",
+          len(saved) == len(flipped_model.mesh)
+          and all(np.allclose(a.normal, b.normal)
+                  for a, b in zip(flipped_model.mesh, restored.mesh)),
+          f"反転 {len(saved)}/{len(flipped_model.mesh)} 枚")
+
+    # 自動判定を人が上書きした場合も、そのとおりに再現される
+    edited = sorted(set(sorted(rd.read_model(TEST_DXF, orient_normals="auto",
+                                             verbose=False).flipped_faces)) ^ {2, 5})
+    replayed = rd.read_model(TEST_DXF, orient_normals="auto", flip_faces=edited,
+                             verbose=False)
+    check("人が直した指定が自動判定より優先される",
+          sorted(replayed.flipped_faces) == edited, f"反転 {edited}")
 
     # OCS→WCS。押し出し方向が Z なら恒等変換、水平なら鉛直面を張る
     same = rd.ocs_to_wcs([1.0, 2.0, 3.0], [0.0, 0.0, 1.0])

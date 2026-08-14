@@ -1008,9 +1008,11 @@ def read_model(file_name, unit=None, absorption_table=None, default_absorption=N
                          外殻は内向き、内側の物体は外向き。
                          巻き順が一貫していない場合は補正を中止して 'cad' と同じ挙動になる
           'inward'     … 面ごとにレイの偶奇で室内側へ揃える。面のつながりを要求しない
-        flip_faces        **上の判定のあとに反転する面インデックス**（人が目で見て直したぶん）。
+        flip_faces        **CAD の巻き順から反転する面インデックスの絶対集合**。
                           `normal_editor.py` が作り、`project.py` が normals.json に保存する。
-                          自動判定を上書きするので、これが最後の決定になる
+                          渡すと `orient_normals` の判定を**丸ごと置き換える**（差分ではない）。
+                          人が確認し終えた最終状態そのものなので、
+                          保存したものを読めば必ず同じ法線になる
         reference_point   使わない（旧 'toward' 用。渡すと警告する）
         source_layers     音源として扱う POINT のレイヤ名
         receiver_layers   受音点として扱う POINT のレイヤ名
@@ -1237,16 +1239,24 @@ def read_model(file_name, unit=None, absorption_table=None, default_absorption=N
               "CAD 側で法線が空気側を向くようにモデルを作ってください。")
 
     # 自動判定のあとに、**人が目で見て直した指定**を重ねる（normal_editor.py / project.py）。
-    # 自動判定を上書きするので順序が要点。ここが最後の決定になる
-    manual = set(int(i) for i in (flip_faces or ()))
-    if manual:
-        note += f" / 手動で {len(manual)} 枚を反転"
+    # ★`flip_faces` は「**CAD の巻き順から反転する面**」の絶対集合であって、
+    #   自動判定への差分ではない。**渡されたら自動判定を丸ごと置き換える。**
+    #
+    #   normal_editor が保存するのは「人が確認し終えた最終状態」で、
+    #   自動判定の結果もそこに畳み込まれている。差分として上に重ねると、
+    #   自動が反転した面を手動指定がもう一度反転して**元に戻ってしまう**
+    #   （実際にそれで残響時間が半分近く変わった）。
+    #   絶対集合として扱えば、保存したものを読めば必ず同じ法線になる。
+    manual = None if flip_faces is None else set(int(i) for i in flip_faces)
+    if manual is not None:
+        note += (f" → 保存済みの指定で置き換え（{len(manual)} / {len(kept)} 枚を反転）")
     model.flipped_faces = set()
 
     for j, (layer, x1, x2, x3, n) in enumerate(kept):
-        flipped = flip_all or (per_face_flip is not None and j in per_face_flip)
-        if j in manual:
-            flipped = not flipped
+        if manual is not None:
+            flipped = j in manual
+        else:
+            flipped = flip_all or (per_face_flip is not None and j in per_face_flip)
         if flipped:
             n = -n
             model.flipped_faces.add(j)

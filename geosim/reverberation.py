@@ -540,10 +540,33 @@ def write_reverberation_time(filename, result):
     return filename
 
 
-def write_decay_curve(filename, result):
-    """減衰曲線を CSV に保存する。元コード 146〜150 行。"""
+# 減衰曲線を CSV に書き出すときの時間刻み [s]。1 ms（= 1 kHz 相当）。
+DECAY_CSV_INTERVAL = 0.001
+
+
+def write_decay_curve(filename, result, interval=DECAY_CSV_INTERVAL):
+    """減衰曲線を CSV に保存する。元コード 146〜150 行。
+
+    **サンプリング周波数のまま書かず、`interval` ごとに間引く。**
+    Schroeder 逆積分は「時刻 t 以降に残っているエネルギー」なので
+    **滑らかな単調減少**で、44.1 kHz の分解能で持つ意味がない。
+    そのまま書くと 3 秒 × 6 バンドで 14 MB になり、Excel で開くのも一苦労になる。
+    1 ms 刻みなら 300 KB 程度で、T30 の読み取り（0.1 秒単位の議論）には十分。
+
+    間引きは**先頭から等間隔に抜く**だけ（平均は取らない）。単調減少なので
+    抜いた点も曲線の上に乗っており、傾きは変わらない。
+
+    `interval=None` を渡せば全点書ける（細かく見たいとき）。
+    残響指標そのものは間引く前のデータから求めているので、この設定に依らない。
+    """
+    time = result["time"]
+    decay = result["decay"]
+    if interval:
+        dt = float(time[1] - time[0])
+        step = max(1, int(round(interval / dt)))
+        time, decay = time[::step], decay[:, ::step]
     header = ["time_s"] + [f"decay_{f:.0f}Hz_db" for f in result["frequencies"]]
-    rows = np.column_stack([result["time"], result["decay"].T])
+    rows = np.column_stack([time, decay.T])
     np.savetxt(filename, rows, delimiter=",", header=",".join(header),
                comments="", fmt="%.12g")
     return filename

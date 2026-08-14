@@ -74,11 +74,13 @@ def _sub_project(project, index):
     # DXF と吸音率は親フォルダのものをそのまま使う（絶対パスにしておく）
     sub.dxf = project.dxf_path
     sub.absorption_csv = project.absorption_path or ""
-    sub.ensure_dirs()
+    # ★ここではフォルダを作らない。実際に回す `_run_one` に任せる。
+    #   先に作ると、受音点が 1 つしかないのに空の rec2/ が残って紛らわしい
     return sub
 
 
 def _run_one(project, receiver, verbose=True, make_figures=True, write_back=True):
+    project.ensure_dirs()
     dxf = project.dxf_path
 
     # 法線の手動指定。面数が合わないときは project 側が警告して空を返す
