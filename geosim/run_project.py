@@ -81,6 +81,9 @@ def _sub_project(project, index):
 
 def _run_one(project, receiver, verbose=True, make_figures=True, write_back=True):
     project.ensure_dirs()
+    # 前回の結果を消してから回す。条件を変えたときに古いファイルが残っていると、
+    # 今回の条件の値だと思って読んでしまう
+    project.clear_results(verbose=verbose)
     dxf = project.dxf_path
 
     # 法線の手動指定。面数が合わないときは project 側が警告して空を返す

@@ -38,10 +38,13 @@ def _visualise(project, results=None):
         print("[app] 音線軌跡が無いので可視化は開きません（先に計算してください）")
         return
     try:
+        # ★受音した経路だけに絞らない。**音がどう広がるか**を見るのが目的なので、
+        #   受音経路だけにすると（偏ってはいないが）本数が減って様子が分かりにくい。
+        #   経路の確認をしたいときは view_rays.py に --received-only を付けて呼ぶ
         vr.view(project.dxf_path, raylog, mode="both",
                 absorption=project.absorption_path,
                 unit=project.unit, orient_normals=project.orient_normals,
-                received_only=True, max_rays=60, max_reflection=4,
+                received_only=False, max_rays=60, max_reflection=4,
                 colour="time", opacity=0.10, frames=300, point_size=7)
     except Exception:
         print("[app] 可視化ウィンドウでエラーが起きました:")
@@ -68,6 +71,12 @@ def _report(project, results):
             if stat is not None:
                 extra = f"{stat['sabine'][i]:9.3f}{stat['eyring'][i]:9.3f}"
             print(f"  {fc:7.0f}Hz{cells}{extra}")
+
+    if stat is None and project.statistical:
+        print("\n  ※ 統計残響式（Sabine / Eyring）は計算できませんでした。")
+        print("     このモデルは閉じていないので容積が自動で決まりません。")
+        print("     条件入力の「室容積」に値を入れると比較できます"
+              "（床面積 × 天井高で構いません）。")
 
     print(f"\n  結果 CSV : {project.path(pj.RESULT_DIR)}")
     print(f"  図 PNG   : {project.path(pj.FIGURE_DIR)}")

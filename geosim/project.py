@@ -127,6 +127,39 @@ class Project:
             os.makedirs(self.path(sub) if sub else self.folder, exist_ok=True)
         return self
 
+    def clear_results(self, verbose=True):
+        """前回の計算結果と図を消す。
+
+        条件を変えて回し直したとき、**前回の条件で作ったファイルが残っていると
+        新しい結果と混ざる**。たとえば容積を空にして統計残響式が飛ばされると、
+        前回の `rt_statistical.csv` だけが古いまま残り、いまの条件の値だと
+        思って読んでしまう（実際に起きた）。
+
+        消すのは**このプログラムが作るファイルだけ**。フォルダごと消すと
+        利用者が置いた資料まで巻き添えにするので、名前を決め打ちにしてある。
+        """
+        removed = 0
+        for key in RESULT_FILES:
+            path = self.result_path(key)
+            if os.path.exists(path):
+                os.remove(path)
+                removed += 1
+        for name in ("clarity.csv",):
+            path = self.path(RESULT_DIR, name)
+            if os.path.exists(path):
+                os.remove(path)
+                removed += 1
+        figures = self.path(FIGURE_DIR)
+        if os.path.isdir(figures):
+            for name in os.listdir(figures):
+                if name.lower().endswith(".png"):
+                    os.remove(os.path.join(figures, name))
+                    removed += 1
+        if removed and verbose:
+            print(f"[project] 前回の結果と図を {removed} 個消しました"
+                  f"（古い条件のファイルが混ざらないように）")
+        return removed
+
     def to_dict(self):
         data = {key: getattr(self, key) for key in DEFAULTS}
         data["dxf"] = self._relative(self.dxf_path)

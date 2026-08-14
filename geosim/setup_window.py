@@ -48,6 +48,41 @@ NUMBER_FIELDS = [
 ]
 
 
+def estimate_volume(dxf_path, unit=None):
+    """DXF から室容積の目安を出す（統計残響式の入力を埋めるため）。
+
+    閉じていれば符号付き体積、閉じていなければ**床面積 × 天井高**で見積もる。
+    板の寄せ集めモデルでは容積が自動で決まらず、空欄のままだと統計残響式が
+    黙って飛ばされる（実際にそれで比較できない結果が出た）ので、
+    ここで目安を出して入力欄に入れられるようにした。
+
+    戻り値 (容積 [m³], 求め方の説明)。求められなければ (None, 理由)。
+    """
+    import numpy as np
+    import read_dxffile as rd
+
+    # ★法線を揃えてから読む。CAD のままだと**天井の法線も上を向いている**ことがあり、
+    #   「法線が真上＝床」で拾うと天井まで床に数えて容積が倍になる（実際になった）
+    model = rd.read_model(dxf_path, unit=unit, orient_normals="auto", verbose=False)
+    if not model.mesh:
+        return None, "面が読めません"
+    if model.is_closed and model.volume:
+        return float(model.volume), "閉じた形状の体積"
+
+    # 床（法線がほぼ真上＝室内を向いている水平面）の面積 × 高さ。
+    # 壁が鉛直な部屋ならこれで足りる
+    floor = 0.0
+    for face in model.mesh:
+        v = face.vertexes
+        if face.normal[2] > 0.9:
+            floor += 0.5 * float(np.linalg.norm(
+                np.cross(v[1] - v[0], v[2] - v[0])))
+    height = float(model.extents[1][2] - model.extents[0][2])
+    if floor <= 0.0 or height <= 0.0:
+        return None, "床が見つからないので見積もれません"
+    return floor * height, f"床 {floor:.1f} m² × 高さ {height:.2f} m の目安"
+
+
 class SetupWindow:
     """条件入力のウィンドウ。`run()` が (Project, 押されたボタン) を返す。
 
@@ -115,8 +150,14 @@ class SetupWindow:
             self.vars[key] = var
             ttk.Entry(frame, textvariable=var, width=14).grid(row=row, column=1,
                                                               sticky="w", padx=8)
-            ttk.Label(frame, text=hint, foreground="#666").grid(row=row, column=2,
-                                                               sticky="w")
+            cell = ttk.Frame(frame)
+            cell.grid(row=row, column=2, sticky="w")
+            if key == "volume":
+                # 空欄のままだと統計残響式が黙って飛ばされるので、目安を入れられるようにする
+                ttk.Button(cell, text="モデルから見積もる", width=18,
+                           command=self._estimate_volume).pack(side="left",
+                                                               padx=(0, 8))
+            ttk.Label(cell, text=hint, foreground="#666").pack(side="left")
 
     def _build_options(self, parent):
         frame = self._section(parent, "設定")
@@ -261,6 +302,25 @@ class SetupWindow:
                                           initialdir=start or os.getcwd())
         if path:
             self.vars[key].set(os.path.normpath(path))
+
+    def _estimate_volume(self):
+        dxf = self.vars["dxf"].get().strip()
+        if not dxf or not os.path.exists(dxf):
+            messagebox.showerror("モデルを先に選んでください",
+                                 "DXF ファイルが指定されていません")
+            return
+        try:
+            volume, note = estimate_volume(dxf, unit=self.project.unit)
+        except Exception as e:
+            messagebox.showerror("見積もれませんでした", f"{type(e).__name__}: {e}")
+            return
+        if volume is None:
+            messagebox.showwarning("見積もれませんでした", note)
+            return
+        self.vars["volume"].set(f"{volume:.2f}")
+        messagebox.showinfo("室容積",
+                            f"{volume:.2f} m³ を入れました\n（{note}）\n\n"
+                            f"統計残響式（Sabine / Eyring）はこの値を使います。")
 
     def _on_save(self):
         error = self._collect()
