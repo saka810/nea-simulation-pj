@@ -74,6 +74,9 @@ python view_rays.py ..\test.dxf ..\結果\test_raylog.npz --received-only --max-
 python view_rays.py ..\test.dxf ..\結果\test_raylog.npz --mode particles
 python view_rays.py ..\test.dxf ..\結果\test_raylog.npz --mode particles --movie 広がり.gif
 
+# 壁の透過をレイヤごとに指定（実行中は左の縦スライダと Tab / m でも変えられる）
+python view_rays.py ..\test.dxf ..\結果\test_raylog.npz --layer-opacity "1=0.6,2=0.05"
+
 # シミュレーション本体（DXF → パルス列 → インパルス応答 → 残響時間）
 python procedure.py ..\test.dxf --absorption ..\absorption.csv --absorption-kind normal ^
        --out ..\結果 --rays 20000 --nref 8 --bands 8 --temperature 20 --humidity 40

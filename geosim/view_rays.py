@@ -23,9 +23,16 @@
     # GIF に書き出す
     python view_rays.py ..\\test.dxf ..\\結果\\test_raylog.npz --mode particles --movie 広がり.gif
 
-操作（音線）: ドラッグで回転 / ホイールで拡大縮小 / `r` 視点リセット / `q` 終了
-操作（音粒子）: `スペース` 再生・一時停止 / `←` `→` 1 コマ送り / `Home` 先頭へ /
-                下のスライダで時刻を指定
+操作:
+    共通      ドラッグ 回転 / ホイール 拡大縮小 / `r` 視点リセット / `q` 終了
+              左上のチェックボックス レイヤの表示 ON/OFF
+              **左の縦スライダ 不透明度** / `Tab` その対象を切り替え（すべて↔各レイヤ）
+              `m` モデル表示の ON/OFF
+    音粒子    `スペース` 再生・一時停止 / `←` `→` 1 コマ送り / `Home` 先頭へ /
+              下の横スライダ 時刻を指定
+
+壁の透過はレイヤごとに変えられる。起動時に決めておくなら
+`--opacity`（全体）と `--layer-opacity "1=0.6,2=0.05"`（レイヤ別）。
 
 ※ 全体的な GUI の設計（G-7）は後回しにしている。ここは「見るための最小限」に留めてある。
 """
@@ -350,9 +357,11 @@ class ParticleAnimation:
         self.playing = not self.playing
 
 
-def animate(plotter, raylog, index=None, frames=240, band=None, interval=40,
-            point_size=9.0):
-    """対話ウィンドウで音粒子アニメーションを回す。"""
+def animate(plotter, raylog, index=None, frames=240, band=None, point_size=9.0):
+    """音粒子アニメーションの部品（スライダ・キー操作）を組み立てる。
+
+    実際にコマを進めるのは `run_animation()`。
+    """
     animation = ParticleAnimation(plotter, raylog, index=index, frames=frames,
                                   band=band, point_size=point_size)
 
@@ -362,19 +371,48 @@ def animate(plotter, raylog, index=None, frames=240, band=None, interval=40,
     plotter.add_key_event("Home", lambda: animation.update(0))
 
     # 見出しは VTK の既定フォントで描かれるので英字にする（日本語は豆腐になる）
-    plotter.add_slider_widget(
+    animation.slider = plotter.add_slider_widget(
         lambda value: animation.update(int(round(value))),
         [0, frames - 1], value=0, title="frame", pointa=(0.32, 0.05),
         pointb=(0.90, 0.05), style="modern", fmt="%.0f",
         color=TEXT_COLOR, title_color=TEXT_COLOR)
+    return animation
 
-    # VTK のタイマーで駒を進める。pyvista の版によって呼び名が違うので両方試す
+
+def run_animation(plotter, animation, interval=30):
+    """ウィンドウを開いてアニメーションを回す（閉じられるまで戻らない）。
+
+    【なぜ VTK のタイマーを使わないか】2026-08-14
+    最初は `Plotter.add_timer_event()` で駒を進めていたが、**発火しなかった**
+    （20 回 × 50 ms なら 1 秒で終わるはずが、60 秒経っても 0 回）。
+    VTK の `CreateRepeatingTimer` は interactor の初期化後でないと効かないが、
+    pyvista の API は `show()` より前に呼ぶ形になっているためだと思われる。
+    コマ送り（キー操作）だけ効いて再生されない、という症状になっていた。
+
+    そこで **`show(interactive_update=True)` で非ブロッキング表示にして、
+    こちらのループから `update()` を呼ぶ**方式にした。
+    pyvista のアニメーション例でも使われている確実な作り方で、
+    回転などの操作は `update()` の中で処理される。
+    """
+    closed = {"flag": False}
+    plotter.add_key_event("q", lambda: closed.__setitem__("flag", True))
     try:
-        plotter.add_timer_event(max_steps=10 ** 9, duration=interval,
-                                callback=lambda step: animation.advance())
-    except (AttributeError, TypeError):
-        plotter.iren.add_observer("TimerEvent", lambda *a: animation.advance())
-        plotter.iren.create_timer(interval)
+        plotter.iren.add_observer("ExitEvent",
+                                  lambda *a: closed.__setitem__("flag", True))
+    except Exception:
+        pass
+
+    plotter.show(interactive_update=True, auto_close=False)
+    while not closed["flag"]:
+        if getattr(plotter, "_closed", False) or plotter.render_window is None:
+            break
+        if animation.playing:
+            animation.update(animation.step + 1)
+        try:
+            plotter.update(interval)
+        except (RuntimeError, AttributeError):
+            break
+    plotter.close()
     return animation
 
 
@@ -412,7 +450,8 @@ def save_movie(raylog, model, filename, index=None, frames=240, band=None,
 def view(dxf_path, raylog_path, mode="rays", absorption=None, unit=None,
          orient_normals="cad", received_only=False, max_rays=None,
          max_reflection=None, colour="energy", band=None, frames=240,
-         opacity=0.12, movie=None, point_size=9.0, screenshot=None):
+         opacity=0.12, layer_opacity=None, movie=None, point_size=9.0,
+         screenshot=None, interval=30):
     """モデルの上に音線または音粒子を重ねて表示する。"""
     model = rd.read_model(dxf_path, unit=unit, absorption_table=absorption,
                           orient_normals=orient_normals)
@@ -432,38 +471,58 @@ def view(dxf_path, raylog_path, mode="rays", absorption=None, unit=None,
 
     base = os.path.splitext(os.path.basename(dxf_path))[0]
     title = f"{base} {'音粒子' if mode == 'particles' else '音線'}"
-    plotter = vg.build_plotter(model, title=title, off_screen=screenshot is not None,
+    off_screen = screenshot is not None
+    plotter = vg.build_plotter(model, title=title, off_screen=off_screen,
                                show_normals=False, opacity=opacity,
-                               show_summary=False)
+                               layer_opacity=layer_opacity, show_summary=False)
     plotter.add_text(raylog.summary().replace(" / ", "\n"), position="upper_right",
                      font_size=9, color="#9aa2b1", font_file=vg.japanese_font())
 
+    font = vg.japanese_font()
+    animation = None
     if mode == "rays":
         add_rays(plotter, raylog, index=index, colour=colour, band=band,
                  max_reflection=max_reflection)
-        plotter.add_text("space/矢印キーは音粒子モードで有効", position=(14, 14),
-                         font_size=9, color="#7f8794", font_file=vg.japanese_font())
     elif mode == "particles":
-        if screenshot is None:
-            animate(plotter, raylog, index=index, frames=frames, band=band,
-                    point_size=point_size)
-            plotter.add_text("スペース 再生/停止   ← → コマ送り   Home 先頭",
-                             position=(14, 14), font_size=9, color="#7f8794",
-                             font_file=vg.japanese_font())
-        else:
+        if off_screen:
             ParticleAnimation(plotter, raylog, index=index, frames=frames,
                               band=band, point_size=point_size).update(frames // 3)
+        else:
+            animation = animate(plotter, raylog, index=index, frames=frames,
+                                band=band, point_size=point_size)
+            plotter.add_text("スペース 再生/停止   ← → コマ送り   Home 先頭",
+                             position=(14, 14), font_size=9, color="#7f8794",
+                             font_file=font)
     else:
         raise ValueError(f"mode は 'rays' か 'particles' です: {mode!r}")
 
+    # 壁の透過はレイヤごとに変えられる（Tab で対象切替、m で表示 ON/OFF）
+    if not off_screen:
+        vg.add_opacity_control(plotter, font=font)
+
     plotter.view_isometric()
-    if screenshot is not None:
+    if off_screen:
         plotter.screenshot(screenshot)
         plotter.close()
         print(f"[view_rays] 画像を書き出しました: {screenshot}")
+    elif animation is not None:
+        run_animation(plotter, animation, interval=interval)
     else:
         plotter.show()
     return raylog
+
+
+def parse_layer_opacity(text):
+    """`"1=0.05,2=0.3"` のような指定を辞書にする。"""
+    if not text:
+        return None
+    result = {}
+    for item in text.split(","):
+        if "=" not in item:
+            raise ValueError(f"--layer-opacity の書式は レイヤ名=値 です: {item!r}")
+        name, value = item.rsplit("=", 1)
+        result[name.strip()] = float(value)
+    return result
 
 
 def main():
@@ -487,7 +546,13 @@ def main():
     p.add_argument("--band", type=int, help="エネルギーで色分けするときのバンド番号（0 始まり）")
     p.add_argument("--frames", type=int, default=240, help="アニメーションのコマ数")
     p.add_argument("--point-size", type=float, default=9.0, help="音粒子の大きさ")
-    p.add_argument("--opacity", type=float, default=0.12, help="モデルの不透明度")
+    p.add_argument("--opacity", type=float, default=0.12,
+                   help="モデルの不透明度（0=透明, 1=不透明）。既定 0.12")
+    p.add_argument("--layer-opacity",
+                   help="レイヤごとの不透明度。例 \"1=0.6,2=0.05\"。"
+                        "指定しないレイヤは --opacity を使う")
+    p.add_argument("--interval", type=int, default=30,
+                   help="アニメーションのコマ間隔 [ms]")
     p.add_argument("--movie", help="GIF に書き出す（ウィンドウを開かない）")
     p.add_argument("--screenshot", help="静止画に書き出す（ウィンドウを開かない）")
     a = p.parse_args()
@@ -495,8 +560,9 @@ def main():
     view(a.dxf, a.raylog, mode=a.mode, absorption=a.absorption, unit=a.unit,
          orient_normals=a.orient_normals, received_only=a.received_only,
          max_rays=a.max_rays, max_reflection=a.max_reflection, colour=a.color,
-         band=a.band, frames=a.frames, opacity=a.opacity, movie=a.movie,
-         point_size=a.point_size, screenshot=a.screenshot)
+         band=a.band, frames=a.frames, opacity=a.opacity,
+         layer_opacity=parse_layer_opacity(a.layer_opacity), movie=a.movie,
+         point_size=a.point_size, screenshot=a.screenshot, interval=a.interval)
 
 
 if __name__ == "__main__":
