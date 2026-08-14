@@ -64,6 +64,193 @@ def japanese_font():
     return None
 
 
+# 左の操作パネルが占める幅の割合。残りが 3D 表示になる
+PANEL_RATIO = 0.25
+
+
+class ControlPanel:
+    """ウィンドウ左端の操作パネル（2026-08-15 追加）。
+
+    以前はレイヤのチェックボックス・不透明度スライダ・操作説明を
+    **3D 表示の上に直接重ねて**いたため、モデルが見えなくなるうえ、
+    要素どうしが重なって読めなくなっていた（ユーザー指摘）。
+
+    そこで**ウィンドウを左右に分け、左 1/4 を操作パネル専用**にした。
+    さらに、このクラスが**上から順に積む**ので要素が重ならない
+    （y 座標を手で決めていたのが重なりの原因だった）。
+
+    2 つのレンダラを使う（`pv.Plotter(shape=(1,2), col_weights=[1,4])`）。
+    文字はレンダラのビューポート内の座標で置かれるので、
+    パネル側のレンダラに追加すれば自然に左 1/5 に収まる。
+    一方**ウィジェット（チェックボックス・スライダ）はウィンドウ全体の座標**なので、
+    パネル側のレンダラを選んでから置いている。
+    """
+
+    LINE = 18           # 文字 1 行ぶんの高さ [px]（font_size 9 のとき）
+    CHECK = 18          # チェックボックスの一辺 [px]
+    SLIDER = 80         # スライダ 1 つぶんの高さ [px]（値・バー・見出しの 3 段ぶん）
+    LABEL_FONT = 8      # レイヤ名など、横に長くなりがちな文字
+
+    def __init__(self, plotter, font=None, margin=14, width_ratio=PANEL_RATIO):
+        self.plotter = plotter
+        self.font = font
+        self.margin = margin
+        self.width = int(plotter.window_size[0] * width_ratio)
+        self.height = plotter.window_size[1]
+        self.ratio = width_ratio
+        self.y = self.height - margin      # 上から下へ積んでいく
+        self._widgets = []                 # 参照を残さないと GC で消える
+
+    # ---- 配置の道具 ----------------------------------------------------
+
+    def _panel(self):
+        """パネル側のレンダラを選ぶ（文字を置く前に呼ぶ）。"""
+        self.plotter.subplot(0, 0)
+
+    def _model(self):
+        """3D 側のレンダラに戻す。"""
+        self.plotter.subplot(0, 1)
+
+    def gap(self, pixels=10):
+        self.y -= pixels
+        return self
+
+    @staticmethod
+    def line_height(size):
+        """フォントサイズから 1 行の高さ [px] を見積もる。
+
+        VTK は行間を含めておよそ文字サイズの 2 倍を使う。
+        ここを小さく見積もると**文字どうしが重なる**（実際に重なった）。
+        """
+        return int(round(size * 2.0))
+
+    def text(self, message, size=9, color="#9aa2b1", indent=0):
+        """複数行の文字を置く。使ったぶんだけ下へ進むので、次の要素と重ならない。
+
+        ★VTK は**渡した位置がブロックの下端**で、そこから上へ書いていく。
+        だから先に高さぶん引いてから、その位置に置くのが正しい。
+        """
+        height = self.line_height(size)
+        available = self.width - 2 * self.margin - indent
+        message = "\n".join(self.fit(line, available, size)
+                            for line in str(message).split("\n"))
+        lines = message.count("\n") + 1
+        self.y -= height * lines
+        self._panel()
+        self.plotter.add_text(message, position=(self.margin + indent, self.y),
+                              font_size=size, color=color, font_file=self.font)
+        self._model()
+        return self
+
+    def reserve_text(self, lines, size=9, color=TEXT_COLOR):
+        """あとから書き換える文字のために場所を空け、その actor を返す。
+
+        行数が変わりうる表示（判定の内訳など）に使う。
+        **最大行数ぶんを確保**しておけば、行が減っても上に隙間ができるだけで重ならない。
+        """
+        self.y -= self.line_height(size) * lines
+        self._panel()
+        actor = self.plotter.add_text(" ", position=(self.margin, self.y),
+                                      font_size=size, color=color,
+                                      font_file=self.font)
+        self._model()
+        return actor
+
+    def heading(self, message):
+        self.gap(8)
+        return self.text(message, size=10, color=TEXT_COLOR)
+
+    def fit(self, text, available, size=None):
+        """パネルの幅に収まるように文字を切り詰める（末尾を … にする）。
+
+        レイヤ名は日本語で長くなりがちで、そのままだとパネルの外へはみ出して
+        **途中で切れて読めなくなる**。全角はおよそ文字サイズと同じ幅、
+        半角はその半分として見積もる（正確な幅は VTK 側でしか測れないので概算）。
+        """
+        size = size or self.LABEL_FONT
+        width = 0.0
+        for i, ch in enumerate(text):
+            width += size * (1.9 if ord(ch) > 0x2000 else 1.0)
+            if width > available:
+                return text[:max(1, i - 1)] + "…"
+        return text
+
+    def checkbox(self, label, value, callback, colour="#4cc9f0"):
+        """チェックボックス 1 つと、その右のラベル。"""
+        self.y -= self.CHECK + 4
+        # ★ウィジェットは**そのとき選ばれているレンダラのビューポート**に置かれる。
+        #   パネル側を選んでおかないと 3D 側に出てしまう
+        self._panel()
+        widget = self.plotter.add_checkbox_button_widget(
+            callback, value=value, position=(self.margin, self.y),
+            size=self.CHECK, border_size=2, color_on=colour,
+            color_off="#454c58", background_color="#2b303a")
+        self._widgets.append(widget)
+        left = self.margin + self.CHECK + 8
+        self.plotter.add_text(self.fit(label, self.width - left - self.margin),
+                              position=(left, self.y + 3),
+                              font_size=self.LABEL_FONT, color=TEXT_COLOR,
+                              font_file=self.font)
+        self._model()
+        return widget
+
+    def slider(self, title, value_range, value, callback, fmt="%.2f"):
+        """横向きのスライダ。**見出しは英字にする**（VTK の既定フォントは日本語を持たない）。
+
+        位置は**パネル側ビューポートの正規化座標**で与える（0〜1 がパネルの幅）。
+        """
+        self.y -= self.SLIDER
+        self._panel()
+        x0 = self.margin / self.width
+        x1 = (self.width - self.margin) / self.width
+        # バーの位置。**見出しはバーの下**に描かれるので、確保した帯の中に収まるよう上寄せする
+        y = (self.y + 44) / self.height
+
+        # ★スライダは**生成時にコールバックを 1 回呼ぶ**。そのときはパネル側の
+        #   レンダラが選ばれているので、コールバックの中で 3D の actor を作り直すと
+        #   **パネルの中に 3D が描かれてしまう**（実際に音線がパネルに出た）。
+        #   生成時の 1 回は無視し、以降は必ず 3D 側を選んでから呼ぶ。
+        state = {"ready": False}
+
+        def guarded(value):
+            if not state["ready"]:
+                return
+            self._model()
+            callback(value)
+
+        widget = self.plotter.add_slider_widget(
+            guarded, value_range, value=value, title=title,
+            pointa=(x0, y), pointb=(x1, y), style="modern", fmt=fmt,
+            color=TEXT_COLOR, title_color=TEXT_COLOR,
+            title_height=0.022, tube_width=0.004, slider_width=0.02)
+        state["ready"] = True
+        self._widgets.append(widget)
+        self._model()
+        return widget
+
+
+def make_plotter(title, window_size, off_screen, panel=True):
+    """左に操作パネル、右に 3D を持つ Plotter を作る。
+
+    `panel=False` なら従来どおり 1 画面（画像の書き出しなど、操作しないとき用）。
+    """
+    if not panel:
+        plotter = pv.Plotter(window_size=window_size, title=title,
+                             off_screen=off_screen)
+        plotter.set_background(BG_BOTTOM, top=BG_TOP)
+        return plotter, None
+
+    plotter = pv.Plotter(shape=(1, 2), col_weights=[PANEL_RATIO, 1.0 - PANEL_RATIO],
+                         window_size=window_size, title=title,
+                         off_screen=off_screen, border=False)
+    plotter.subplot(0, 0)
+    plotter.set_background(BG_BOTTOM)
+    plotter.subplot(0, 1)
+    plotter.set_background(BG_BOTTOM, top=BG_TOP)
+    return plotter, ControlPanel(plotter, font=japanese_font(),
+                                 width_ratio=PANEL_RATIO)
+
+
 def triangles_to_polydata(triangles):
     """Mesh のリストを pv.PolyData にする。
 
@@ -108,7 +295,7 @@ def normal_arrows(poly, length):
 def build_plotter(model, title="モデルビューア", off_screen=False,
                   show_normals=True, normal_ratio=0.06, window_size=(1280, 860),
                   opacity=1.0, show_bounds=True, show_summary=True,
-                  layer_opacity=None):
+                  layer_opacity=None, panel=True):
     """DxfModel から Plotter を組み立てて返す（show() はしない）。
 
     opacity … 面の不透明度。音線を重ねるときは 0.15 くらいにすると中が見える
@@ -134,8 +321,7 @@ def build_plotter(model, title="モデルビューア", off_screen=False,
     diag = float(np.linalg.norm(np.asarray(hi) - np.asarray(lo))) or 1.0
     arrow_len = diag * normal_ratio
 
-    plotter = pv.Plotter(window_size=window_size, title=title, off_screen=off_screen)
-    plotter.set_background(BG_BOTTOM, top=BG_TOP)
+    plotter, panel = make_plotter(title, window_size, off_screen, panel=panel)
 
     face_actors = {}
     arrow_actors = {}
@@ -171,12 +357,14 @@ def build_plotter(model, title="モデルビューア", off_screen=False,
                             font_size=9, color="#7f8794", xtitle="X [m]",
                             ytitle="Y [m]", ztitle="Z [m]")
 
-    header = f"{title}\n三角形 {len(mesh)} 枚 / レイヤ {len(layers)}"
-    plotter.add_text(header, position="upper_left", font_size=11,
-                     color=TEXT_COLOR, font_file=font)
-    if show_summary:
-        plotter.add_text(model.summary(), position=(12, 12), font_size=8,
-                         color="#9aa2b1", font_file=font)
+    if panel is None:
+        # パネルが無いときだけ 3D の上に文字を重ねる（画像書き出しなど）
+        plotter.add_text(f"{title}\n三角形 {len(mesh)} 枚 / レイヤ {len(layers)}",
+                         position="upper_left", font_size=11,
+                         color=TEXT_COLOR, font_file=font)
+        if show_summary:
+            plotter.add_text(model.summary(), position=(12, 12), font_size=8,
+                             color="#9aa2b1", font_file=font)
 
     # ---- 視点プリセット（VTK 既定の w/s/r/q とぶつからないキーを選ぶ） ----
     plotter.add_key_event("z", plotter.view_xy)
@@ -194,27 +382,17 @@ def build_plotter(model, title="モデルビューア", off_screen=False,
 
     plotter.add_key_event("n", toggle_normals)
 
-    # ---- レイヤの表示切り替え（対話時のみ。off_screen では interactor が無い） ----
-    if not off_screen:
-        size = 18
-        gap = 8
-        # 要約テキストが左下を使うので、チェックボックスはヘッダの下から下向きに並べる
-        top_y = window_size[1] - 78
+    # ---- 左パネルにレイヤの表示切り替えを並べる ----
+    if panel is not None:
+        panel.text(f"{title}", size=11, color=TEXT_COLOR)
+        panel.text(f"三角形 {len(mesh)} 枚 / レイヤ {len(layers)}", size=9)
+        panel.heading("レイヤ表示")
         for i, name in enumerate(layers):
-            y = top_y - i * (size + gap)
-            plotter.add_checkbox_button_widget(
-                _visibility_callback(plotter, face_actors[name], arrow_actors[name],
-                                     state),
-                value=True, position=(14, y), size=size, border_size=2,
-                color_on=LAYER_PALETTE[i % len(LAYER_PALETTE)],
-                color_off="#454c58", background_color="#2b303a",
-            )
             count = model.layer_counts.get(name, 0)
-            plotter.add_text(f"{name}  ({count})", position=(14 + size + 10, y + 2),
-                             font_size=9, color=TEXT_COLOR, font_file=font)
-        plotter.add_text("z/x/c/v 視点  n 法線  w/s 表示  r リセット  q 終了",
-                         position=(14, top_y - len(layers) * (size + gap) - 12),
-                         font_size=9, color="#7f8794", font_file=font)
+            panel.checkbox(f"{name} ({count})", True,
+                           _visibility_callback(plotter, face_actors[name],
+                                                arrow_actors[name], state),
+                           colour=LAYER_PALETTE[i % len(LAYER_PALETTE)])
 
     plotter.view_isometric()
     # あとから不透明度や表示を変えられるよう、レイヤごとの actor を Plotter に持たせる。
@@ -224,17 +402,33 @@ def build_plotter(model, title="モデルビューア", off_screen=False,
                        "colour": LAYER_PALETTE[i % len(LAYER_PALETTE)],
                        "opacity": layer_opacity[name]}
                 for i, name in enumerate(layers)}
-    try:
-        pv.set_new_attribute(plotter, "geosim_layers", registry)
-    except AttributeError:
-        plotter._geosim_layers = registry
+    _attach(plotter, "geosim_layers", registry)
+    _attach(plotter, "geosim_panel", panel)
     return plotter
+
+
+def _attach(plotter, name, value):
+    """Plotter に独自の情報を持たせる。
+
+    pyvista は新しい公開属性の追加を禁じているので専用 API を使う
+    （無い版のために private 名へのフォールバックも用意しておく）。
+    """
+    try:
+        pv.set_new_attribute(plotter, name, value)
+    except AttributeError:
+        setattr(plotter, "_" + name, value)
 
 
 def layer_actors(plotter):
     """`build_plotter` が登録したレイヤ情報を取り出す。"""
     return (getattr(plotter, "geosim_layers", None)
             or getattr(plotter, "_geosim_layers", None))
+
+
+def control_panel(plotter):
+    """`build_plotter` が作った左パネルを取り出す（無ければ None）。"""
+    return (getattr(plotter, "geosim_panel", None)
+            or getattr(plotter, "_geosim_panel", None))
 
 
 def set_actor_text(actor, text, corner=0):
@@ -251,26 +445,25 @@ def set_actor_text(actor, text, corner=0):
     return actor
 
 
-def add_opacity_control(plotter, font=None, pointa=(0.075, 0.30),
-                        pointb=(0.075, 0.62), label_position=None,
-                        target_key="Tab"):
-    """モデルの不透明度を対話的に変えるスライダとキー操作を足す。
+def add_opacity_control(plotter, font=None, panel=None, target_key="o"):
+    """モデルの不透明度を変えるスライダとキー操作を、左パネルに足す。
 
-    - **Tab**（`target_key`） … 対象を切り替える（すべて → 各レイヤ → すべて …）
-    - **スライダ**（左側の縦） … 対象の不透明度を 0〜1 で設定する
+    - **スライダ** … 対象の不透明度を 0〜1 で設定する
+    - **`o`**（`target_key`） … 対象を切り替える（すべて → 各レイヤ → すべて …）
     - **m** … モデル全体の表示 ON / OFF
-
-    `target_key` を変えられるようにしてあるのは、Tab を別の用途
-    （view_rays の音線↔音粒子の切り替え）に使いたい場面があるため。
 
     レイヤごとに変えられるようにしてあるのは、
     「壁だけ薄くして中の様子を見る」「床は残す」といった使い方をするため。
 
-    ※ 左上のチェックボックスは**表示のオンオフ**（不透明度とは別）。
+    ※ パネルのチェックボックスは**表示のオンオフ**（不透明度とは別）。
     """
     layers = layer_actors(plotter)
     if not layers:
         raise ValueError("build_plotter が作った Plotter を渡してください")
+    if panel is None:
+        panel = control_panel(plotter)
+    if panel is None:
+        raise ValueError("操作パネルがありません（build_plotter(panel=True) で作ること）")
 
     names = list(layers)
     # ready … スライダを作った直後と、対象切替で値を書き換えるときにコールバックが
@@ -278,11 +471,6 @@ def add_opacity_control(plotter, font=None, pointa=(0.075, 0.30),
     #         これが無いと、生成時に「全レイヤの平均値」が全レイヤへ適用されてしまい、
     #         layer_opacity で個別に指定した値が消える
     state = {"target": 0, "visible": True, "ready": False}      # target 0 = すべて
-    if label_position is None:
-        # レイヤのチェックボックスと操作説明の下（左下の座標軸には被らない位置）
-        label_position = (14, max(120, plotter.window_size[1] - 230))
-    label = plotter.add_text(" ", position=label_position, font_size=9,
-                             color=TEXT_COLOR, font_file=font)
 
     def target_name():
         return "すべて" if state["target"] == 0 else names[state["target"] - 1]
@@ -293,12 +481,8 @@ def add_opacity_control(plotter, font=None, pointa=(0.075, 0.30),
         return layers[target_name()]["opacity"]
 
     def refresh_label():
-        text = (f"不透明度の対象: {target_name()}  ({current_opacity():.2f})\n"
-                f"{target_key} 対象切替   m モデル表示 ON/OFF")
-        if hasattr(label, "SetInput"):
-            label.SetInput(text)
-        else:
-            label.SetText(0, text)
+        set_actor_text(label, f"対象: {target_name()}\n"
+                              f"{target_key} 対象切替  m 表示ON/OFF")
 
     def apply(value):
         if not state["ready"]:
@@ -311,10 +495,9 @@ def add_opacity_control(plotter, font=None, pointa=(0.075, 0.30),
         refresh_label()
         plotter.render()
 
-    slider = plotter.add_slider_widget(
-        apply, [0.0, 1.0], value=current_opacity(), title="opacity",
-        pointa=pointa, pointb=pointb, style="modern", fmt="%.2f",
-        color=TEXT_COLOR, title_color=TEXT_COLOR)
+    panel.heading("不透明度")
+    slider = panel.slider("opacity", [0.0, 1.0], current_opacity(), apply)
+    label = panel.reserve_text(2)
     state["ready"] = True
 
     def set_slider(value):
@@ -361,6 +544,10 @@ def view(dxf_path, absorption=None, unit=None, orient_normals="cad",
                             layer_opacity=layer_opacity)
     if screenshot is None:
         add_opacity_control(plotter, font=japanese_font())
+        panel = control_panel(plotter)
+        panel.heading("操作")
+        panel.text("z/x/c/v 視点\nn 法線矢印\nw/s ワイヤ/面\nr リセット   q 終了",
+                   color="#7f8794")
     if screenshot is not None:
         plotter.screenshot(screenshot)
         plotter.close()

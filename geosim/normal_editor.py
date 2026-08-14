@@ -17,12 +17,15 @@ CAD で面を 1 枚ずつ描くと巻き順と押し出し方向で向きが決�
 | 赤 | 法線が室外を向いている。**反転が要る** |
 | 灰 | 判定できない（開いた形状など）。CAD の指定を尊重する |
 
+壁が不透明だと**奥の面の向きが見えない**ので、左パネルでレイヤごとに
+表示 ON/OFF と不透明度を変えられるようにしてある（既定の不透明度は 0.55）。
+
 操作:
-    ドラッグ 回転 / ホイール 拡大縮小 / `r` 視点リセット
+    ドラッグ 回転 / ホイール 拡大縮小 / `z` `x` `c` `v` 視点 / `r` リセット
     `p` 面の選択モード（枠で囲むと、その面を反転）
     `1`〜`9`  そのレイヤをまとめて反転
-    `a` 自動判定どおりに揃える   `c` CAD の巻き順に戻す   `x` 全反転
-    `n` 法線の矢印 ON/OFF        `w` ワイヤフレーム ON/OFF
+    `a` 自動判定どおりに揃える   `d` CAD の巻き順に戻す   `i` 全反転
+    `n` 法線の矢印 ON/OFF        `o` 不透明度の対象を切り替え
     `s` **保存して閉じる**       `q` 保存せずに閉じる
 """
 
@@ -40,6 +43,14 @@ VERDICT_COLORS = ["#4cc38a",    # 0 = 内向き（OK）
                   "#e5484d",    # 1 = 外向き（要反転）
                   "#8b929e"]    # 2 = 判定できない
 VERDICT_NAMES = ["内向き（OK）", "外向き（要反転）", "判定できない"]
+
+
+def _visibility(plotter, actor):
+    """チェックボックス用のコールバックを作る（クロージャの取り違え防止）。"""
+    def callback(flag):
+        actor.SetVisibility(flag)
+        plotter.render()
+    return callback
 
 
 class NormalEditor:
@@ -77,9 +88,11 @@ class NormalEditor:
         self.reliable = self.enclosure >= rd.ENCLOSURE_THRESHOLD
 
         self.plotter = None
-        self.surface = None
+        self.panel = None
+        self.surfaces = []      # [(面インデックス, PolyData)] をレイヤごとに
         self.arrows = None
         self.show_normals = False
+        self.label = None
 
     # ---- 状態 ----------------------------------------------------------
 
@@ -130,20 +143,29 @@ class NormalEditor:
 
     # ---- 表示 ----------------------------------------------------------
 
-    def _build_surface(self):
-        points = np.concatenate([np.asarray(t) for t in self.triangles])
-        cells = np.hstack([[3, 3 * i, 3 * i + 1, 3 * i + 2] for i in range(self.count)])
+    def _build_surface(self, faces):
+        """指定した面だけの PolyData を作る（レイヤごとに 1 つ作る）。
+
+        レイヤごとに分けるのは、**レイヤ単位で表示 ON/OFF と不透明度を変えたい**ため。
+        壁が不透明なままだと中の面の向きが確認できない（ユーザー指摘）。
+        """
+        faces = np.asarray(faces, dtype=np.int64)
+        points = np.concatenate([np.asarray(self.triangles[j]) for j in faces])
+        cells = np.hstack([[3, 3 * i, 3 * i + 1, 3 * i + 2]
+                           for i in range(len(faces))])
         surface = pv.PolyData(points, faces=cells.astype(np.int64))
-        # 選択した面から元の面番号を引けるようにしておく
-        surface.cell_data["face_id"] = np.arange(self.count, dtype=np.int64)
-        surface.cell_data["verdict"] = self.verdict()
+        # 選択した面から**元の面番号**を引けるようにしておく（反転の対象を決めるのに要る）
+        surface.cell_data["face_id"] = faces
+        surface.cell_data["verdict"] = self.verdict()[faces]
         return surface
 
     def refresh(self, render=True):
-        if self.surface is None:
+        if not self.surfaces:
             return
-        self.surface.cell_data["verdict"] = self.verdict()
-        self.surface.Modified()
+        verdict = self.verdict()
+        for faces, surface in self.surfaces:
+            surface.cell_data["verdict"] = verdict[faces]
+            surface.Modified()
         if self.arrows is not None:
             self.plotter.remove_actor(self.arrows, render=False)
             self.arrows = None
@@ -167,61 +189,93 @@ class NormalEditor:
                                             show_scalar_bar=False, lighting=False)
 
     def _refresh_label(self):
+        if self.label is None:
+            return
         counts = np.bincount(self.verdict(), minlength=3)
         lines = [f"面 {self.count} 枚 / 反転中 {len(self.flipped)} 枚"]
         for value, name in enumerate(VERDICT_NAMES):
             if counts[value]:
                 lines.append(f"  {name}: {counts[value]} 枚")
         if not self.reliable:
-            lines.append(f"  ※開いた形状（囲まれ度 {self.enclosure:.2f}）なので")
-            lines.append(f"    自動判定は使いません。CAD の指定を尊重します")
+            lines.append(f"※開いた形状（囲まれ度 {self.enclosure:.2f}）なので")
+            lines.append(f"  自動判定は使いません")
         elif self.ambiguous:
-            lines.append(f"  ※{self.ambiguous} 枚は自動判定が割れました（目で確認してください）")
+            lines.append(f"※{self.ambiguous} 枚は自動判定が割れました")
         vg.set_actor_text(self.label, "\n".join(lines))
 
-    def _layer_label(self):
-        lines = ["レイヤ（数字キーでまとめて反転）"]
-        for k, name in enumerate(self.layers[:9]):
-            n = int(np.count_nonzero(self.layer_of == k))
-            flipped = int(np.count_nonzero(
-                [j in self.flipped for j in np.nonzero(self.layer_of == k)[0]]))
-            lines.append(f"  {k + 1}: {name}  {n} 枚"
-                         + (f"（{flipped} 枚反転中）" if flipped else ""))
-        if len(self.layers) > 9:
-            lines.append(f"  … 他 {len(self.layers) - 9} レイヤ（数字キーは 9 まで）")
-        return "\n".join(lines)
+    def show(self, off_screen=False, screenshot=None, window_size=(1280, 860),
+             opacity=0.55, panel=None):
+        """ウィンドウを開く。保存されたら True を返す。
 
-    def show(self, off_screen=False, screenshot=None, window_size=(1280, 860)):
-        """ウィンドウを開く。保存されたら True を返す。"""
+        `opacity` の既定を 1.0 でなく 0.55 にしてあるのは、
+        **不透明だと手前の壁に隠れて奥の面の向きが確認できない**ため。
+        左パネルのスライダとレイヤのチェックボックスでさらに調整できる。
+        """
+        want_panel = (not off_screen) if panel is None else bool(panel)
+        self.plotter, panel = vg.make_plotter(self.title, window_size, off_screen,
+                                              panel=want_panel)
+        self.panel = panel
         font = vg.japanese_font()
-        self.plotter = pv.Plotter(title=self.title, window_size=window_size,
-                                  off_screen=off_screen)
-        self.plotter.set_background(BACKGROUND)
 
-        self.surface = self._build_surface()
-        self.plotter.add_mesh(self.surface, scalars="verdict",
-                              cmap=VERDICT_COLORS, clim=(0, 2),
-                              show_scalar_bar=False, show_edges=True,
-                              edge_color="#3a4150", line_width=1, opacity=1.0)
+        # レイヤごとに面をまとめる（表示 ON/OFF と不透明度をレイヤ単位で効かせるため）
+        self.surfaces = []
+        registry = {}
+        for k, name in enumerate(self.layers):
+            faces = np.nonzero(self.layer_of == k)[0]
+            surface = self._build_surface(faces)
+            actor = self.plotter.add_mesh(
+                surface, scalars="verdict", cmap=VERDICT_COLORS, clim=(0, 2),
+                show_scalar_bar=False, show_edges=True, edge_color="#3a4150",
+                line_width=1, opacity=opacity)
+            self.surfaces.append((faces, surface))
+            registry[name] = {"face": actor, "arrow": None,
+                              "colour": "#8b929e", "opacity": opacity}
+        vg._attach(self.plotter, "geosim_layers", registry)
+        vg._attach(self.plotter, "geosim_panel", panel)
 
-        for point, colour, name in [(self.model.source_points, "#ffd166", "音源"),
-                                    (self.model.receiver_points, "#4cc9f0", "受音点")]:
+        for point, colour in [(self.model.source_points, "#ffd166"),
+                              (self.model.receiver_points, "#4cc9f0")]:
             if point:
                 self.plotter.add_mesh(pv.PolyData(np.array(point)), color=colour,
                                       point_size=16, render_points_as_spheres=True)
+        self.plotter.add_axes(color=TEXT_COLOR)
 
-        self.label = self.plotter.add_text(" ", position=(14, window_size[1] - 110),
-                                           font_size=10, color=TEXT_COLOR, font_file=font)
-        self.plotter.add_text(self._layer_label(), position=(14, 150), font_size=9,
-                              color="#9aa2b1", font_file=font)
-        self.plotter.add_text(
-            "p 面を選んで反転   a 自動   c CAD に戻す   x 全反転\n"
-            "n 法線矢印   s 保存して閉じる   q 保存せず閉じる",
-            position=(14, 14), font_size=10, color=TEXT_COLOR, font_file=font)
+        if panel is not None:
+            panel.text(self.title, size=11, color=TEXT_COLOR)
+            self.label = panel.reserve_text(5)      # 判定の内訳は最大 5 行
 
+            panel.heading("レイヤ表示（数字キーで反転）")
+            for k, name in enumerate(self.layers):
+                faces = np.nonzero(self.layer_of == k)[0]
+                label = f"{k + 1}: {name} ({len(faces)})" if k < 9 \
+                    else f"{name} ({len(faces)})"
+                panel.checkbox(label, True,
+                               _visibility(self.plotter, registry[name]["face"]),
+                               colour="#4cc9f0")
+
+            vg.add_opacity_control(self.plotter, font=font, panel=panel,
+                                   target_key="o")
+            panel.heading("操作")
+            panel.text("p 面を枠で選んで反転\n"
+                       "数字キー レイヤごと反転\n"
+                       "a 自動判定に揃える\n"
+                       "d CAD の巻き順に戻す\n"
+                       "i 全反転   n 法線矢印\n"
+                       "z/x/c/v 視点   o 不透明度の対象\n"
+                       "s 保存して閉じる\n"
+                       "q 保存せず閉じる", color="#7f8794")
+        else:
+            self.label = self.plotter.add_text(" ", position=(14, window_size[1] - 110),
+                                               font_size=10, color=TEXT_COLOR,
+                                               font_file=font)
+
+        for key, action in (("z", self.plotter.view_xy), ("x", self.plotter.view_xz),
+                            ("c", self.plotter.view_yz),
+                            ("v", self.plotter.view_isometric)):
+            self.plotter.add_key_event(key, action)
         self.plotter.add_key_event("a", self.set_auto)
-        self.plotter.add_key_event("c", self.set_cad)
-        self.plotter.add_key_event("x", self.flip_all)
+        self.plotter.add_key_event("d", self.set_cad)      # default（CAD の巻き順）
+        self.plotter.add_key_event("i", self.flip_all)     # invert
         self.plotter.add_key_event("n", self._toggle_normals)
         self.plotter.add_key_event("s", self._save_and_close)
         for k in range(9):

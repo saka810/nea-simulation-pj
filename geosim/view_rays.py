@@ -23,17 +23,29 @@
     # GIF に書き出す
     python view_rays.py ..\\test.dxf ..\\結果\\test_raylog.npz --mode particles --movie 広がり.gif
 
+**画面は左右に分かれている**（2026-08-15）。左 1/4 が操作パネル、右 3/4 が 3D 表示。
+以前は 3D の上に操作系を重ねていたため、モデルが見えなくなるうえ
+要素どうしが重なって読めなかった（ユーザー指摘）。
+
+左パネルでできること:
+    レイヤの表示 ON/OFF（チェックボックス）
+    不透明度（スライダ）。`o` で対象を すべて↔各レイヤ に切り替え
+    **表示する音線の本数・音粒子の数**（スライダ）
+    音線の情報・時刻・操作説明
+
 操作:
-    共通      ドラッグ 回転 / ホイール 拡大縮小 / `r` 視点リセット / `q` 終了
+    共通      ドラッグ 回転 / ホイール 拡大縮小 / `z` `x` `c` `v` 視点 / `r` リセット / `q` 終了
               **`Tab` 音線 ↔ 音粒子の切り替え**（ウィンドウを閉じずに見比べられる）
-              左上のチェックボックス レイヤの表示 ON/OFF
-              **左の縦スライダ 不透明度** / `o` その対象を切り替え（すべて↔各レイヤ）
-              `m` モデル表示の ON/OFF
+              `o` 不透明度の対象を切り替え / `m` モデル表示の ON/OFF
     音粒子    `スペース` 再生・一時停止 / `←` `→` 1 コマ送り / `Home` 先頭へ /
               下の横スライダ 時刻を指定
 
-※ `--mode rays` / `--mode particles` で片方だけにした場合は、不透明度の対象切替は
-   従来どおり `Tab`（切り替える相手がいないため）。
+起動時の本数は `--max-rays`（既定 60）と `--max-particles`（既定は候補すべて）。
+候補そのものの上限は `--pool`（既定 2000）＝スライダの上限になる。
+
+★**本数を減らすときは等間隔に抜く**（`even_subset`）。音線は Fibonacci 螺旋で
+作っており添字に対して z が単調増加するので、先頭から取ると天頂付近に偏り、
+「片方向にしか飛んでいない」ように見えてしまう。
 
 壁の透過はレイヤごとに変えられる。起動時に決めておくなら
 `--opacity`（全体）と `--layer-opacity "1=0.6,2=0.05"`（レイヤ別）。
@@ -285,6 +297,67 @@ class RayLog:
 # ① 音線の可視化
 # ------------------------------------------------------------------------------
 
+def even_subset(index, count):
+    """`index` から `count` 本を**等間隔に**抜く。
+
+    ★先頭から `count` 本を取ってはいけない。音線は Fibonacci 螺旋で作っており、
+    **添字に対して z が単調増加**するので、先頭から取ると天頂付近の帽子状に偏る
+    （「片方向にしか飛んでいない」ように見える原因になる）。
+    等間隔に抜けば全方向に散ったままになる。
+    """
+    index = np.asarray(index)
+    count = int(np.clip(count, 1, len(index)))
+    if count >= len(index):
+        return index
+    picked = np.unique(np.round(np.linspace(0, len(index) - 1, count)).astype(int))
+    return index[picked]
+
+
+class RayDisplay:
+    """音線の折れ線。**表示本数をあとから変えられる**ようにまとめたもの。
+
+    本数を変えるたびに折れ線を作り直す（点群と違って線は本数で構造が変わるため）。
+    数百本までなら作り直しても一瞬で終わる。
+    """
+
+    def __init__(self, plotter, raylog, index, colour="energy", band=None,
+                 line_width=2.0, cmap="plasma", highlight_received=True,
+                 opacity=0.8, max_reflection=None, count=None):
+        self.plotter = plotter
+        self.raylog = raylog
+        self.pool = np.asarray(index)
+        self.colour = colour
+        self.band = band
+        self.line_width = line_width
+        self.cmap = cmap
+        self.highlight_received = highlight_received
+        self.opacity = opacity
+        self.max_reflection = max_reflection
+        self.count = int(count or len(self.pool))
+        self.actors = []
+        self.visible = True
+        self.rebuild(self.count, render=False)
+
+    def rebuild(self, count, render=True):
+        self.count = int(np.clip(count, 1, len(self.pool)))
+        for actor in self.actors:
+            self.plotter.remove_actor(actor, render=False)
+        self.actors = [a for a in add_rays(
+            self.plotter, self.raylog, index=even_subset(self.pool, self.count),
+            colour=self.colour, band=self.band, line_width=self.line_width,
+            cmap=self.cmap, highlight_received=self.highlight_received,
+            opacity=self.opacity, max_reflection=self.max_reflection) if a is not None]
+        for actor in self.actors:
+            actor.SetVisibility(self.visible)
+        if render:
+            self.plotter.render()
+
+    def set_visible(self, flag):
+        self.visible = bool(flag)
+        for actor in self.actors:
+            actor.SetVisibility(self.visible)
+
+
 def add_rays(plotter, raylog, index=None, colour="energy", band=None,
              line_width=2.0, cmap="plasma", highlight_received=True, opacity=0.8,
              max_reflection=None):
@@ -336,7 +409,7 @@ class ParticleAnimation:
     """
 
     def __init__(self, plotter, raylog, index=None, frames=240, band=None,
-                 point_size=9.0, cmap="plasma"):
+                 point_size=9.0, cmap="plasma", label=None):
         self.plotter = plotter
         self.raylog = raylog
         self.index = np.arange(raylog.ray_count) if index is None else np.asarray(index)
@@ -344,6 +417,9 @@ class ParticleAnimation:
         self.band = band
         self.step = 0
         self.playing = True
+        # 表示する粒子の数。点の数（＝トポロジ）は変えず、**表示しないぶんは
+        # エネルギーを NaN にして隠す**（`nan_opacity=0`）。作り直しが起きない
+        self._shown = np.ones(len(self.index), dtype=bool)
 
         self.times = np.linspace(0.0, raylog.max_time, self.frames)
 
@@ -362,12 +438,13 @@ class ParticleAnimation:
                              "n_labels": 5, "fmt": "%.0f",
                              "position_x": 0.32, "position_y": 0.11,
                              "width": 0.5, "height": 0.05})
-        # 位置を座標で渡すと vtkTextActor が返る（文字列だと CornerAnnotation になり
-        # 差し替えの API が違うので、毎フレーム書き換えるここでは座標を使う）
-        width, height = plotter.window_size
-        self.label = plotter.add_text(" ", position=(width - 430, height - 150),
-                                      font_size=11, color=TEXT_COLOR,
-                                      font_file=vg.japanese_font())
+        # 時刻と粒子数の表示。**左パネルに置くのが既定**（`label` で渡す）。
+        # パネルが無いときだけ 3D の左下に出す。
+        # ウィンドウ幅からの相対位置で右上に置いていたが、レンダラを左右に分けたら
+        # ビューポートからはみ出して切れてしまった
+        self.label = label or plotter.add_text(
+            " ", position=(14, 14), font_size=11, color=TEXT_COLOR,
+            font_file=vg.japanese_font())
         self.update(0)
 
     @staticmethod
@@ -383,6 +460,7 @@ class ParticleAnimation:
 
         position, alive = self.raylog.positions_masked(t, self.index)
         energy = self.raylog.energy_masked(t, self.index, self.band)
+        energy[~self._shown] = np.nan       # 表示数を絞ったぶんを隠す
 
         # ★座標とスカラーだけを書き換える（頂点セルはそのまま）。
         #   点数を変えると毎フレーム VTK 側でジオメトリを組み直すことになる
@@ -390,11 +468,20 @@ class ParticleAnimation:
         self.cloud.point_data["energy"][:] = energy
         self.cloud.Modified()
 
+        visible = int(np.count_nonzero(alive & self._shown))
         self._set_text(self.label,
-                       f"{t * 1000:7.2f} ms   粒子 {int(alive.sum()):5d} / "
-                       f"{len(self.index)}   [{self.step + 1}/{self.frames}]")
+                       f"{t * 1000:.1f} ms\n"
+                       f"粒子 {visible}/{int(self._shown.sum())}"
+                       f"  [{self.step + 1}/{self.frames}]")
         if render:
             self.plotter.render()
+
+    def set_count(self, count, render=True):
+        """表示する粒子の数を変える。**等間隔に抜く**ので分布の偏りは出ない。"""
+        keep = even_subset(np.arange(len(self.index)), count)
+        self._shown = np.zeros(len(self.index), dtype=bool)
+        self._shown[keep] = True
+        self.update(self.step, render=render)
 
     def advance(self):
         if self.playing:
@@ -404,13 +491,14 @@ class ParticleAnimation:
         self.playing = not self.playing
 
 
-def animate(plotter, raylog, index=None, frames=240, band=None, point_size=9.0):
+def animate(plotter, raylog, index=None, frames=240, band=None, point_size=9.0,
+            label=None):
     """音粒子アニメーションの部品（スライダ・キー操作）を組み立てる。
 
     実際にコマを進めるのは `run_animation()`。
     """
     animation = ParticleAnimation(plotter, raylog, index=index, frames=frames,
-                                  band=band, point_size=point_size)
+                                  band=band, point_size=point_size, label=label)
 
     plotter.add_key_event("space", animation.toggle)
     plotter.add_key_event("Right", lambda: animation.update(animation.step + 1))
@@ -452,16 +540,15 @@ class RayParticleView:
 
     MODES = ("rays", "particles")
 
-    def __init__(self, plotter, animation=None, ray_actors=(), mode="rays",
-                 font=None, label_position=(14, 40)):
+    def __init__(self, plotter, animation=None, rays=None, mode="rays", panel=None):
         self.plotter = plotter
         self.animation = animation
-        self.ray_actors = [a for a in ray_actors if a is not None]
+        self.rays = rays
         self.mode = mode if mode in self.MODES else "rays"
         self._was_playing = True
-        self.label = plotter.add_text(" ", position=label_position, font_size=9,
-                                      color="#7f8794", font_file=font)
-        self.apply()
+        panel.heading("表示の切り替え")
+        self.label = panel.reserve_text(4)      # 音粒子のときは 4 行になる
+        self.apply(render=False)
 
     def _scalar_bar(self, title):
         try:
@@ -476,8 +563,8 @@ class RayParticleView:
     def apply(self, render=True):
         rays = self.mode == "rays"
 
-        for actor in self.ray_actors:
-            self._set_visible(actor, rays)
+        if self.rays is not None:
+            self.rays.set_visible(rays)
         for title in RAY_BAR_TITLE.values():
             self._set_visible(self._scalar_bar(title), rays)
 
@@ -501,10 +588,10 @@ class RayParticleView:
 
     def _refresh_label(self):
         if self.mode == "rays":
-            text = "表示: 音線    Tab 音粒子へ"
+            text = "いま: 音線\nTab で音粒子へ"
         else:
-            text = ("表示: 音粒子    Tab 音線へ\n"
-                    "スペース 再生/停止   ← → コマ送り   Home 先頭")
+            text = ("いま: 音粒子\nTab で音線へ\n"
+                    "スペース 再生/停止\n← → コマ送り   Home 先頭")
         ParticleAnimation._set_text(self.label, text)
 
     def toggle(self):
@@ -559,9 +646,10 @@ def save_movie(raylog, model, filename, index=None, frames=240, band=None,
     """
     from PIL import Image
 
+    # 動画はパネル無しで（3D だけを大きく写す）
     plotter = vg.build_plotter(model, title="音粒子", off_screen=True,
                                show_normals=False, opacity=opacity,
-                               window_size=window_size)
+                               window_size=window_size, panel=False)
     animation = ParticleAnimation(plotter, raylog, index=index, frames=frames,
                                   band=band, point_size=point_size)
     plotter.view_isometric()
@@ -581,75 +669,100 @@ def save_movie(raylog, model, filename, index=None, frames=240, band=None,
 # 入口
 # ------------------------------------------------------------------------------
 
-def view(dxf_path, raylog_path, mode="rays", absorption=None, unit=None,
-         orient_normals="cad", received_only=False, max_rays=None,
+def view(dxf_path, raylog_path, mode="both", absorption=None, unit=None,
+         orient_normals="cad", received_only=False, max_rays=60,
+         max_particles=None, pool_size=2000,
          max_reflection=None, colour="energy", band=None, frames=240,
          opacity=0.12, layer_opacity=None, movie=None, point_size=9.0,
          screenshot=None, interval=30):
-    """モデルの上に音線または音粒子を重ねて表示する。"""
+    """モデルの上に音線と音粒子を重ねて表示する。
+
+    max_rays / max_particles
+        **起動時に見せる本数**。実行中は左パネルのスライダで変えられる。
+        音線は数十本にしないと線が重なって読めない。
+        音粒子は点なので多いほど広がりが分かる（既定は候補すべて）。
+    pool_size
+        描く候補として抱えておく音線の本数。スライダの上限になる。
+    """
     model = rd.read_model(dxf_path, unit=unit, absorption_table=absorption,
                           orient_normals=orient_normals)
     raylog = RayLog(raylog_path)
     print(f"[view_rays] {raylog.summary()}")
 
-    index = raylog.selection(received_only=received_only, max_rays=max_rays)
-    if len(index) == 0:
+    if mode not in ("rays", "particles", "both"):
+        raise ValueError(f"mode は 'rays' / 'particles' / 'both' です: {mode!r}")
+
+    # **描く候補**をまとめて選んでおき、実際に見せる本数はスライダで決める。
+    # 音線と音粒子で見やすい本数がまるで違う（線は数十本、点は数千個）ので、
+    # 候補は広めに取って表示側で絞る
+    pool = raylog.selection(received_only=received_only, max_rays=pool_size)
+    if len(pool) == 0:
         raise ValueError("条件に合う音線がありません（--received-only を外してみてください）")
-    print(f"[view_rays] 描画する音線 {len(index)} 本")
+    ray_count = min(max_rays or 60, len(pool))
+    particle_count = min(max_particles or len(pool), len(pool))
+    print(f"[view_rays] 候補 {len(pool)} 本 / 音線 {ray_count} 本・音粒子 "
+          f"{particle_count} 個を表示（スライダで変えられます）")
 
     if movie is not None:
-        path = save_movie(raylog, model, movie, index=index, frames=frames,
+        path = save_movie(raylog, model, movie,
+                          index=even_subset(pool, particle_count), frames=frames,
                           band=band, point_size=point_size, opacity=opacity)
         print(f"[view_rays] 動画を書き出しました: {path}")
         return raylog
 
     base = os.path.splitext(os.path.basename(dxf_path))[0]
-    title = f"{base} {'音粒子' if mode == 'particles' else '音線'}"
+    title = f"{base} 音線・音粒子"
     off_screen = screenshot is not None
+    # 静止画（--screenshot）でもパネルごと写す。画面で見えるものと同じにするため
     plotter = vg.build_plotter(model, title=title, off_screen=off_screen,
                                show_normals=False, opacity=opacity,
-                               layer_opacity=layer_opacity, show_summary=False)
-    plotter.add_text(raylog.summary().replace(" / ", "\n"), position="upper_right",
-                     font_size=9, color="#9aa2b1", font_file=vg.japanese_font())
-
-    if mode not in ("rays", "particles", "both"):
-        raise ValueError(f"mode は 'rays' / 'particles' / 'both' です: {mode!r}")
-
+                               layer_opacity=layer_opacity, show_summary=False,
+                               panel=True)
+    panel = vg.control_panel(plotter)
     font = vg.japanese_font()
+
     want_rays = mode in ("rays", "both")
     want_particles = mode in ("particles", "both")
 
-    ray_actors = ()
+    rays = None
     if want_rays:
-        ray_actors = add_rays(plotter, raylog, index=index, colour=colour, band=band,
-                              max_reflection=max_reflection)
+        rays = RayDisplay(plotter, raylog, pool, colour=colour, band=band,
+                          max_reflection=max_reflection, count=ray_count)
 
     animation = None
     if want_particles:
+        time_label = None
+        if panel is not None:
+            panel.heading("時刻")
+            time_label = panel.reserve_text(2, size=10)
+        animation = animate(plotter, raylog, index=pool, frames=frames,
+                            band=band, point_size=point_size, label=time_label)
+        animation.set_count(particle_count, render=False)
         if off_screen:
-            # 静止画は代表的な 1 コマだけ描く（アニメーションの部品は要らない）
-            ParticleAnimation(plotter, raylog, index=index, frames=frames,
-                              band=band, point_size=point_size).update(frames // 3)
-        else:
-            animation = animate(plotter, raylog, index=index, frames=frames,
-                                band=band, point_size=point_size)
+            animation.update(frames // 3, render=False)
 
-    switch = None
-    if not off_screen:
+    if panel is not None:
+        vg.add_opacity_control(plotter, font=font, panel=panel, target_key="o")
+
+        panel.heading("表示する本数")
+        if rays is not None:
+            panel.slider("rays", [1, len(pool)], ray_count,
+                         lambda v: rays.rebuild(int(round(v))), fmt="%.0f")
+        if animation is not None:
+            panel.slider("particles", [1, len(pool)], particle_count,
+                         lambda v: animation.set_count(int(round(v))), fmt="%.0f")
+
+        switch = None
         if mode == "both":
-            # 音線と音粒子を同居させて Tab で切り替える。
-            # 不透明度の対象切替は Tab を譲って o に移す
-            switch = RayParticleView(plotter, animation=animation,
-                                     ray_actors=ray_actors, mode="rays", font=font)
+            # 音線と音粒子を同居させて Tab で切り替える
+            switch = RayParticleView(plotter, animation=animation, rays=rays,
+                                     mode="rays", panel=panel)
             plotter.add_key_event("Tab", switch.toggle)
-            vg.add_opacity_control(plotter, font=font, target_key="o")
-        else:
-            if animation is not None:
-                plotter.add_text("スペース 再生/停止   ← → コマ送り   Home 先頭",
-                                 position=(14, 14), font_size=9, color="#7f8794",
-                                 font_file=font)
-            # 壁の透過はレイヤごとに変えられる（Tab で対象切替、m で表示 ON/OFF）
-            vg.add_opacity_control(plotter, font=font)
+
+        panel.heading("音線の情報")
+        panel.text(raylog.summary().replace(" / ", "\n"))
+        panel.heading("操作")
+        panel.text("z/x/c/v 視点   r リセット   q 終了", color="#7f8794")
 
     plotter.view_isometric()
     if off_screen:
@@ -685,15 +798,19 @@ def main():
                         "rays=音線の折れ線だけ / particles=音粒子だけ")
     p.add_argument("--absorption", help="吸音率 CSV（モデル表示用。省略可）")
     p.add_argument("--unit", help="'mm' / 'm' など")
-    p.add_argument("--orient-normals", default="cad",
-                   choices=["cad", "flip", "shells", "inward"],
-                   help="法線の扱い。inward=面ごとに室内側へ揃える"
-                        "（CAD で法線を意識せずに描いたモデル用）")
+    p.add_argument("--orient-normals", default="auto",
+                   choices=["auto", "cad", "flip", "shells", "inward"],
+                   help="法線の扱い。auto=閉じていれば内向き・開いていれば CAD のまま（既定）")
     p.add_argument("--received-only", action="store_true",
                    help="受音した経路だけを描く")
-    p.add_argument("--max-rays", type=int, default=80,
-                   help="描く音線の本数の上限（等間隔に間引く）。"
-                        "多すぎると線が重なって読めなくなる。既定 80")
+    p.add_argument("--max-rays", type=int, default=60,
+                   help="起動時に描く音線の本数（実行中はスライダで変えられる）。"
+                        "多すぎると線が重なって読めなくなる。既定 60")
+    p.add_argument("--max-particles", type=int, default=None,
+                   help="起動時に描く音粒子の数（実行中はスライダで変えられる）。"
+                        "既定は候補すべて。点なので多いほど広がりが分かる")
+    p.add_argument("--pool", type=int, default=2000,
+                   help="描く候補として抱える音線の本数＝スライダの上限。既定 2000")
     p.add_argument("--max-reflection", type=int,
                    help="描く反射回数の上限。そこで折れ線を打ち切る（初期反射だけ見たいとき）")
     p.add_argument("--color", default="energy", choices=list(COLOR_MODES),
@@ -714,7 +831,8 @@ def main():
 
     view(a.dxf, a.raylog, mode=a.mode, absorption=a.absorption, unit=a.unit,
          orient_normals=a.orient_normals, received_only=a.received_only,
-         max_rays=a.max_rays, max_reflection=a.max_reflection, colour=a.color,
+         max_rays=a.max_rays, max_particles=a.max_particles, pool_size=a.pool,
+         max_reflection=a.max_reflection, colour=a.color,
          band=a.band, frames=a.frames, opacity=a.opacity,
          layer_opacity=parse_layer_opacity(a.layer_opacity), movie=a.movie,
          point_size=a.point_size, screenshot=a.screenshot, interval=a.interval)
