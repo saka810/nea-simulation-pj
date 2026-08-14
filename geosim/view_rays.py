@@ -102,8 +102,9 @@ class RayLog:
             self.pad_nodes[i, :n] = self.nodes[start:stop]
             self.pad_nodes[i, n:] = self.nodes[stop - 1]
 
-        self.total_distance = self.pad_distance[
-            np.arange(rows), self.node_counts - 1]
+        order = np.arange(rows)
+        self.total_distance = self.pad_distance[order, self.node_counts - 1]
+        self.last_node = self.pad_nodes[order, self.node_counts - 1]
         self.max_time = float(self.total_distance.max()) / self.sound_velocity
 
     # ---- 抜き出し ----------------------------------------------------
@@ -180,11 +181,11 @@ class RayLog:
 
     # ---- ② 音粒子 ----------------------------------------------------
 
-    def positions_at(self, time, index=None):
-        """時刻 time [s] における音粒子の位置を**まとめて**求める。
+    def positions_masked(self, time, index=None):
+        """時刻 time [s] の粒子位置を、`index` と同じ並びで返す。
 
-        戻り値 (位置 (K,3), 元の音線の添字 (K,))。
-        まだ出発していない／すでに消えた音線は含まれない。
+        戻り値 (位置 (len(index),3), 生きているか (len(index),) の bool)。
+        すでに消えた音線の位置は**最後の節点**に置く（描画側で隠す前提）。
 
         `RayTrajectory.position_at()` の一括版。毎フレーム音線ごとに呼ぶと
         Python のループが効いてくるので、行を揃えた配列で一度に計算する。
@@ -192,11 +193,12 @@ class RayLog:
         if index is None:
             index = np.arange(self.ray_count)
         distance = time * self.sound_velocity
-
         alive = distance <= self.total_distance[index]
+
+        position = self.last_node[index].copy()
         rows = index[alive]
         if len(rows) == 0:
-            return np.zeros((0, 3)), rows
+            return position, alive
 
         pad = self.pad_distance[rows]
         # 「distance 以下の要素数 - 1」が区間の添字。inf 埋めなので末尾は数えられない
@@ -207,28 +209,58 @@ class RayLog:
         d0 = pad[order, k]
         d1 = pad[order, k + 1]
         span = d1 - d0
-        weight = np.where(span > 0.0, (distance - d0) / np.where(span > 0.0, span, 1.0), 0.0)
+        weight = np.where(span > 0.0,
+                          (distance - d0) / np.where(span > 0.0, span, 1.0), 0.0)
 
         n0 = self.pad_nodes[rows, k]
         n1 = self.pad_nodes[rows, k + 1]
-        return n0 + weight[:, None] * (n1 - n0), rows
+        position[alive] = n0 + weight[:, None] * (n1 - n0)
+        return position, alive
 
-    def energy_at(self, time, index=None, band=None):
-        """時刻 time における粒子のエネルギー（dB）。反射のたびに階段状に下がる。"""
+    def positions_at(self, time, index=None):
+        """時刻 time における、**生きている粒子だけ**の位置。
+
+        戻り値 (位置 (K,3), 元の音線の添字 (K,))。
+        """
+        if index is None:
+            index = np.arange(self.ray_count)
+        position, alive = self.positions_masked(time, index)
+        return position[alive], index[alive]
+
+    def energy_masked(self, time, index=None, band=None):
+        """時刻 time の粒子エネルギー（dB）を `index` と同じ並びで返す。
+
+        消えた粒子は **NaN**。描画側で `nan_opacity=0` にして隠すため。
+        """
+        if index is None:
+            index = np.arange(self.ray_count)
         if self.energies is None:
-            return None
-        position, rows = self.positions_at(time, index)
-        if len(rows) == 0:
-            return np.zeros(0)
+            return np.zeros(len(index))
+
         distance = time * self.sound_velocity
+        alive = distance <= self.total_distance[index]
+        result = np.full(len(index), np.nan)
+        rows = index[alive]
+        if len(rows) == 0:
+            return result
+
         pad = self.pad_distance[rows]
         k = np.clip(np.count_nonzero(pad <= distance, axis=1) - 1,
                     0, self.node_counts[rows] - 1)
-        flat = self.node_offsets[rows] + k
-        energy = self.energies[flat]
+        energy = self.energies[self.node_offsets[rows] + k]
         energy = energy[:, band] if band is not None else energy.mean(axis=1)
         with np.errstate(divide="ignore"):
-            return 10.0 * np.log10(np.maximum(energy, 1e-12))
+            result[alive] = 10.0 * np.log10(np.maximum(energy, 1e-12))
+        return result
+
+    def energy_at(self, time, index=None, band=None):
+        """時刻 time における、生きている粒子だけのエネルギー（dB）。"""
+        if self.energies is None:
+            return None
+        if index is None:
+            index = np.arange(self.ray_count)
+        result = self.energy_masked(time, index, band)
+        return result[~np.isnan(result)]
 
     def summary(self):
         return (f"音線 {self.ray_count} 本（元 {self.total_rays} 本を {self.stride} 本おき）"
@@ -280,30 +312,41 @@ def add_rays(plotter, raylog, index=None, colour="energy", band=None,
 class ParticleAnimation:
     """音粒子アニメーションの状態を持つ。
 
-    毎フレーム全音線の位置を計算し直して 1 つの点群を差し替える。
+    毎フレーム全音線の位置を計算し直して 1 つの点群を更新する。
     音線ごとに actor を作ると本数分の描画呼び出しになるので、点群 1 つにまとめている。
+
+    【トポロジは変えない】2026-08-14
+    最初は「生きている粒子だけ」を点群に入れていたので、フレームごとに点数が変わり
+    **頂点セルを毎回作り直していた**。動きはするが、毎フレーム VTK 側で
+    ジオメトリを組み直すことになり無駄が大きい。
+
+    そこで **点の数を音線の本数で固定**し、毎フレーム書き換えるのは座標とスカラーだけにした。
+    消えた粒子はスカラーを NaN にし、`nan_opacity=0` で見えなくしている。
+    6000 フレーム連続で 60 fps を確認済み。
     """
 
     def __init__(self, plotter, raylog, index=None, frames=240, band=None,
-                 point_size=9.0, cmap="plasma", trail=0.0):
+                 point_size=9.0, cmap="plasma"):
         self.plotter = plotter
         self.raylog = raylog
         self.index = np.arange(raylog.ray_count) if index is None else np.asarray(index)
         self.frames = int(frames)
         self.band = band
-        self.trail = float(trail)          # 尾を引く長さ [s]
         self.step = 0
         self.playing = True
 
         self.times = np.linspace(0.0, raylog.max_time, self.frames)
-        self.cloud = pv.PolyData(np.zeros((1, 3)))
-        self.cloud.point_data["energy"] = np.zeros(1)
-        self._dead = np.full(1, -120.0)
+
+        # 点数は最初に決めたら変えない（上記の理由）
+        count = len(self.index)
+        self.cloud = pv.PolyData(raylog.last_node[self.index].copy())
+        self.cloud.point_data["energy"] = np.full(count, np.nan)
 
         energies = raylog.energy_at(self.times[len(self.times) // 3], self.index, band)
         low = float(np.min(energies)) if energies is not None and len(energies) else -60.0
         self.actor = plotter.add_mesh(
             self.cloud, scalars="energy", cmap=cmap, clim=(max(low, -60.0), 0.0),
+            nan_opacity=0.0,
             point_size=point_size, render_points_as_spheres=True, lighting=False,
             scalar_bar_args={"title": "Energy [dB]", "color": TEXT_COLOR,
                              "n_labels": 5, "fmt": "%.0f",
@@ -324,30 +367,24 @@ class ParticleAnimation:
         else:                       # CornerAnnotation の場合（3 = 右上）
             actor.SetText(3, text)
 
-    def update(self, step):
+    def update(self, step, render=True):
         self.step = int(step) % self.frames
         t = self.times[self.step]
-        position, rows = self.raylog.positions_at(t, self.index)
-        energy = self.raylog.energy_at(t, self.index, self.band)
 
-        if len(position) == 0:
-            position = np.zeros((1, 3))
-            energy = np.full(1, -120.0)
-        elif energy is None:
-            energy = np.zeros(len(position))
+        position, alive = self.raylog.positions_masked(t, self.index)
+        energy = self.raylog.energy_masked(t, self.index, self.band)
 
-        # ★点の数が変わるので、座標だけでなく**頂点セルも作り直す**。
-        #   points を差し替えただけだと古いセル（＝最初の 1 点）しか描かれない
-        count = len(position)
-        self.cloud.points = position
-        self.cloud.verts = np.column_stack([
-            np.ones(count, dtype=np.int64),
-            np.arange(count, dtype=np.int64)]).ravel()
-        self.cloud.point_data["energy"] = energy
+        # ★座標とスカラーだけを書き換える（頂点セルはそのまま）。
+        #   点数を変えると毎フレーム VTK 側でジオメトリを組み直すことになる
+        self.cloud.points[:] = position
+        self.cloud.point_data["energy"][:] = energy
+        self.cloud.Modified()
+
         self._set_text(self.label,
-                       f"{t * 1000:7.2f} ms   粒子 {len(rows):5d} / {len(self.index)}"
-                       f"   [{self.step + 1}/{self.frames}]")
-        self.plotter.render()
+                       f"{t * 1000:7.2f} ms   粒子 {int(alive.sum()):5d} / "
+                       f"{len(self.index)}   [{self.step + 1}/{self.frames}]")
+        if render:
+            self.plotter.render()
 
     def advance(self):
         if self.playing:
@@ -407,7 +444,8 @@ def run_animation(plotter, animation, interval=30):
         if getattr(plotter, "_closed", False) or plotter.render_window is None:
             break
         if animation.playing:
-            animation.update(animation.step + 1)
+            # 描画は plotter.update() に任せる（ここで render すると二重に描くことになる）
+            animation.update(animation.step + 1, render=False)
         try:
             plotter.update(interval)
         except (RuntimeError, AttributeError):
