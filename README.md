@@ -6,6 +6,7 @@ NEA（日本環境アメニティ株式会社）のシミュレーション PJ�
 - 各モジュールの役割・Fortran との対応・実装状況 … [PROGRAM_STRUCTURE.md](PROGRAM_STRUCTURE.md)
 - 作業一覧 … [TODO.md](TODO.md)
 - 数式とフローの解説 … [docs/技術説明書.md](docs/技術説明書.md)
+- **要判断**：鏡像の式の `abs()` 問題 … [docs/議論_鏡像の式のabs問題.md](docs/議論_鏡像の式のabs問題.md)
 - 出力・可視化の方針 … [docs/出力・可視化方針.md](docs/出力・可視化方針.md)
 - CAD 側の作図ルール … [docs/DXFデータの作り方.md](docs/DXFデータの作り方.md)
 
@@ -67,9 +68,19 @@ python view_model_gui.py ..\test.dxf --absorption ..\absorption.csv
 python view_model.py ..\test.dxf --absorption ..\absorption.csv
 
 # シミュレーション本体（DXF → パルス列 → インパルス応答 → 残響時間）
-python procedure.py ..\test.dxf --absorption ..\absorption.csv --out ..\結果 ^
-       --rays 20000 --nref 8 --compensate-delay
+python procedure.py ..\test.dxf --absorption ..\absorption.csv --absorption-kind normal ^
+       --out ..\結果 --rays 20000 --nref 8 --bands 8 --temperature 20 --humidity 40
 ```
+
+主なオプション
+
+| オプション | 意味 |
+|---|---|
+| `--absorption-kind normal\|random` | 吸音率が**垂直入射**か**残響室法**か。★取り違え注意 |
+| `--assignment 条件A.json` | レイヤ→材料の対応。**CAD を編集せずに材料を差し替える** |
+| `--bands 8\|6` | 周波数バンド数（8 = 63〜8kHz / 6 = 125〜4kHz） |
+| `--temperature` / `--humidity` / `--pressure` | 大気条件。**音速と空気吸収が連動する** |
+| `--nref` | 最大反射回数。残響時間を出すには 35 dB 減衰するまで必要 |
 
 `--out` に以下が書き出される。
 

@@ -6,6 +6,11 @@ import numpy as np
 
 from mesh import Mesh
 
+# 周波数バンド数の既定。63〜8k Hz の 8 バンド。
+# 63 Hz と 8 kHz を対象外にする運用では 6（125〜4k）を渡す。
+# 中心周波数そのものは absorption.octave_bands() が持つ。
+DEFAULT_BAND_NUMBER = 8
+
 
 # DXF ファイルの読み込み（元コード backtrace.f90 132〜283 行）
 #
@@ -311,7 +316,7 @@ def resolve_unit_scale(tags, unit=None):
 # 吸音率
 # ------------------------------------------------------------------------------
 
-def read_absorption_csv(file_name, band_number=6):
+def read_absorption_csv(file_name, band_number=DEFAULT_BAND_NUMBER):
     """吸音率 CSV を読んで {キー: ndarray(band_number,)} を返す。
 
     2 つの形式を自動判別する。
@@ -339,6 +344,7 @@ def read_absorption_csv(file_name, band_number=6):
         raise last_error
 
     table = {}
+    padded = []          # 列数が足りずに補った材料（まとめて 1 回だけ知らせる）
     for row in csv.reader(text.splitlines()):
         if not row or not row[0].strip() or row[0].lstrip().startswith("#"):
             continue
@@ -368,14 +374,20 @@ def read_absorption_csv(file_name, band_number=6):
         if not values:
             continue
         if len(values) < band_number:
-            print(f"[read_dxffile] 警告: 吸音率の列が {len(values)} 個しかありません "
-                  f"({keys[-1]!r})。最後の値で埋めます。")
+            padded.append((keys[-1], len(values)))
             values = values + [values[-1]] * (band_number - len(values))
 
         arr = np.array(values[:band_number], dtype=float)
         for key in keys:
             if key:
                 table[key] = arr
+
+    if padded:
+        columns = sorted({n for _, n in padded})
+        print(f"[read_dxffile] 注意: 吸音率の列が {columns} 個しかない材料が "
+              f"{len(padded)} 種あります（{band_number} バンドで計算）。"
+              f"最後の値で埋めました。"
+              f"例: {', '.join(name for name, _ in padded[:3])} …")
     return table
 
 
@@ -766,7 +778,7 @@ def analyse_shells(triangles, tol=1.0e-9):
 # ------------------------------------------------------------------------------
 
 def read_model(file_name, unit=None, absorption_table=None, default_absorption=None,
-               orient_normals="cad", reference_point=None, band_number=6,
+               orient_normals="cad", reference_point=None, band_number=DEFAULT_BAND_NUMBER,
                source_layers=DEFAULT_SOURCE_LAYERS,
                receiver_layers=DEFAULT_RECEIVER_LAYERS,
                verbose=True):
@@ -1001,7 +1013,7 @@ def read_model(file_name, unit=None, absorption_table=None, default_absorption=N
 
 
 def read(file_name, unit=None, absorption_table=None, default_absorption=None,
-         orient_normals="cad", reference_point=None, band_number=6, verbose=True):
+         orient_normals="cad", reference_point=None, band_number=DEFAULT_BAND_NUMBER, verbose=True):
     """メッシュのリストだけを返す簡易版（procedure.py から使う）。
 
     音源・受音点や、シェルごとの法線診断も欲しい場合は read_model() を使う。

@@ -7,6 +7,8 @@ import loop_deleteredundancy as ld
 import loop_noredundancy as ln
 import impulse as ir
 import reverberation as rv
+import absorption as ab
+from atmosphere import Atmosphere
 from ray_recorder import RayRecorder
 
 
@@ -18,12 +20,12 @@ from ray_recorder import RayRecorder
 ### を元に（def process()内の順に記載）
 ### パルス列、または、インパルス応答（wavファイル）を保存する
 def process(soundsource_point, reciever_point, dxf_filename, sphere_radius, nref, soundray_number,
-            absorption_csv=None, unit=None, orient_normals="cad",
-            raylog_filename=None, raylog_max_rays=2000,
-            sound_velocity=ln.SOUND_VELOCITY,
+            absorption_csv=None, absorption_kind=None, layer_assignment=None,
+            band_number=rd.DEFAULT_BAND_NUMBER, material_library=None,
+            unit=None, orient_normals="cad",
+            atmosphere=None, raylog_filename=None, raylog_max_rays=2000,
             pulse_filename=None, impulse_filename=None,
             sampling_frequency=ir.SAMPLING_FREQUENCY, max_time=ir.MAX_TIME,
-            compensate_filter_delay=False,
             reverberation_filename=None, decay_filename=None):
     """
     閉じた室でも、一面だけの壁のような**開いた形状**でも計算できる
@@ -33,8 +35,25 @@ def process(soundsource_point, reciever_point, dxf_filename, sphere_radius, nref
         None を渡すと DXF の src / rec レイヤの POINT から取る。
         CAD 側で音源・受音点まで作図しておけば、ここでの指定は不要。
     absorption_csv : str | None
-        吸音率テーブルの CSV パス（1列目=レイヤ名, 2〜7列目=バンド別吸音率）。
+        吸音率テーブルの CSV パス（1列目=レイヤ名または ID、以降=バンド別吸音率）。
         None ならレイヤ全部が既定値になり警告が出る。data/absorption_sample.csv を参照。
+    absorption_kind : 'normal' | 'random' | None
+        CSV の吸音率が**垂直入射**か**残響室法（乱入射）**か。
+        残響室法なら Paris の式で垂直入射に変換してから使う。
+        None ならファイル冒頭の `# kind:` 宣言を見る。それも無ければ垂直入射として扱い警告する。
+        ★取り違えると吸音を大きく誤るので、出典を確認して明示すること。
+    layer_assignment : absorption.LayerAssignment | dict | None
+        CAD のレイヤ名 → 材料名の対応。**CAD を編集せずに材料を差し替えるための仕組み。**
+        None なら「レイヤ名 = 材料名」とみなす。
+    band_number : int
+        周波数バンド数。既定 8（63〜8k Hz）。63 と 8k を外すなら 6（125〜4k Hz）。
+    material_library : absorption.MaterialLibrary | None
+        材料一覧を直接渡す場合（GUI から編集したものなど）。
+        指定すると absorption_csv より優先される。
+    atmosphere : atmosphere.Atmosphere | None
+        温度・湿度・気圧。**音速と空気吸収の両方がここから決まる。**
+        None なら基準状態（20℃ / 湿度 40% / 101.325 kPa → 音速 343.8 m/s）。
+        元コードの 340.0 m/s を再現したい場合は Atmosphere(temperature=14.0)。
     unit : None | str | float
         None なら DXF ヘッダの $INSUNITS から自動判定。'mm' / 'm' などで明示指定も可。
     orient_normals : str
@@ -47,9 +66,6 @@ def process(soundsource_point, reciever_point, dxf_filename, sphere_radius, nref
         出力①音線の可視化・②音粒子の可視化（動画）に使う。docs/出力・可視化方針.md 参照。
     raylog_max_rays : int
         記録する音線の本数の上限。総数がこれを超えたら等間隔に間引く。
-    sound_velocity : float
-        音速 [m/s]。既定 340.0（元コード backtrace.f90 16行 c0）。
-        バックトレース・空気吸収・音線軌跡の時間軸すべてでこの値を使う。
     pulse_filename : str | None
         バックトレースが出すパルス列（到来時刻・到来方向・バンド別エネルギー）の
         CSV 出力先。None なら書かない。出力⑤伝搬方向の素材になる。
@@ -57,10 +73,7 @@ def process(soundsource_point, reciever_point, dxf_filename, sphere_radius, nref
         インパルス応答の CSV 出力先。None ならインパルス応答の合成自体を行わない
         （音線追跡だけ見たいときは None にすると速い）。
     sampling_frequency / max_time : float
-        インパルス応答のサンプリング周波数と最大時間（元コード fs / tmax）。
-    compensate_filter_delay : bool
-        バンドパスの直線位相遅れを補正するか。既定 False（元コードと同じ）。
-        詳細は impulse.py の docstring を参照。
+        インパルス応答のサンプリング周波数と長さ（元コード fs / tmax）。
     reverberation_filename / decay_filename : str | None
         残響時間・減衰曲線の CSV 出力先。どちらかを指定すると残響時間を算出する
         （インパルス応答の合成が前提）。
@@ -69,16 +82,30 @@ def process(soundsource_point, reciever_point, dxf_filename, sphere_radius, nref
         dict … 'model' / 'pulses' / 'impulse' / 'reverberation'
                （計算しなかったものは None）
     """
-    # オクターブバンドの中心周波数。元コードの 6→32 バンド展開表（make_ipls 94〜125行）から
-    # 確定した 6 バンド。吸音率 CSV の a1〜a6 もこの並び。
-    # ※ 以前ここは 63〜8000 Hz の 8 バンドになっていたが、吸音率もバックトレースも
-    #   6 バンドなので不整合だった（TODO E-7）。
-    frequencies = ir.OCTAVE_BAND_FREQUENCIES
+    # オクターブバンドの中心周波数。既定は 8 バンド（63〜8k Hz）。
+    frequencies = ab.octave_bands(band_number)
+
+    if atmosphere is None:
+        atmosphere = Atmosphere()
+    sound_velocity = atmosphere.sound_velocity
+    print(f"[procedure] {atmosphere.summary()}")
+
+    # 吸音率テーブルを作る。
+    # ・残響室法の値なら Paris の式で垂直入射に変換してから渡す
+    # ・レイヤ → 材料の対応は layer_assignment で差し替えられる（CAD を触らずに済む）
+    absorption_table = None
+    if material_library is None and absorption_csv is not None:
+        material_library = ab.MaterialLibrary.from_csv(absorption_csv,
+                                                       kind=absorption_kind)
+    if material_library is not None:
+        print(f"[procedure] {material_library.summary()}")
+        absorption_table = material_library.absorption_table(layer_assignment,
+                                                             band_number=band_number)
 
     # 室形状・吸音率・音源・受音点をまとめて DXF から読む
     # 元コード132〜283行目に対応
-    model = rd.read_model(dxf_filename, unit=unit, absorption_table=absorption_csv,
-                          orient_normals=orient_normals)
+    model = rd.read_model(dxf_filename, unit=unit, absorption_table=absorption_table,
+                          orient_normals=orient_normals, band_number=band_number)
     mesh = model.mesh
 
     if soundsource_point is None:
@@ -151,9 +178,9 @@ def process(soundsource_point, reciever_point, dxf_filename, sphere_radius, nref
             print("[procedure] 受音した経路が無いのでインパルス応答は作れません")
         else:
             impulse = ir.impulse_responce(
-                impulse_filename, pulses, sound_velocity=sound_velocity,
-                sampling_frequency=sampling_frequency, max_time=max_time,
-                compensate_filter_delay=compensate_filter_delay)
+                impulse_filename, pulses, octave_frequencies=frequencies,
+                atmosphere=atmosphere, sampling_frequency=sampling_frequency,
+                max_time=max_time)
 
     # 残響時間の算出。元コード ipls2rt_fortran.f90 に対応
     reverberation = None
@@ -182,20 +209,27 @@ def main():
     p = argparse.ArgumentParser(description="幾何音響シミュレーションの通し実行")
     p.add_argument("dxf", help="室形状の DXF ファイル")
     p.add_argument("--absorption", help="吸音率 CSV")
+    p.add_argument("--absorption-kind", choices=["normal", "random"],
+                   help="吸音率が垂直入射(normal)か残響室法(random)か。"
+                        "省略時はファイルの # kind: 宣言を見る")
+    p.add_argument("--assignment", help="レイヤ→材料の対応 JSON（CAD を触らずに差し替える）")
+    p.add_argument("--bands", type=int, default=8, choices=[6, 8],
+                   help="周波数バンド数（8=63〜8kHz / 6=125〜4kHz）")
     p.add_argument("--out", default=".", help="出力先フォルダ（既定: カレント）")
     p.add_argument("--rays", type=int, default=20000, help="音線の本数")
     p.add_argument("--nref", type=int, default=8, help="最大反射回数")
     p.add_argument("--radius", type=float, default=0.15, help="受音球の半径 [m]")
-    p.add_argument("--sound-velocity", type=float, default=ln.SOUND_VELOCITY,
-                   help="音速 [m/s]")
+    p.add_argument("--temperature", type=float, default=None, help="気温 [℃]（既定 20）")
+    p.add_argument("--humidity", type=float, default=None, help="相対湿度 [%%]（既定 40）")
+    p.add_argument("--pressure", type=float, default=None, help="気圧 [kPa]（既定 101.325）")
+    p.add_argument("--max-time", type=float, default=ir.MAX_TIME,
+                   help="インパルス応答の長さ [s]")
     p.add_argument("--unit", help="'mm' / 'm' など。省略すると $INSUNITS から自動判定")
     p.add_argument("--orient-normals", default="cad", choices=["cad", "flip", "shells"])
     p.add_argument("--source", type=float, nargs=3, metavar=("X", "Y", "Z"),
                    help="音源座標 [m]。省略すると DXF の src レイヤから取る")
     p.add_argument("--receiver", type=float, nargs=3, metavar=("X", "Y", "Z"),
                    help="受音点座標 [m]。省略すると DXF の rec レイヤから取る")
-    p.add_argument("--compensate-delay", action="store_true",
-                   help="インパルス応答からバンドパスの遅れを取り除く")
     p.add_argument("--no-impulse", action="store_true",
                    help="インパルス応答・残響時間を計算しない（音線追跡だけ見たいとき）")
     a = p.parse_args()
@@ -206,14 +240,21 @@ def main():
     def out(suffix):
         return os.path.join(a.out, f"{base}_{suffix}")
 
+    air_kwargs = {k: v for k, v in (("temperature", a.temperature),
+                                    ("humidity", a.humidity),
+                                    ("pressure", a.pressure)) if v is not None}
+    assignment = (ab.LayerAssignment.load(a.assignment) if a.assignment else None)
+
     process(soundsource_point=a.source, reciever_point=a.receiver,
             dxf_filename=a.dxf, sphere_radius=a.radius, nref=a.nref,
-            soundray_number=a.rays, absorption_csv=a.absorption, unit=a.unit,
-            orient_normals=a.orient_normals, sound_velocity=a.sound_velocity,
+            soundray_number=a.rays, absorption_csv=a.absorption,
+            absorption_kind=a.absorption_kind, layer_assignment=assignment,
+            band_number=a.bands, unit=a.unit, orient_normals=a.orient_normals,
+            atmosphere=Atmosphere(**air_kwargs),
             raylog_filename=out("raylog.npz"),
             pulse_filename=out("pulses.csv"),
             impulse_filename=None if a.no_impulse else out("ir.csv"),
-            compensate_filter_delay=a.compensate_delay,
+            max_time=a.max_time,
             reverberation_filename=None if a.no_impulse else out("rt.csv"),
             decay_filename=None if a.no_impulse else out("decay.csv"))
 

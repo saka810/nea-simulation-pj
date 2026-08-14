@@ -94,7 +94,7 @@ class RayRecorder:
 
     def __init__(self, total_rays, max_rays=MAX_RAYS_DEFAULT,
                  sound_velocity=SOUND_VELOCITY_DEFAULT,
-                 band_number=6, record_energy=True):
+                 band_number=8, record_energy=True):
         """
         total_rays     : 飛ばす音線の総数
         max_rays       : 記録する音線の本数の上限。None なら全記録

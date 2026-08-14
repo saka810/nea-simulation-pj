@@ -21,11 +21,13 @@ import numpy as np
 
 import mesh_method as mm
 import sound_ray as sr
+from atmosphere import Atmosphere
 
-# 音速 [m/s]。元コード 16行 `c0 = 340.0d0`。
-# ※ ray_recorder.py の既定は 343.0（20℃相当）で、こちらは 340.0（15℃相当）。
-#    procedure.py から同じ値を両方に渡して揃えること。
-SOUND_VELOCITY = 340.0
+# 音速 [m/s]。**基準大気（20℃ / 湿度 40% / 101.325 kPa）から計算した値**で 343.8 m/s。
+# 元コードは `c0 = 340.0d0` の定数だったが、これは約 14℃ 相当にあたる。
+# 温度・湿度を変えたい場合は `atmosphere.Atmosphere` を作って
+# その `sound_velocity` を渡すこと（空気吸収も同じ大気条件から計算される）。
+SOUND_VELOCITY = Atmosphere().sound_velocity
 
 
 class PulseList:
