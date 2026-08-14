@@ -267,6 +267,38 @@ node_renew(sound_ray, soundray_comesfrom, t) -> ndarray (3,)
                                               # 交点 node = 基点 + t * 音線（元コード 388行）
 ```
 
+#### FaceArrays ― 交差判定のベクトル化（F-1 高速化、2026-08-14）
+
+```python
+faces = mm.FaceArrays(mesh)
+hit_id, distance, node = faces.nearest_hit(origins, directions)   # (A,3) の束を一度に
+```
+
+scalar 版（`collision_distance` など）は「音線 1 本 × 面 1 枚」を 1 回ずつ扱う。
+元コードの二重ループをそのまま写したもので読みやすいが、
+音線 n 本 × 反射 k 回 × 面 m 枚ぶん Python のループが回るので実用速度に届かない。
+
+`FaceArrays` は面をまとめて配列にしておき、**音線の束 × 全面**を一度の配列演算で処理する。
+
+| 前もって持つもの | 内容 |
+|---|---|
+| `normal` (M,3) / `d` (M,) | 平面の方程式 n·x + d = 0 |
+| `v0` / `v1` | 三角形内部判定の基準点 |
+| `edge_from_v0_a/b`, `edge_from_v1_a/b` | 内部判定に使う辺ベクトル |
+
+実装の要点:
+
+- `denominator < 0`（表側から向かっている）と `t > 0` で候補を絞ったあと、
+  **`np.nonzero` で (音線, 面) の組を 1 次元に潰してから**内部判定する。
+  (A, M, 3) の配列を作らないのでメモリが小さい
+- 最寄り面の選択は `np.lexsort((距離, 音線))` + 先頭抽出。
+  lexsort は安定なので、距離が同じなら面インデックスの小さいほうが残る。
+  scalar 版が `distance_j < min_distance`（狭義）で先勝ちにしているのと**同じ結果**
+- (音線 × 面) の要素数が大きくなりすぎないよう音線側を自動で分割する
+
+**scalar 版とビット単位で一致する**ことをテストで確認している（面 ID・距離・受音判定）。
+scalar 版は**消していない**。読みやすい参照実装として、また一致確認の基準として残してある。
+
 ### sound_ray.py
 
 音源・虚音源・音線ベクトル操作。すべて純関数。
@@ -757,8 +789,19 @@ bandpass(signal, numtaps, lower, upper) -> ndarray
 schroeder_integral(x) -> ndarray
 ```
 
-戻り値の dict は `frequencies` / `time` / `decay` (nf, n) [dB] / `reverberation_time` (nf,) /
-`curvature` (nf,) [%]。`db_max` / `db_min` を変えれば T20（-5/-25）や EDT（0/-10）も出せる。
+**`decay_measures()` が EDT / T20 / T30 を一度に返す**（2026-08-14）。
+60 dB 減を厳密に見ることは実務でほとんど無く、減衰の直線部分を測って外挿するため。
+
+| 指標 | 評価区間 | 性質 |
+|---|---|---|
+| **EDT** | 0 〜 -10 dB | 初期減衰時間。**聴感上の響きの短さに近い**。初期反射の密度を反映する |
+| **T20** | -5 〜 -25 dB | 暗騒音が高い実測でも取りやすい |
+| **T30** | -5 〜 -35 dB | 最も一般的（ISO 3382 の標準） |
+
+減衰曲線は 1 回だけ作って評価区間を変えて読み取るので、`decay_curves` を 3 回呼ぶより速い。
+戻り値の dict は `frequencies` / `time` / `decay` (nf, n) [dB] /
+`measures` {名前: (nf,)} / `curvature` (nf,) [%]。
+`measures` 引数に `{名前: (開始dB, 終了dB)}` を渡せば評価区間を変えられる。
 
 **元コードとの相違点：巡回畳み込みの自作 FIR → Butterworth（scipy）** ★重要
 

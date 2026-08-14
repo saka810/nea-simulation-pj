@@ -25,6 +25,7 @@ import read_dxffile as rd            # noqa: E402
 import mesh_method as mm             # noqa: E402
 import sound_ray as sr               # noqa: E402
 import loop_reflectionmesh as lr     # noqa: E402
+import receiver_sphere as rs         # noqa: E402
 import loop_deleteredundancy as ld   # noqa: E402
 import loop_noredundancy as ln       # noqa: E402
 import impulse as ip                 # noqa: E402
@@ -209,6 +210,57 @@ def test_image_sources():
     after = np.dot(normal, images[1]) + d
     check("鏡像前後で面までの符号付き距離が符号反転",
           abs(before + after) < 1e-12, f"{before:.9f} / {after:.9f}")
+
+
+# ---------------------------------------------------------------- ベクトル化
+def test_vectorised_geometry():
+    """F-1 の高速化。scalar 版と**ビット単位で一致**することを確かめる。
+
+    速いだけでは意味がなく、結果が変わっていないことが前提。
+    """
+    print("\n[5.5] ベクトル化した交差判定（scalar 版との一致）")
+    model, src, rec = load_test_room()
+    mesh = model.mesh
+    faces = mm.FaceArrays(mesh)
+
+    rng = np.random.default_rng(1)
+    origins = rng.uniform([0.1, 0.1, 0.1], [1.9, 2.9, 0.9], size=(500, 3))
+    directions = rng.normal(size=(500, 3))
+    directions /= np.linalg.norm(directions, axis=1)[:, None]
+
+    hit_id, distance, node = faces.nearest_hit(origins, directions)
+
+    scalar_id, scalar_distance = [], []
+    for i in range(len(origins)):
+        best_id, best = -1, np.inf
+        for j in range(len(mesh)):
+            collision, d = mm.collision_distance(directions[i], origins[i],
+                                                 mesh[j].normal, mesh[j].vertexes)
+            if collision and d < best:
+                best, best_id = d, j
+        scalar_id.append(best_id)
+        scalar_distance.append(best)
+    scalar_id = np.array(scalar_id)
+    scalar_distance = np.array(scalar_distance)
+
+    check("最寄り面の ID が scalar 版と完全一致",
+          np.array_equal(hit_id, scalar_id),
+          f"不一致 {int((hit_id != scalar_id).sum())} 件")
+    finite = np.isfinite(scalar_distance)
+    check("距離が scalar 版とビット単位で一致",
+          np.array_equal(distance[finite], scalar_distance[finite]),
+          f"最大差 {np.abs(distance[finite] - scalar_distance[finite]).max():.3e}")
+
+    batch = rs.inside_sphere_batch(0.2, directions, origins, rec, distance)
+    one = np.array([rs.inside_sphere(0.2, directions[i], origins[i], rec, distance[i])
+                    for i in range(len(origins))])
+    check("受音判定が scalar 版と完全一致", np.array_equal(batch, one),
+          f"受音 {int(one.sum())} 本")
+
+    # 分割して処理しても結果が変わらないこと
+    small = mm.FaceArrays(mesh).nearest_hit(origins, directions, chunk_elements=37)
+    check("音線を分割して処理しても結果が同じ",
+          np.array_equal(small[0], hit_id) and np.array_equal(small[1], distance))
 
 
 # ---------------------------------------------------------------- 大気
@@ -415,6 +467,19 @@ def test_reverberation():
     check("method='fir' でも同等の精度", np.nanmedian(err) < 0.05,
           f"誤差の中央値 {np.nanmedian(err) * 100:.2f} %")
 
+    # EDT / T20 / T30 をまとめて出す
+    measures = rv.decay_measures(t, ir, verbose=False)["measures"]
+    check("EDT / T20 / T30 が揃って出る",
+          set(measures) == {"EDT", "T20", "T30"}, str(sorted(measures)))
+    for name in ("EDT", "T20", "T30"):
+        err = np.abs(measures[name] - 0.5) / 0.5
+        # 指数減衰なら EDT も T20 も T30 も同じ値になるはず
+        check(f"{name} が理論 T60 = 0.5 s を再現", np.nanmedian(err) < 0.06,
+              f"中央値 {np.nanmedian(err) * 100:.2f} % "
+              f"（{np.nanmin(measures[name]):.3f}〜{np.nanmax(measures[name]):.3f} s）")
+    check("直線減衰なら曲率がほぼ 0",
+          np.nanmedian(np.abs(rv.decay_measures(t, ir, verbose=False)["curvature"])) < 10.0)
+
 
 def main():
     print("geosim 数値検証")
@@ -423,8 +488,8 @@ def main():
         print(f"  ※ {ABSORPTION} が無いので既定の吸音率で走ります")
 
     for fn in (test_read_dxf, test_soundray_generator, test_energy_decay,
-               test_backtrace, test_image_sources, test_atmosphere,
-               test_absorption, test_impulse, test_reverberation):
+               test_backtrace, test_image_sources, test_vectorised_geometry,
+               test_atmosphere, test_absorption, test_impulse, test_reverberation):
         fn()
 
     failed = [name for name, ok in _results if not ok]

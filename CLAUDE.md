@@ -96,6 +96,12 @@
     フィルタ長を実用的にしたので**元コードにあった 1.49 秒の遅れは無い**
   - `atmosphere` … 音速と空気吸収を定数・近似式でなく温度・湿度・気圧から計算（ISO 9613-1）
 - **周波数バンドは既定 8（63〜8k Hz）**。6（125〜4k）も可。`band_number` で切り替える。
+- **交差判定はベクトル化してある**（`mesh_method.FaceArrays`）。
+  scalar 版（`collision_distance` など）は参照実装・一致確認の基準として残してあるので**消さない**。
+  交差判定に手を入れたら、必ず `tests/test_geosim.py` の
+  「ベクトル化した交差判定（scalar 版との一致）」が通ることを確認する。
+- **残響指標は EDT / T20 / T30 を出す**（`reverberation.decay_measures`）。
+  60 dB 減を厳密に見る運用ではない。
 - **吸音率は「垂直入射」か「残響室法」かを必ず区別する**。取り違えると吸音を大きく誤る。
   CSV に `# kind: normal|random` を書くか `--absorption-kind` で指定する。
   残響室法なら Paris の式で自動変換される（`geosim/absorption.py`）。

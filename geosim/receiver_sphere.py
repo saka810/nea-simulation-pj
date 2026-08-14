@@ -27,3 +27,26 @@ def inside_sphere(sphere_radius, sound_ray, soundray_comesfrom, receiver_point, 
                 inside = True
 
     return inside
+
+
+def inside_sphere_batch(sphere_radius, directions, origins, receiver_point,
+                        min_distance):
+    """`inside_sphere` を音線の束についてまとめて判定する（F-1 高速化）。
+
+    引数:
+        directions (A,3) 音線の方向（単位ベクトル前提）
+        origins    (A,3) 音線の基点
+        receiver_point (3,)
+        min_distance (A,) 各音線が壁に当たるまでの距離（当たらなければ inf）
+    戻り値:
+        (A,) の bool
+
+    計算は scalar 版とまったく同じ式・同じ比較なので結果は一致する。
+    """
+    vector = np.asarray(receiver_point, dtype=float)[None, :] - origins
+    inner_product = np.einsum("ij,ij->i", directions, vector)
+    foot = origins + directions * inner_product[:, None]     # 音線への垂線の足
+    distance = np.linalg.norm(foot - np.asarray(receiver_point, dtype=float), axis=1)
+    return ((distance <= sphere_radius)
+            & (inner_product <= min_distance)
+            & (inner_product >= 0.0))

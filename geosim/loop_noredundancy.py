@@ -152,28 +152,8 @@ def image_sources(soundsource_point, wall_ids, mesh):
     return images
 
 
-def _nearest_wall(sound_ray, soundray_comesfrom, mesh):
-    """基点から音線方向で最も手前に当たる面を返す。元コード 978〜1049 行。
-
-    戻り値 (面ID, 距離)。当たる面が無ければ (-1, inf)。
-    向き判定（法線との内積 < 0）・t > 0 判定・三角形内部判定・距離算出は
-    `mesh_method.collision_distance` が音線追跡と同じ実装で行う。
-    """
-    nearest_id = -1
-    min_distance = np.inf
-
-    for j in range(len(mesh)):
-        collision, distance = mm.collision_distance(
-            sound_ray, soundray_comesfrom, mesh[j].normal, mesh[j].vertexes)
-        if collision and distance < min_distance:
-            min_distance = distance
-            nearest_id = j
-
-    return nearest_id, min_distance
-
-
 def backtrace_path(soundsource_point, reciever_point, wall_ids, mesh,
-                   band_number, sound_velocity=SOUND_VELOCITY):
+                   band_number, sound_velocity=SOUND_VELOCITY, faces=None):
     """経路 1 本分のバックトレース。元コード 948〜1132 行。
 
     引数:
@@ -183,6 +163,8 @@ def backtrace_path(soundsource_point, reciever_point, wall_ids, mesh,
     戻り値:
         受音に至れば dict、途中で却下されれば None。
     """
+    if faces is None:
+        faces = mm.FaceArrays(mesh)
     images = image_sources(soundsource_point, wall_ids, mesh)
     ktmp = len(wall_ids)
 
@@ -196,7 +178,12 @@ def backtrace_path(soundsource_point, reciever_point, wall_ids, mesh,
     # ■バックトレースループ■ 元コード 948行 do k = ktmp, 0, -1
     for k in range(ktmp, -1, -1):
 
-        hit_id, hit_distance = _nearest_wall(vray, vini, mesh)
+        # 基点から音線方向で最も手前に当たる面を探す（元コード 978〜1049 行）。
+        # 音線追跡と同じ `FaceArrays` を使うので、全面との判定が 1 回の配列演算で済む
+        hit_id_array, hit_distance_array, node_array = faces.nearest_hit(
+            vini[None, :], vray[None, :])
+        hit_id = int(hit_id_array[0])
+        hit_distance = float(hit_distance_array[0])
 
         if hit_id >= 0:
             # ---- 壁面に当たる場合（元コード 1052 行）----
@@ -212,8 +199,7 @@ def backtrace_path(soundsource_point, reciever_point, wall_ids, mesh,
             if hit_id != wall_ids[k - 1]:
                 return None
 
-            t = mm.parameter_t(vray, vini, mesh[hit_id].normal, mesh[hit_id].vertexes)
-            node = mm.node_renew(vray, vini, t)
+            node = node_array[0]
 
             # エネルギーを減衰させる（元コード 1091〜1094 行）。
             # 斜入射のエネルギー反射率 |R(θ)|^2 を掛け込む。式の根拠は sound_ray.energy_decay。
@@ -281,12 +267,13 @@ def loop(soundsource_point, reciever_point, reflectionmeshid_history, mesh,
             raise ValueError("メッシュが空です")
         band_number = len(np.atleast_1d(mesh[0].absorption_coefficient))
 
+    faces = mm.FaceArrays(mesh)
     records = []
     rejected = 0
 
     for wall_ids in reflectionmeshid_history:
         record = backtrace_path(soundsource_point, reciever_point, wall_ids, mesh,
-                                band_number, sound_velocity)
+                                band_number, sound_velocity, faces=faces)
         if record is None:
             rejected += 1
         else:

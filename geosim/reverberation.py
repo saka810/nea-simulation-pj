@@ -36,6 +36,19 @@ from absorption import DEFAULT_OCTAVE_BANDS
 DB_MAX = -5.0
 DB_MIN = -35.0
 
+# 実務で使う残響指標の評価区間（開始 dB, 終了 dB）。
+# 60 dB 減を厳密に見ることは実際にはほとんど無く、
+# 減衰の直線部分を測って 60 dB 相当に外挿するのが普通。
+#   EDT … 初期減衰時間。0〜-10 dB。**聴感上の響きの短さに近い**とされる。
+#          初期反射の密度を反映するので、後部残響が同じでも室形状で差が出る
+#   T20 … -5〜-25 dB。暗騒音が高い実測でも取りやすい
+#   T30 … -5〜-35 dB。最も一般的（ISO 3382 の標準）
+DECAY_MEASURES = {
+    "EDT": (0.0, -10.0),
+    "T20": (-5.0, -25.0),
+    "T30": (-5.0, -35.0),
+}
+
 # IEC 61260 のクラス 1 オクターブフィルタに相当する次数（Butterworth 6 次）
 FILTER_ORDER = 6
 
@@ -177,8 +190,80 @@ def decay_curves(time, ir, frequencies=None, db_max=DB_MAX, db_min=DB_MIN,
             "curvature": curvature}
 
 
+def decay_measures(time, ir, frequencies=None, measures=None, method="butter",
+                   order=FILTER_ORDER, numtaps=FIR_NUMTAPS, verbose=True):
+    """**EDT / T20 / T30 をまとめて求める。**
+
+    減衰曲線は 1 回だけ作り、評価区間を変えて読み取るので `decay_curves` を
+    3 回呼ぶより速い。60 dB 減を厳密に見ない実務の使い方に合わせた入口。
+
+    引数:
+        measures : {名前: (開始dB, 終了dB)} | None
+                   None なら EDT / T20 / T30（`DECAY_MEASURES`）
+
+    戻り値: dict
+        'frequencies' / 'time' / 'decay' (nf, n) [dB]
+        'measures'  {名前: (nf,) [s]}
+        'curvature' (nf,) [%]   T30 と T20 の食い違い（ISO 3382 の C）
+    """
+    if measures is None:
+        measures = DECAY_MEASURES
+    base = decay_curves(time, ir, frequencies=frequencies, method=method,
+                        order=order, numtaps=numtaps, verbose=False)
+    dt = float(base["time"][1] - base["time"][0])
+
+    values = {}
+    for name, (db_start, db_end) in measures.items():
+        values[name] = np.array([_decay_time(d, dt, db_start, db_end)
+                                 for d in base["decay"]])
+
+    if verbose:
+        names = list(values)
+        print("[reverberation] " + "周波数".rjust(8)
+              + "".join(f"{n:>10}" for n in names) + f"{'曲率':>10}")
+        for i, fc in enumerate(base["frequencies"]):
+            cells = "".join(
+                ("       ---" if np.isnan(values[n][i]) else f"{values[n][i]:10.3f}")
+                for n in names)
+            c = base["curvature"][i]
+            mark = "" if np.isnan(c) else (" ★" if abs(c) > 10.0 else "")
+            curvature = "      ---" if np.isnan(c) else f"{c:+9.0f}%"
+            print(f"[reverberation] {fc:7.0f}Hz{cells}{curvature}{mark}")
+        finite = base["curvature"][~np.isnan(base["curvature"])]
+        if len(finite) and np.any(np.abs(finite) > 10.0):
+            print("[reverberation] ★ 曲率が 10% を超えたバンドは減衰が直線でないので"
+                  "そのまま信用しないこと。よくある原因:")
+            print("[reverberation]   ・最大反射回数 nref の不足で後部残響が切れている"
+                  "（procedure.py が別途エネルギーで判定して警告する）")
+            print("[reverberation]   ・音場が拡散していない。小さい室・平行面・"
+                  "面ごとに吸音率が大きく違う場合は、**減衰が本当に 2 段階になる**ので"
+                  "曲率が出るのが正しい（EDT と T30 の差にも表れる）")
+
+    return {"frequencies": base["frequencies"], "time": base["time"],
+            "decay": base["decay"], "measures": values,
+            "curvature": base["curvature"]}
+
+
+def write_decay_measures(filename, result):
+    """EDT / T20 / T30 を CSV に保存する。"""
+    names = list(result["measures"])
+    header = ["frequency_hz"] + [f"{n}_s" for n in names] + ["curvature_percent"]
+    rows = np.column_stack([result["frequencies"]]
+                           + [result["measures"][n] for n in names]
+                           + [result["curvature"]])
+    np.savetxt(filename, rows, delimiter=",", header=",".join(header),
+               comments="", fmt="%.12g")
+    return filename
+
+
 def write_reverberation_time(filename, result):
-    """残響時間を CSV に保存する。元コード 141〜145 行。"""
+    """残響時間を CSV に保存する。元コード 141〜145 行。
+
+    `decay_measures()` の結果（'measures' を持つ）でも
+    `decay_curves()` の結果（'reverberation_time' を持つ）でも受け付ける。
+    """
+    if "measures" in result:
+        return write_decay_measures(filename, result)
     np.savetxt(filename,
                np.column_stack([result["frequencies"], result["reverberation_time"],
                                 result["curvature"]]),
@@ -198,11 +283,14 @@ def write_decay_curve(filename, result):
 
 
 def reverberation_time(time, ir, rt_filename=None, decay_filename=None,
-                       frequencies=None, db_max=DB_MAX, db_min=DB_MIN,
-                       method="butter", verbose=True):
-    """残響時間の算出と保存をまとめて行う。"""
-    result = decay_curves(time, ir, frequencies=frequencies, db_max=db_max,
-                          db_min=db_min, method=method, verbose=verbose)
+                       frequencies=None, measures=None, method="butter",
+                       verbose=True):
+    """残響指標（EDT / T20 / T30）の算出と保存をまとめて行う。
+
+    measures を渡せば評価区間を変えられる（既定は `DECAY_MEASURES`）。
+    """
+    result = decay_measures(time, ir, frequencies=frequencies, measures=measures,
+                            method=method, verbose=verbose)
     if rt_filename is not None:
         write_reverberation_time(rt_filename, result)
         if verbose:

@@ -75,8 +75,8 @@ def process(soundsource_point, reciever_point, dxf_filename, sphere_radius, nref
     sampling_frequency / max_time : float
         インパルス応答のサンプリング周波数と長さ（元コード fs / tmax）。
     reverberation_filename / decay_filename : str | None
-        残響時間・減衰曲線の CSV 出力先。どちらかを指定すると残響時間を算出する
-        （インパルス応答の合成が前提）。
+        残響指標（EDT / T20 / T30）・減衰曲線の CSV 出力先。
+        どちらかを指定すると算出する（インパルス応答の合成が前提）。
 
     戻り値:
         dict … 'model' / 'pulses' / 'impulse' / 'reverberation'

@@ -115,7 +115,11 @@ class RayRecorder:
             self.stride = max(1, self.total_rays // int(max_rays))
 
         self.trajectories = []
-        self._current = None
+        # 追跡中の軌跡を音線番号で持つ。
+        # 2026-08-14: 音線追跡を束処理にしたので、音線が順番に完結しなくなった。
+        # 「今の 1 本」だけを持つ形（_current）から辞書に変えてある。
+        self._open = {}
+        self._current_index = None
 
     # ---- 記録対象かの判定 ----------------------------------------------
 
@@ -123,18 +127,27 @@ class RayRecorder:
         return ray_index % self.stride == 0
 
     # ---- 音線追跡ループから呼ばれるフック --------------------------------
+    #
+    # ray_index を省略すると「直前に start_ray した音線」に対して働く（逐次処理向け）。
+    # 束処理では ray_index を明示して呼ぶ。
 
     def start_ray(self, ray_index, direction, origin):
         """音線 1 本の追跡開始時に呼ぶ。"""
+        ray_index = int(ray_index)
+        self._current_index = ray_index
         if not self.is_recording(ray_index):
-            self._current = None
             return
         initial_energy = np.ones(self.band_number) if self.record_energy else None
-        self._current = RayTrajectory(ray_index, direction, origin, initial_energy)
+        self._open[ray_index] = RayTrajectory(ray_index, direction, origin,
+                                              initial_energy)
 
-    def add_reflection(self, node, mesh_id, incident_ray, mesh_object):
+    def _trajectory(self, ray_index):
+        key = self._current_index if ray_index is None else int(ray_index)
+        return self._open.get(key)
+
+    def add_reflection(self, node, mesh_id, incident_ray, mesh_object, ray_index=None):
         """反射が確定したときに呼ぶ。node は反射点（＝交点）。"""
-        traj = self._current
+        traj = self._trajectory(ray_index)
         if traj is None:
             return
         node = np.asarray(node, dtype=float)
@@ -153,18 +166,20 @@ class RayRecorder:
                 traj.energies.append(np.broadcast_to(
                     np.asarray(decayed, dtype=float), (self.band_number,)).copy())
 
-    def mark_receive(self, step):
+    def mark_receive(self, step, ray_index=None):
         """受音球を通過したときに呼ぶ。step は反射回数ループの k。"""
-        if self._current is not None:
-            self._current.receive_steps.append(int(step))
+        traj = self._trajectory(ray_index)
+        if traj is not None:
+            traj.receive_steps.append(int(step))
 
-    def end_ray(self, termination):
+    def end_ray(self, termination, ray_index=None):
         """音線 1 本の追跡終了時に呼ぶ。termination は 'no_hit' か 'nref'。"""
-        if self._current is None:
+        key = self._current_index if ray_index is None else int(ray_index)
+        traj = self._open.pop(key, None)
+        if traj is None:
             return
-        self._current.termination = termination
-        self.trajectories.append(self._current.finalize())
-        self._current = None
+        traj.termination = termination
+        self.trajectories.append(traj.finalize())
 
     # ---- 保存・要約 ------------------------------------------------------
 
