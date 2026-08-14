@@ -30,7 +30,9 @@ FIR で処理したい場合は `method='fir'` を指定できる。
 import numpy as np
 from scipy.signal import butter, fftconvolve, firwin, sosfilt
 
+import absorption as ab
 from absorption import DEFAULT_OCTAVE_BANDS
+from atmosphere import Atmosphere
 
 # 元コード 9〜10 行。T30 を求めるための評価区間
 DB_MAX = -5.0
@@ -54,6 +56,192 @@ FILTER_ORDER = 6
 
 # method='fir' のときのタップ数
 FIR_NUMTAPS = 4096
+
+
+# ------------------------------------------------------------------------------
+# 統計的残響式（Sabine / Eyring / Millington）
+#
+# 音線を飛ばさず、**室容積 V と各面の面積・吸音率だけ**から残響時間を見積もる。
+# 拡散音場（音がどの方向からも等確率に来る）を前提にした古典的な式で、
+# シミュレーション結果の妥当性を確かめる物差しになる。
+#
+# ★閉じた室が前提★ 開いた形状（一面だけの壁など）では容積が定義できないので使えない。
+# ------------------------------------------------------------------------------
+
+def triangle_areas(mesh):
+    """各三角形の面積 [m^2]。外積の大きさの半分。"""
+    v = np.array([np.asarray(m.vertexes, dtype=float) for m in mesh])
+    return 0.5 * np.linalg.norm(np.cross(v[:, 1] - v[:, 0], v[:, 2] - v[:, 0]), axis=1)
+
+
+def surface_summary(mesh, convert_to_random=True, warn=True):
+    """材料ごとの面積と吸音率をまとめる。
+
+    引数:
+        convert_to_random : Mesh が持つ**垂直入射**吸音率を、統計式が前提とする
+            **乱入射**吸音率へ Paris の式で変換するか（既定 True）。
+            ★変換しないと吸音を過大評価する（垂直入射 0.34 は乱入射 0.50 に相当）。
+
+    戻り値: dict
+        'materials' {材料名: {'area', 'absorption'(nf,)}}
+        'total_area' float
+        'areas' (材料数,) / 'absorption' (材料数, nf)  … 式に渡しやすい形
+    """
+    areas = triangle_areas(mesh)
+    materials = {}
+    for face, area in zip(mesh, areas):
+        entry = materials.setdefault(face.material,
+                                     {"area": 0.0, "absorption": None})
+        entry["area"] += float(area)
+        alpha = np.atleast_1d(np.asarray(face.absorption_coefficient, dtype=float))
+        if entry["absorption"] is None:
+            entry["absorption"] = alpha
+        elif warn and not np.allclose(entry["absorption"], alpha):
+            print(f"[reverberation] 警告: 材料 {face.material!r} に異なる吸音率の面が"
+                  f"混ざっています。最初の値を使います")
+
+    names = sorted(materials)
+    area_array = np.array([materials[n]["area"] for n in names])
+    alpha_array = np.array([materials[n]["absorption"] for n in names])
+
+    if convert_to_random:
+        # 面ごとに変換すると同じ値を何度も計算するので、重複を除いてから変換する
+        flat = alpha_array.ravel()
+        unique, inverse = np.unique(flat, return_inverse=True)
+        converted = ab.normal_to_random(unique)
+        alpha_array = converted[inverse].reshape(alpha_array.shape)
+        for i, name in enumerate(names):
+            materials[name]["absorption"] = alpha_array[i]
+
+    return {"materials": materials, "total_area": float(area_array.sum()),
+            "names": names, "areas": area_array, "absorption": alpha_array}
+
+
+def statistical_reverberation(mesh, volume, frequencies=None, atmosphere=None,
+                              convert_to_random=True, include_air_absorption=True,
+                              verbose=True):
+    """Sabine / Eyring / Millington-Sette の残響式で残響時間を見積もる。
+
+    引数:
+        mesh       list[Mesh]  室形状（`read_dxffile` の出力）
+        volume     float       室容積 [m^3]。`DxfModel.volume` の絶対値
+        atmosphere Atmosphere | None  音速と空気吸収をここから取る
+        convert_to_random  垂直入射 → 乱入射の変換を行うか（既定 True。上記参照）
+        include_air_absorption  空気吸収の項 4mV を入れるか（既定 True）
+
+    **3 つの式の違い**
+
+    共通して `T = 24 ln(10) V / (c A)`（A = 等価吸音面積）で、A の作り方が違う。
+    係数 24 ln(10) / c は c = 343 m/s のとき 0.161 になる（よく見る 0.161V/A の形）。
+    ここでは**大気条件から求めた音速**を使うので 0.161 に固定していない。
+
+    | 式 | 等価吸音面積 A | 性質 |
+    |---|---|---|
+    | Sabine | `S·ᾱ + 4mV` | 最も古典的。**吸音率が小さいとき（〜0.2）に妥当**。ᾱ→1 でも T が 0 にならない欠点 |
+    | Eyring | `-S·ln(1-ᾱ) + 4mV` | 反射のたびに (1-ᾱ) 倍になると考える。**吸音率が大きいときはこちら** |
+    | Millington | `-Σ Sᵢ·ln(1-αᵢ) + 4mV` | 面ごとに個別に対数を取る。**面によって吸音率が大きく違うときに向く**。αᵢ→1 の面があると発散する |
+
+    ᾱ は面積で重み付けした平均吸音率 `Σ Sᵢαᵢ / S`。
+
+    戻り値: dict
+        'frequencies' / 'volume' / 'total_area' / 'mean_free_path'
+        'mean_absorption' (nf,) / 'equivalent_area' (nf,)
+        'sabine' / 'eyring' / 'millington' 各 (nf,) [s]
+        'surface'  … `surface_summary()` の結果
+    """
+    if atmosphere is None:
+        atmosphere = Atmosphere()
+    surface = surface_summary(mesh, convert_to_random=convert_to_random, warn=verbose)
+
+    areas = surface["areas"]
+    alpha = surface["absorption"]                    # (材料数, nf)
+    total_area = surface["total_area"]
+    if frequencies is None:
+        frequencies = ab.octave_bands(alpha.shape[1])
+    frequencies = np.asarray(frequencies, dtype=float)
+
+    sound_velocity = atmosphere.sound_velocity
+    constant = 24.0 * np.log(10.0) / sound_velocity  # c=343 のとき 0.1611
+
+    # 空気吸収の項 4mV（m はエネルギーの減衰係数 [1/m]）
+    air = (4.0 * atmosphere.absorption_coefficient(frequencies) * volume
+           if include_air_absorption else np.zeros(len(frequencies)))
+
+    mean_absorption = (areas @ alpha) / total_area          # (nf,)
+
+    # ln(1-α) は α → 1 で発散する。1 に張り付いた材料があると Eyring/Millington は
+    # 意味を持たなくなるので、そこは NaN にして知らせる
+    with np.errstate(divide="ignore", invalid="ignore"):
+        eyring_area = -total_area * np.log(np.where(mean_absorption < 1.0,
+                                                    1.0 - mean_absorption, np.nan))
+        millington_area = -(areas @ np.log(np.where(alpha < 1.0, 1.0 - alpha, np.nan)))
+
+    def to_time(equivalent_area):
+        with np.errstate(divide="ignore", invalid="ignore"):
+            return np.where(equivalent_area > 0.0,
+                            constant * volume / equivalent_area, np.nan)
+
+    result = {
+        "frequencies": frequencies,
+        "volume": float(volume),
+        "total_area": total_area,
+        "mean_free_path": 4.0 * volume / total_area,
+        "sound_velocity": sound_velocity,
+        "mean_absorption": mean_absorption,
+        "equivalent_area": total_area * mean_absorption,
+        "air_absorption_area": air,
+        "sabine": to_time(total_area * mean_absorption + air),
+        "eyring": to_time(eyring_area + air),
+        "millington": to_time(millington_area + air),
+        "surface": surface,
+    }
+
+    if verbose:
+        print(f"[統計残響] 容積 {volume:.3f} m3 / 表面積 {total_area:.3f} m2 / "
+              f"平均自由行程 {result['mean_free_path']:.3f} m / "
+              f"音速 {sound_velocity:.2f} m/s")
+        kind = "乱入射（垂直入射から変換）" if convert_to_random else "垂直入射のまま"
+        print(f"[統計残響] 吸音率は{kind}。空気吸収 "
+              f"{'あり' if include_air_absorption else 'なし'}")
+        for name in surface["names"]:
+            entry = surface["materials"][name]
+            print(f"[統計残響]   {name:<20} 面積 {entry['area']:8.3f} m2  "
+                  f"α {np.array2string(entry['absorption'], precision=3)}")
+        print(f"[統計残響] {'周波数':>10}{'平均α':>9}{'Sabine':>10}"
+              f"{'Eyring':>10}{'Millington':>12}")
+        for i, fc in enumerate(frequencies):
+            def cell(key, width):
+                value = result[key][i]
+                return "---".rjust(width) if np.isnan(value) else f"{value:{width}.3f}"
+            print(f"[統計残響] {fc:9.0f}Hz{mean_absorption[i]:9.3f}"
+                  f"{cell('sabine', 10)}{cell('eyring', 10)}{cell('millington', 12)}")
+
+    return result
+
+
+def statistical_reverberation_from_model(model, **kwargs):
+    """`read_dxffile.read_model()` の結果からそのまま統計残響式を計算する。
+
+    閉じていない形状では容積が定義できないので、その場合は None を返して警告する。
+    """
+    if not getattr(model, "is_closed", False):
+        print(f"[統計残響] 形状が閉じていないので容積が決まりません"
+              f"（開いた辺 {getattr(model, 'open_edges', '?')} 本）。"
+              f"統計残響式は使えません")
+        return None
+    return statistical_reverberation(model.mesh, abs(model.volume), **kwargs)
+
+
+def write_statistical_reverberation(filename, result):
+    """統計残響式の結果を CSV に保存する。"""
+    header = ["frequency_hz", "mean_absorption", "equivalent_area_m2",
+              "sabine_s", "eyring_s", "millington_s"]
+    rows = np.column_stack([result["frequencies"], result["mean_absorption"],
+                            result["equivalent_area"], result["sabine"],
+                            result["eyring"], result["millington"]])
+    np.savetxt(filename, rows, delimiter=",", header=",".join(header),
+               comments="", fmt="%.12g")
+    return filename
 
 
 def schroeder_integral(x):

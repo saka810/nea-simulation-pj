@@ -828,6 +828,46 @@ FIR で処理したい場合は `method='fir'` を指定できる（精度は同
 誤差は**中央値 1.0〜1.9 %**。125 Hz で減衰が短いときだけ 10〜14 % 程度になるが、
 これは帯域幅×減衰時間（BT 積）が小さいことによる手法の限界で ISO 3382 でも既知。
 
+**統計残響式（2026-08-14 追加）**
+
+```python
+statistical_reverberation(mesh, volume, frequencies=None, atmosphere=None,
+                          convert_to_random=True, include_air_absorption=True) -> dict
+statistical_reverberation_from_model(model, **kwargs) -> dict | None
+surface_summary(mesh, convert_to_random=True) -> dict
+triangle_areas(mesh) -> ndarray
+```
+
+音線を飛ばさず、**室容積と各面の面積・吸音率だけ**から残響時間を出す。
+共通の形は `T = 24 ln(10) V / (c A)`（係数は c=343 のとき 0.161）で、
+等価吸音面積 A の作り方が 3 通りある。
+
+| 式 | A | 向いている場面 |
+|---|---|---|
+| Sabine | `S·ᾱ + 4mV` | 吸音率が小さいとき（〜0.2） |
+| Eyring | `-S·ln(1-ᾱ) + 4mV` | 吸音率が大きいとき |
+| Millington | `-Σ Sᵢ·ln(1-αᵢ) + 4mV` | 面ごとに吸音率が大きく違うとき |
+
+- **閉じた室が前提**。`statistical_reverberation_from_model()` は
+  `model.is_closed` を見て、開いていれば None を返して警告する
+- **`Mesh` が持つ垂直入射吸音率を Paris の式で乱入射に変換してから使う**
+  （`convert_to_random=True` が既定）。変換しないと残響時間が長く出る
+- 空気吸収の項 `4mV` も `atmosphere` から入れる
+- `procedure.py` は計算結果の T30 と並べて表示する
+
+test.dxf での突き合わせ（音線 20000 本 / 反射 120 回）:
+
+| 周波数 | T30（計算） | Sabine | Eyring | T30/Eyring |
+|---|---|---|---|---|
+| 63 Hz | 0.088 | 0.205 | 0.182 | 0.48 |
+| 125 Hz | 0.150 | 0.191 | 0.168 | 0.89 |
+| 500 Hz | 0.122 | 0.128 | 0.105 | 1.17 |
+| 2000 Hz | 0.104 | 0.106 | 0.083 | 1.26 |
+| 8000 Hz | 0.081 | 0.100 | 0.079 | 1.03 |
+
+125 Hz 以上は 0.89〜1.26 で概ね合う。63 Hz が外れるのは帯域幅×減衰時間が
+小さすぎる（BT ≒ 4）ためで、手法の限界。
+
 **曲率（curvature）**
 
 評価区間を半分にした推定値との食い違いを % で返す（ISO 3382 の C）。

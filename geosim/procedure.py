@@ -26,7 +26,8 @@ def process(soundsource_point, reciever_point, dxf_filename, sphere_radius, nref
             atmosphere=None, raylog_filename=None, raylog_max_rays=2000,
             pulse_filename=None, impulse_filename=None,
             sampling_frequency=ir.SAMPLING_FREQUENCY, max_time=ir.MAX_TIME,
-            reverberation_filename=None, decay_filename=None):
+            reverberation_filename=None, decay_filename=None,
+            statistical_filename=None, statistical=True):
     """
     閉じた室でも、一面だけの壁のような**開いた形状**でも計算できる
     （当たる壁がなくなった音線はそこで打ち切られる）。
@@ -77,9 +78,15 @@ def process(soundsource_point, reciever_point, dxf_filename, sphere_radius, nref
     reverberation_filename / decay_filename : str | None
         残響指標（EDT / T20 / T30）・減衰曲線の CSV 出力先。
         どちらかを指定すると算出する（インパルス応答の合成が前提）。
+    statistical : bool
+        Sabine / Eyring / Millington の統計残響式でも残響時間を出すか（既定 True）。
+        **室が閉じている場合のみ**（容積が決まらないと計算できない）。
+        音線を飛ばさず面積と吸音率だけから出るので、シミュレーション結果の物差しになる。
+    statistical_filename : str | None
+        統計残響式の結果の CSV 出力先。
 
     戻り値:
-        dict … 'model' / 'pulses' / 'impulse' / 'reverberation'
+        dict … 'model' / 'pulses' / 'impulse' / 'reverberation' / 'statistical'
                （計算しなかったものは None）
     """
     # オクターブバンドの中心周波数。既定は 8 バンド（63〜8k Hz）。
@@ -116,6 +123,16 @@ def process(soundsource_point, reciever_point, dxf_filename, sphere_radius, nref
         if not model.receiver_points:
             raise ValueError("受音点が指定されておらず、DXF に rec レイヤの POINT もありません")
         reciever_point = model.receiver_points[0]
+
+    # 統計残響式（Sabine / Eyring / Millington）。音線を飛ばす前に出せる。
+    # 面積と吸音率だけから決まるので、あとの計算結果と突き合わせる物差しになる
+    statistical_result = None
+    if statistical:
+        statistical_result = rv.statistical_reverberation_from_model(
+            model, frequencies=frequencies, atmosphere=atmosphere)
+        if statistical_result is not None and statistical_filename is not None:
+            rv.write_statistical_reverberation(statistical_filename, statistical_result)
+            print(f"[統計残響] 書き出しました: {statistical_filename}")
 
     # 音線ベクトルを作成
     soundray_list = sr.soundray_generator(soundray_number)
@@ -193,8 +210,23 @@ def process(soundsource_point, reciever_point, dxf_filename, sphere_radius, nref
                 impulse[0], impulse[1], rt_filename=reverberation_filename,
                 decay_filename=decay_filename, frequencies=frequencies)
 
+    # 統計残響式との突き合わせ。**どちらが正しいという話ではない**。
+    # 統計式は拡散音場を前提にした平均像、シミュレーションは特定の受音点での実際の減衰。
+    # 大きく食い違うときは、音場が拡散していないか設定に問題があるかの手がかりになる
+    if statistical_result is not None and reverberation is not None:
+        print(f"[procedure] {'周波数':>10}{'T30(計算)':>12}{'Sabine':>10}"
+              f"{'Eyring':>10}{'比(T30/Eyring)':>16}")
+        measured = reverberation["measures"]["T30"]
+        for i, fc in enumerate(frequencies):
+            eyring = statistical_result["eyring"][i]
+            ratio = ("---" if (np.isnan(measured[i]) or np.isnan(eyring) or eyring == 0)
+                     else f"{measured[i] / eyring:.2f}")
+            got = "---" if np.isnan(measured[i]) else f"{measured[i]:.3f}"
+            print(f"[procedure] {fc:9.0f}Hz{got:>12}"
+                  f"{statistical_result['sabine'][i]:10.3f}{eyring:10.3f}{ratio:>16}")
+
     return {"model": model, "pulses": pulses, "impulse": impulse,
-            "reverberation": reverberation}
+            "reverberation": reverberation, "statistical": statistical_result}
 
 
 def main():
@@ -232,6 +264,8 @@ def main():
                    help="受音点座標 [m]。省略すると DXF の rec レイヤから取る")
     p.add_argument("--no-impulse", action="store_true",
                    help="インパルス応答・残響時間を計算しない（音線追跡だけ見たいとき）")
+    p.add_argument("--no-statistical", action="store_true",
+                   help="Sabine / Eyring の統計残響式を計算しない")
     a = p.parse_args()
 
     os.makedirs(a.out, exist_ok=True)
@@ -256,7 +290,9 @@ def main():
             impulse_filename=None if a.no_impulse else out("ir.csv"),
             max_time=a.max_time,
             reverberation_filename=None if a.no_impulse else out("rt.csv"),
-            decay_filename=None if a.no_impulse else out("decay.csv"))
+            decay_filename=None if a.no_impulse else out("decay.csv"),
+            statistical=not a.no_statistical,
+            statistical_filename=None if a.no_statistical else out("rt_statistical.csv"))
 
 
 if __name__ == "__main__":

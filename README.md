@@ -90,6 +90,7 @@ python procedure.py ..\test.dxf --absorption ..\absorption.csv --absorption-kind
 | `*_pulses.csv` | パルス列（反射回数・到来時刻・到来方向・バンド別エネルギー） |
 | `*_ir.csv` | インパルス応答 |
 | `*_rt.csv` | 残響指標 **EDT / T20 / T30**（オクターブバンド別）と曲率 |
+| `*_rt_statistical.csv` | **統計残響式**（Sabine / Eyring / Millington）。閉じた室のみ |
 | `*_decay.csv` | 減衰曲線 |
 
 ## 検証

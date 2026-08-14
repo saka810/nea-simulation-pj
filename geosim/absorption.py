@@ -109,7 +109,7 @@ def impedance_from_normal(alpha_normal):
     return (1.0 + r) / np.maximum(1.0 - r, 1e-15)
 
 
-def statistical_absorption(impedance, samples=20001):
+def statistical_absorption(impedance, method="closed", samples=20001):
     """Paris の式による乱入射（残響室法）吸音率 α_s。
 
         α_s = 2 ∫₀^{π/2} α(θ) sinθ cosθ dθ
@@ -122,9 +122,17 @@ def statistical_absorption(impedance, samples=20001):
 
         α_s = 8z ∫₀¹ μ²/(zμ+1)² dμ = (8/z²) [ (1+z) - 2 ln(1+z) - 1/(1+z) ]
 
-    ここでは**数値積分で求めている**（式の取り違えを避けるため）。
-    解析解との一致は tests/test_geosim.py で確認している。
+    method='closed'（既定）はこの解析解、'numeric' は数値積分。
+    最初は式の取り違えを避けるため数値積分だけで実装していたが、
+    両者の一致を確認できた（tests/test_geosim.py）ので既定を解析解にした。
+    逆解き（`impedance_from_statistical`）が二分法で何度も呼ぶため、
+    数値積分のままだと重すぎる。
     """
+    if method == "closed":
+        return statistical_absorption_closed_form(impedance)
+    if method != "numeric":
+        raise ValueError(f"method は 'closed' か 'numeric' です: {method!r}")
+
     z = np.atleast_1d(np.asarray(impedance, dtype=float))
     theta = np.linspace(0.0, np.pi / 2, samples)
     cos_t = np.cos(theta)
@@ -151,13 +159,13 @@ def statistical_absorption_closed_form(impedance):
     return (8.0 / z ** 2) * ((1.0 + z) - 2.0 * np.log(1.0 + z) - 1.0 / (1.0 + z))
 
 
-def _statistical_maximum(samples=4001):
+def _statistical_maximum(samples=200001):
     """α_s が取りうる最大値と、そのときの z を返す。
 
     α_s は z について単調ではなく、ある z で最大になってから両側で 0 に近づく。
     **この最大値を超える残響室法吸音率は、局所反応モデルでは表現できない。**
     """
-    z_grid = np.geomspace(1e-3, 1e3, samples)
+    z_grid = np.geomspace(0.1, 10.0, samples)
     values = statistical_absorption(z_grid)
     index = int(np.argmax(values))
     return float(values[index]), float(z_grid[index])

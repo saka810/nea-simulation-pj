@@ -481,6 +481,82 @@ def test_reverberation():
           np.nanmedian(np.abs(rv.decay_measures(t, ir, verbose=False)["curvature"])) < 10.0)
 
 
+# ---------------------------------------------------------------- 統計残響式
+def test_statistical_reverberation():
+    print("\n[10] 統計残響式（Sabine / Eyring / Millington）")
+    model, _, _ = load_test_room()
+    mesh = model.mesh
+
+    areas = rv.triangle_areas(mesh)
+    check("三角形の面積の合計が 22.0 m^2", abs(areas.sum() - 22.0) < 1e-9,
+          f"{areas.sum():.9f}")
+
+    # 全面を同じ吸音率にして解析解と突き合わせる
+    alpha = 0.2
+    import copy
+    uniform = []
+    for face in mesh:
+        clone = copy.copy(face)
+        clone.material = "uniform"
+        clone.absorption_coefficient = np.full(8, alpha)
+        uniform.append(clone)
+
+    air = at.Atmosphere()
+    result = rv.statistical_reverberation(uniform, 6.0, atmosphere=air,
+                                          convert_to_random=False,
+                                          include_air_absorption=False,
+                                          verbose=False)
+    constant = 24.0 * np.log(10.0) / air.sound_velocity
+    want_sabine = constant * 6.0 / (22.0 * alpha)
+    want_eyring = constant * 6.0 / (-22.0 * np.log(1.0 - alpha))
+    check("Sabine が解析解と一致",
+          np.abs(result["sabine"] - want_sabine).max() < 1e-12,
+          f"{result['sabine'][0]:.9f} / 期待 {want_sabine:.9f}")
+    check("Eyring が解析解と一致",
+          np.abs(result["eyring"] - want_eyring).max() < 1e-12,
+          f"{result['eyring'][0]:.9f} / 期待 {want_eyring:.9f}")
+    check("吸音率が一様なら Millington と Eyring が一致",
+          np.abs(result["millington"] - result["eyring"]).max() < 1e-12)
+    check("Eyring は Sabine より短く出る（吸音率が大きいほど差が開く）",
+          np.all(result["eyring"] < result["sabine"]))
+    check("平均自由行程が 4V/S", abs(result["mean_free_path"] - 4 * 6.0 / 22.0) < 1e-12,
+          f"{result['mean_free_path']:.6f} m")
+
+    # 乱入射への変換が効いているか（変換すると吸音率が上がるので残響が短くなる）
+    converted = rv.statistical_reverberation(uniform, 6.0, atmosphere=air,
+                                             convert_to_random=True,
+                                             include_air_absorption=False,
+                                             verbose=False)
+    check("垂直入射→乱入射の変換で平均吸音率が上がる",
+          np.all(converted["mean_absorption"] > result["mean_absorption"]),
+          f"{result['mean_absorption'][0]:.4f} → {converted['mean_absorption'][0]:.4f}")
+    check("そのぶん残響時間は短くなる",
+          np.all(converted["sabine"] < result["sabine"]))
+
+    # 空気吸収の項
+    with_air = rv.statistical_reverberation(uniform, 6.0, atmosphere=air,
+                                            convert_to_random=False,
+                                            include_air_absorption=True,
+                                            verbose=False)
+    check("空気吸収を入れると残響時間が短くなる（高音ほど顕著）",
+          with_air["sabine"][-1] < with_air["sabine"][0] < result["sabine"][0],
+          f"63Hz {with_air['sabine'][0]:.4f} / 8kHz {with_air['sabine'][-1]:.4f} s")
+
+    # 実際のモデルで面ごとに吸音率が違う場合
+    real = rv.statistical_reverberation_from_model(model, atmosphere=air, verbose=False)
+    check("DxfModel から直接計算できる", real is not None)
+    check("吸音率がばらつくと Millington < Eyring < Sabine",
+          np.all(real["millington"] < real["eyring"])
+          and np.all(real["eyring"] < real["sabine"]))
+
+    # 開いた形状では計算できない
+    class OpenModel:
+        is_closed = False
+        open_edges = 11
+    check("開いた形状では None を返す",
+          rv.statistical_reverberation_from_model(OpenModel()) is None)
+
+
 def main():
     print("geosim 数値検証")
     print(f"  Python {sys.version.split()[0]} / numpy {np.__version__}")
@@ -489,7 +565,8 @@ def main():
 
     for fn in (test_read_dxf, test_soundray_generator, test_energy_decay,
                test_backtrace, test_image_sources, test_vectorised_geometry,
-               test_atmosphere, test_absorption, test_impulse, test_reverberation):
+               test_atmosphere, test_absorption, test_impulse, test_reverberation,
+               test_statistical_reverberation):
         fn()
 
     failed = [name for name, ok in _results if not ok]
