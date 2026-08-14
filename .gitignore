@@ -2,6 +2,10 @@ fortran/
 __pycache__/
 *.pyc
 
+# 仮想環境。端末ごとに requirements.txt から作り直す（中身は共有しない）
+.venv/
+venv/
+
 # ビューアの出力（view_model.py で再生成できるので管理外）
 *_view.html
 

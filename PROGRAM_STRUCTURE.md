@@ -4,6 +4,12 @@
 元コードは `fortran/` の 3 ファイル（`backtrace.f90` / `make_ipls_freq_monaural_fortran.f90` / `ipls2rt_fortran.f90`）。
 本書は 2026-07-17 時点の `geosim/` パッケージの内容整理（コードには手を加えていません）。
 
+## 実行環境
+
+**Python 3.10.11**（チーム方針）。依存は `requirements.txt`（numpy / scipy / matplotlib / pyvista）。
+構築手順は [README.md](README.md#環境構築) にある。2026-08-14 までは numpy すら
+インストール前提にしない方針だったが、GUI 表示のためにこの日 venv を切って導入した。
+
 ## 処理パイプライン全体像
 
 ```
@@ -36,6 +42,7 @@ procedure.process()
 | `loop_reflectionmesh.py` | 音線追跡ループ本体 | 524〜717 行 | **実装済**（2026-08-12 に traceff の扱いを確定し全面修正・動作確認済） |
 | `ray_recorder.py` | 可視化用の音線軌跡レコーダ | （移植元なし・新規） | 実装済（2026-08-12 新設） |
 | `view_model.py` | モデルの 3D ビューア（HTML + WebGL を書き出す） | （移植元なし・新規） | 実装済（2026-08-14 新設） |
+| `view_model_gui.py` | モデルの 3D ビューア（PyVista のネイティブウィンドウ） | （移植元なし・新規） | 実装済（2026-08-14 新設・描画確認済） |
 | `loop_deleteredundancy.py` | 重複経路の削除 | 721〜841 行 | 実装済（2026-08-12 に整理・動作確認済） |
 | `loop_noredundancy.py` | バックトレースループ | 876〜1134 行 | 下書き段階 |
 | `impulse.py` | インパルス応答の合成・CSV 出力 | make_ipls_freq_monaural_fortran.f90 | 実装中（転記ミス多数） |
@@ -315,9 +322,11 @@ cd geosim
 python view_model.py ..\test2.dxf --absorption ..\absorption.csv
 ```
 
-**自己完結した HTML（WebGL）を書き出してブラウザで開く方式**。理由は、この環境に
-matplotlib / pyvista / PyQt が入っておらず（`tkinter` のみ）、`pip install` を前提に
-したくなかったため。将来 GUI を Web ベースにするならそのまま土台になる。
+**自己完結した HTML（WebGL）を書き出してブラウザで開く方式**。作った当初この環境に
+matplotlib / pyvista が入っておらず（`tkinter` のみ）、`pip install` を前提にしたく
+なかったため。**2026-08-14 に依存ライブラリを入れた後も残してある**。理由は、
+①相手に環境構築を求めずにモデルを共有できる、②将来 GUI を Web ベースにするなら
+そのまま土台になる、から。ネイティブウィンドウ版は `view_model_gui.py`（後述）。
 
 表示するもの:
 
@@ -340,6 +349,58 @@ matplotlib / pyvista / PyQt が入っておらず（`tkinter` のみ）、`pip i
 - レイヤの表示切り替えは、**頂点をレイヤ順に並べて描画範囲を飛ばす**方式。
   シェーダで uniform 配列を動的インデックスする実装は GLSL ES の移植性に不安があるため避けた
 - 出力 HTML（`*_view.html`）は `view_model.py` で再生成できるので `.gitignore` で除外
+
+### view_model_gui.py
+
+同じモデルを **PyVista（VTK）のネイティブウィンドウ**で表示するビューア。
+移植元のない**新規モジュール**（2026-08-14）。
+
+```python
+view(dxf_path, absorption=None, unit=None, orient_normals="cad",
+     screenshot=None, show_normals=True) -> DxfModel
+build_plotter(model, title=..., off_screen=False, show_normals=True,
+              normal_ratio=0.06, window_size=(1280, 860)) -> pv.Plotter
+triangles_to_polydata(triangles) -> pv.PolyData
+normal_arrows(poly, length) -> pv.PolyData
+japanese_font() -> str | None
+```
+
+```
+cd geosim
+python view_model_gui.py ..\test.dxf --absorption ..\absorption.csv
+python view_model_gui.py ..\test.dxf --screenshot shot.png   # ウィンドウを開かず画像だけ
+```
+
+表示内容は HTML 版と同じ（三角形要素・法線矢印・裏面を赤・レイヤ色分けと表示切り替え・
+音源/受音点・`summary()`）。色は `view_model.LAYER_PALETTE` を import して共有しているので
+2 つのビューアで見え方が揃う。
+
+操作: ドラッグで回転、ホイールで拡大縮小、中ドラッグで平行移動、
+`z`/`x`/`c`/`v` で上/正面/横/等角、`n` で法線矢印、`w`/`s` でワイヤフレーム/面（VTK 既定）、
+`r` で視点リセット、`q` で終了。
+
+実装上の要点:
+
+- **巻き順を `t.normal` に合わせ直してから PolyData を作る**（`triangles_to_polydata`）。
+  `read_dxffile` の `orient_normals='flip'` / `'shells'` は**法線だけを反転**して頂点順序を
+  触らないため、そのまま渡すと VTK の表裏判定がモデルの法線と食い違う。揃えておけば
+  VTK の `backface_params` に裏面を赤で塗らせるだけで「法線の向きの確認」が成立する
+  （HTML 版が法線と視線の内積で自前判定しているのと目的は同じ、手段が違う）
+- VTK の既定フォントは日本語を持たないので、`japanese_font()` で Windows 標準の
+  日本語フォント（meiryo.ttc など）を探して `add_text(font_file=...)` に渡す。
+  これをしないとレイヤ名（＝吸音材名）が豆腐になる
+- チェックボックスウィジェットは interactor が要るので **`off_screen=True` では追加しない**
+- `--screenshot` は off-screen レンダリング。**表示を自動で検証できる**ようにするためのもの
+  （実際 `test.dxf` は法線内向きなので外から見ると全面が赤くなる、で確認した）
+
+**どちらのビューアを使うか**
+
+| | view_model.py（HTML） | view_model_gui.py（PyVista） |
+|---|---|---|
+| 依存 | なし | pyvista + vtk |
+| 共有 | HTML を渡すだけ | 相手にも環境構築が要る |
+| Python から操作 | しにくい | しやすい（Plotter を触れる） |
+| 発展先 | Web ベース GUI | 音線・音粒子の重ね描き（G-1/G-2）、デスクトップ GUI（G-7） |
 
 ### loop_reflectionmesh.py
 

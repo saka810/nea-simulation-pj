@@ -41,6 +41,10 @@
     `mesh.py`・`mesh_method.py`（メッシュと交差判定）／`receiver_sphere.py`（受音判定）／
     `loop_reflectionmesh.py`（音線追跡）／`loop_deleteredundancy.py`（重複経路削除）／
     `loop_noredundancy.py`（バックトレース）／`impulse.py`（インパルス応答合成）
+  - ビューアは 2 本並存：`view_model.py`（HTML+WebGL を書き出す。依存なし・共有向き）と
+    `view_model_gui.py`（PyVista のネイティブウィンドウ。Python から操作しやすい）。
+    **どちらか片方に寄せない**（用途が違う）。
+- `requirements.txt` / `requirements-lock.txt` / `.python-version` … 実行環境の定義（上記参照）
 - `fortran\` … 移植元の Fortran コード。**`.gitignore` で除外されており Git 管理外**。
   別端末には自動で配られないので、参照するコードの内容を履歴や `PROGRAM_STRUCTURE.md` 側に
   書き残しておくと他端末で追いやすい。
@@ -62,6 +66,16 @@
   フォルダ構成と文献一覧（`参考文献\README.md`）だけを共有する。原本は OneDrive の `06_参考文献\`。
   `fortran\` と同じく他端末には配られないので、**参照した内容は README や技術説明書に書き残す**こと。
 - `Claude履歴\` … セッション履歴（上記「絶対ルール」参照）
+
+## 実行環境
+
+- **Python は 3.10.11**（チーム方針）。`.python-version` に明記してある。
+  端末によっては既定の `python` が 3.10 以外を指すので、**venv は必ずインタプリタを明示して作る**：
+  `py -3.10 -m venv .venv`。
+- 依存は `requirements.txt`（numpy / scipy / matplotlib / pyvista）。
+  厳密に揃えたいときは `requirements-lock.txt`。手順は README.md「環境構築」。
+- `.venv/` は `.gitignore` 済み。**端末ごとに作り直す**（中身は共有しない）。
+- 新しいライブラリを入れたら **`requirements.txt` と `requirements-lock.txt` を必ず更新**する。
 
 ## 作業上の注意
 

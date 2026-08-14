@@ -1,0 +1,25 @@
+# NEA シミュレーション PJ の依存ライブラリ
+#
+# Python 3.10.11 前提（チーム方針。`.python-version` 参照）。
+# この端末では既定の `python` が 3.10 とは限らないので、venv は必ず
+# 3.10 のインタプリタを明示して作ること。
+#
+#   py -3.10 -m venv .venv
+#   .venv\Scripts\activate
+#   pip install -r requirements.txt
+#
+# 検証済みの厳密なバージョン一式は requirements-lock.txt にある
+# （環境を完全に揃えたいときはそちらを使う）。
+
+# 幾何計算・配列演算。パッケージ全体の土台
+numpy>=1.24,<3
+
+# 帯域フィルタ（E-6: scipy.signal.firwin）、Schroeder 積分など信号処理系
+scipy>=1.10,<2
+
+# 2D グラフ用。インパルス応答（G-3）・音響指標（G-4）・モード分布（G-6）
+matplotlib>=3.7,<4
+
+# 3D 表示用（VTK のラッパ）。geosim/view_model_gui.py が使う。
+# HTML 版ビューア geosim/view_model.py はこれが無くても動く
+pyvista>=0.44,<1

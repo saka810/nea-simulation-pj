@@ -173,6 +173,15 @@ Fortran → Python 移植の残作業リスト。着手・完了したら本フ�
       ※ CLAUDE.md 記載どおり、相対インポートに変えるなら要相談
       ※ 検証は `PYTHONPATH=geosim` を通して実行している
 - [ ] C-3 検証スクリプトを `tests/` などに恒久化する（現在はスクラッチに置いたまま）
+- [x] C-4 **実行環境の整備**（2026-08-14 完了）。
+      **Python 3.10.11**（チーム方針）で `.venv` を作り、numpy / scipy / matplotlib / pyvista を導入。
+      - `requirements.txt` … 直接依存（バージョン範囲つき）
+      - `requirements-lock.txt` … 動作確認済みの厳密な一式（`pip freeze` 相当）
+      - `.python-version` … バージョンの明示
+      - `.gitignore` に `.venv/` を追加（端末ごとに作り直す）
+      - 手順は README.md「環境構築」に記載
+      ※ この端末は既定の `python` が **3.13** を指すので、`py -3.10 -m venv .venv` と
+        インタプリタを明示すること（取り違えやすい）
 
 ### 検証結果（2026-08-12、6×4×3 m 直方体 / 音線3000本 / 最大反射8回 / 受音球 r=0.3m）
 
@@ -233,7 +242,8 @@ Fortran → Python 移植の残作業リスト。着手・完了したら本フ�
 ## G. 出力・可視化（方針決定済み、実装は後）
 
 詳細は **`docs/出力・可視化方針.md`** を参照。
-モデルの確認用ビューアは **G-0 で先に作成済み**（`geosim/view_model.py`）。
+モデルの確認用ビューアは **G-0 で先に作成済み**
+（`geosim/view_model.py` と `geosim/view_model_gui.py` の 2 本）。
 作りたい出力は次の 6 種。
 
 - [ ] G-1 **音線の可視化** — 反射経路を線で確認する
@@ -246,15 +256,20 @@ Fortran → Python 移植の残作業リスト。着手・完了したら本フ�
       （バックトレース出力の 3〜5 列目が素材。頭部座標系の入力が別途必要）
 - [ ] G-6 **モード分布** — 受音点における。書籍 2.1 波動音響理論が下敷き
 - [ ] G-7 GUI の設計（フレームワーク未定。上記のパラメータを渡せる形にする）
-- [x] G-0 **モデルビューア**（2026-08-14、`geosim/view_model.py`）。
-      三角形要素・法線の向き・レイヤ別色分けを表示し、回転／拡大縮小／平行移動ができる。
-      **自己完結 HTML（WebGL）を書き出してブラウザで開く方式**。
-      この環境に matplotlib / pyvista / PyQt が無く（`tkinter` のみ）、`pip install` を
-      前提にしたくなかったため。**法線の裏側を赤で塗る**ので向きの誤りが一目で分かる。
-      → G-7 の GUI を Web ベースにするならそのまま土台になる
+      ※ Web ベースなら `view_model.py`、デスクトップなら `view_model_gui.py` が土台になる。
+        デスクトップでスライダやグラフを同居させるなら `pyvistaqt` + `PySide6` の追加導入が必要
+- [x] G-0 **モデルビューア**（2026-08-14）。三角形要素・法線の向き・レイヤ別色分けを表示し、
+      回転／拡大縮小／平行移動ができる。**法線の裏側を赤で塗る**ので向きの誤りが一目で分かる。
+      実装方式の違う 2 本を**並存**させている。
+      - `geosim/view_model.py` … 自己完結 HTML（WebGL）を書き出してブラウザで開く。
+        依存ライブラリなし。**相手に環境構築を求めずに共有できる**のが強み
+      - `geosim/view_model_gui.py` … PyVista のネイティブウィンドウ。
+        **Python から直接操作できる**ので G-1 / G-2 の重ね描きはこちらが早い
       ```
       cd geosim
-      python view_model.py ..\test2.dxf --absorption ..\absorption.csv
+      python view_model.py     ..\test2.dxf --absorption ..\absorption.csv
+      python view_model_gui.py ..\test2.dxf --absorption ..\absorption.csv
+      python view_model_gui.py ..\test.dxf  --screenshot shot.png   # 画像だけ書き出す
       ```
 - [ ] G-8 **GUI で法線の向きを調整できるようにする**（ユーザー要望）。
       ビューア（G-0）に反転操作を足す形が自然。
