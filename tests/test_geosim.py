@@ -557,6 +557,68 @@ def test_statistical_reverberation():
           rv.statistical_reverberation_from_model(OpenModel()) is None)
 
 
+# ---------------------------------------------------------------- 可視化データ
+def test_ray_log():
+    """音線軌跡の記録と、可視化用の一括計算（G-1 / G-2 の土台）。"""
+    print("\n[11] 音線軌跡（可視化用データ）")
+    import tempfile
+    import ray_recorder as rr
+    import view_rays as vr
+
+    model, src, rec = load_test_room()
+    rays = sr.soundray_generator(400)
+    recorder = rr.RayRecorder(total_rays=400, max_rays=100, sound_velocity=C,
+                              band_number=8)
+    lr.loop(src, rec, rays, 5, model.mesh, 0.2, recorder=recorder)
+
+    check("軌跡が間引かれて記録される",
+          len(recorder.trajectories) == 100 and recorder.stride == 4,
+          f"{len(recorder.trajectories)} 本 / stride {recorder.stride}")
+    check("音線番号が昇順に並ぶ（束処理でも順序が保たれる）",
+          all(a.ray_index < b.ray_index for a, b in
+              zip(recorder.trajectories, recorder.trajectories[1:])))
+    check("先頭の節点が音源位置",
+          np.allclose(recorder.trajectories[0].nodes[0], src))
+    check("累積距離が単調増加",
+          all(np.all(np.diff(t.distances) >= 0) for t in recorder.trajectories))
+
+    with tempfile.TemporaryDirectory() as folder:
+        path = os.path.join(folder, "log.npz")
+        recorder.save_npz(path)
+        log = vr.RayLog(path)
+
+        check("保存して読み直せる", log.ray_count == 100, f"{log.ray_count} 本")
+        check("受音の有無が一致",
+              int(log.received.sum())
+              == sum(1 for t in recorder.trajectories if len(t.receive_steps)),
+              f"受音 {int(log.received.sum())} 本")
+
+        # 一括計算した粒子位置が RayTrajectory.position_at と一致するか
+        worst = 0.0
+        for t in (0.002, 0.01, 0.03):
+            position, rows = log.positions_at(t)
+            for k, ray in enumerate(rows):
+                want = recorder.trajectories[ray].position_at(t, C)
+                worst = max(worst, float(np.abs(position[k] - want).max()))
+        check("一括計算した粒子位置が 1 本ずつの計算と一致", worst < 1e-12,
+              f"最大差 {worst:.2e}")
+
+        # 折れ線の点数が節点数の合計と合う
+        index = log.selection(max_rays=20)
+        poly = log.line_polydata(index, colour="time")
+        check("折れ線の点数が節点数の合計と一致",
+              poly.n_points == int(log.node_counts[index].sum()),
+              f"{poly.n_points} 点")
+
+        truncated = log.line_polydata(index, colour="time", max_reflection=2)
+        check("反射回数で打ち切ると点数が減る",
+              truncated.n_points < poly.n_points,
+              f"{truncated.n_points} 点（打ち切りなし {poly.n_points} 点）")
+
+        check("受音した経路だけを選べる",
+              np.all(log.received[log.selection(received_only=True)]))
+
+
 def main():
     print("geosim 数値検証")
     print(f"  Python {sys.version.split()[0]} / numpy {np.__version__}")
@@ -566,7 +628,7 @@ def main():
     for fn in (test_read_dxf, test_soundray_generator, test_energy_decay,
                test_backtrace, test_image_sources, test_vectorised_geometry,
                test_atmosphere, test_absorption, test_impulse, test_reverberation,
-               test_statistical_reverberation):
+               test_statistical_reverberation, test_ray_log):
         fn()
 
     failed = [name for name, ok in _results if not ok]

@@ -67,6 +67,13 @@ python view_model_gui.py ..\test.dxf --absorption ..\absorption.csv
 # モデルビューア（HTML + WebGL を書き出してブラウザで開く。依存ライブラリ不要）
 python view_model.py ..\test.dxf --absorption ..\absorption.csv
 
+# 音線の可視化（受音した経路の初期反射だけを、到来時刻で色分け）
+python view_rays.py ..\test.dxf ..\結果\test_raylog.npz --received-only --max-reflection 3 --color time
+
+# 音粒子のアニメーション（スペース 再生/停止、← → コマ送り、スライダで時刻指定）
+python view_rays.py ..\test.dxf ..\結果\test_raylog.npz --mode particles
+python view_rays.py ..\test.dxf ..\結果\test_raylog.npz --mode particles --movie 広がり.gif
+
 # シミュレーション本体（DXF → パルス列 → インパルス応答 → 残響時間）
 python procedure.py ..\test.dxf --absorption ..\absorption.csv --absorption-kind normal ^
        --out ..\結果 --rays 20000 --nref 8 --bands 8 --temperature 20 --humidity 40

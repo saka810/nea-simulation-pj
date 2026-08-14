@@ -106,8 +106,14 @@ def normal_arrows(poly, length):
 
 
 def build_plotter(model, title="モデルビューア", off_screen=False,
-                  show_normals=True, normal_ratio=0.06, window_size=(1280, 860)):
-    """DxfModel から Plotter を組み立てて返す（show() はしない）。"""
+                  show_normals=True, normal_ratio=0.06, window_size=(1280, 860),
+                  opacity=1.0, show_bounds=True, show_summary=True):
+    """DxfModel から Plotter を組み立てて返す（show() はしない）。
+
+    opacity … 面の不透明度。音線を重ねるときは 0.15 くらいにすると中が見える
+    show_bounds … 目盛り付きの箱を描くか
+    show_summary … 読み込み結果のサマリを左下に出すか（音線を重ねるときは邪魔）
+    """
     mesh = model.mesh
     if not mesh:
         raise ValueError("表示できる三角形がありません")
@@ -131,7 +137,7 @@ def build_plotter(model, title="モデルビューア", off_screen=False,
         face_actors[name] = plotter.add_mesh(
             poly, color=colour, show_edges=True, edge_color=BG_BOTTOM,
             line_width=1, lighting=True, ambient=0.32, diffuse=0.70,
-            specular=0.06, smooth_shading=False,
+            specular=0.06, smooth_shading=False, opacity=opacity,
             backface_params={"color": BACK_COLOR, "ambient": 0.32,
                              "diffuse": 0.70},
         )
@@ -149,15 +155,17 @@ def build_plotter(model, title="モデルビューア", off_screen=False,
                          color="#4dd0a0", lighting=False)
 
     plotter.add_axes(color=TEXT_COLOR)
-    plotter.show_bounds(grid="back", location="outer", ticks="outside",
-                        font_size=9, color="#7f8794", xtitle="X [m]",
-                        ytitle="Y [m]", ztitle="Z [m]")
+    if show_bounds:
+        plotter.show_bounds(grid="back", location="outer", ticks="outside",
+                            font_size=9, color="#7f8794", xtitle="X [m]",
+                            ytitle="Y [m]", ztitle="Z [m]")
 
     header = f"{title}\n三角形 {len(mesh)} 枚 / レイヤ {len(layers)}"
     plotter.add_text(header, position="upper_left", font_size=11,
                      color=TEXT_COLOR, font_file=font)
-    plotter.add_text(model.summary(), position=(12, 12), font_size=8,
-                     color="#9aa2b1", font_file=font)
+    if show_summary:
+        plotter.add_text(model.summary(), position=(12, 12), font_size=8,
+                         color="#9aa2b1", font_file=font)
 
     # ---- 視点プリセット（VTK 既定の w/s/r/q とぶつからないキーを選ぶ） ----
     plotter.add_key_event("z", plotter.view_xy)

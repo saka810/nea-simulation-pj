@@ -306,10 +306,14 @@ Fortran → Python 移植の残作業リスト。着手・完了したら本フ�
 （`geosim/view_model.py` と `geosim/view_model_gui.py` の 2 本）。
 作りたい出力は次の 6 種。
 
-- [ ] G-1 **音線の可視化** — 反射経路を線で確認する
-      （データは `ray_recorder.py` で蓄積済み。あとは描画するだけ）
-- [ ] G-2 **音粒子の可視化（動画）** — 離散化時間ごとに粒子が飛ぶ様子。音の広がりを見る
-      （`RayTrajectory.position_at(t)` で任意時刻の位置が取れる）
+- [x] G-1 **音線の可視化** → **2026-08-14 完了**（`geosim/view_rays.py --mode rays`）。
+      反射経路を折れ線で描く。`--color energy|time|reflection|ray` で色分け、
+      受音経路は太い黄色で重ね描き、`--received-only` で絞り込み、
+      `--max-reflection` で**折れ線を途中で打ち切る**（初期反射だけ見たいとき）
+- [x] G-2 **音粒子の可視化（動画）** → **2026-08-14 完了**（`--mode particles`）。
+      スペースで再生/停止、矢印キーでコマ送り、スライダで時刻指定。
+      `--movie out.gif` で GIF に書き出す（Pillow でコマを合成。追加依存なし）。
+      任意時刻の粒子位置は全音線ぶんまとめて計算している（`RayLog.positions_at`）
 - [ ] G-3 **インパルス応答** — 計算は E 節で完了（`impulse.py`、CSV 出力まで）。
       残るのは**グラフ表示**（matplotlib 導入済み）
 - [ ] G-4 **各種音響指標** — **EDT / T20 / T30 は算出済み**

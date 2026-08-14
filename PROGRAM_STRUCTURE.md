@@ -55,6 +55,7 @@ procedure.process()
 | `ray_recorder.py` | 可視化用の音線軌跡レコーダ | （移植元なし・新規） | 実装済（2026-08-12 新設） |
 | `view_model.py` | モデルの 3D ビューア（HTML + WebGL を書き出す） | （移植元なし・新規） | 実装済（2026-08-14 新設） |
 | `view_model_gui.py` | モデルの 3D ビューア（PyVista のネイティブウィンドウ） | （移植元なし・新規） | 実装済（2026-08-14 新設・描画確認済） |
+| `view_rays.py` | 音線・音粒子の可視化（G-1 / G-2） | （移植元なし・新規） | **実装済**（2026-08-14 新設） |
 | `atmosphere.py` | 温度・湿度・気圧 → 音速・空気吸収 | c0 定数 / mair 近似式 | **実装済**（2026-08-14 新設。ISO 9613-1） |
 | `absorption.py` | 吸音材ライブラリと吸音率の種類の変換 | absper 配列 | **実装済**（2026-08-14 新設。Paris の式・GUI 対応） |
 | `loop_deleteredundancy.py` | 重複経路の削除 | 721〜841 行 | 実装済（2026-08-12 に整理・動作確認済） |
@@ -557,6 +558,62 @@ python view_model_gui.py ..\test.dxf --screenshot shot.png   # ウィンドウ�
 | 共有 | HTML を渡すだけ | 相手にも環境構築が要る |
 | Python から操作 | しにくい | しやすい（Plotter を触れる） |
 | 発展先 | Web ベース GUI | 音線・音粒子の重ね描き（G-1/G-2）、デスクトップ GUI（G-7） |
+
+### view_rays.py
+
+音線と音粒子の可視化（出力① G-1 / 出力② G-2）。移植元のない**新規モジュール**（2026-08-14）。
+`ray_recorder.RayRecorder` が保存した npz を読み、`view_model_gui` のモデル表示に重ねる。
+
+```python
+RayLog(npz_path)                       # 軌跡データの読み込みと前処理
+    .selection(received_only, max_rays)         # 描く音線を選ぶ
+    .line_polydata(index, colour, max_reflection)   # ① 折れ線
+    .positions_at(time, index)                  # ② 任意時刻の粒子位置（一括）
+    .energy_at(time, index, band)
+add_rays(plotter, raylog, ...)         # ① 音線を描く
+ParticleAnimation / animate(...)       # ② アニメーション
+save_movie(raylog, model, "out.gif")   # ② GIF に書き出す
+view(dxf, raylog, mode="rays"|"particles", ...)
+```
+
+```
+cd geosim
+python view_rays.py ..\test.dxf ..\結果\test_raylog.npz --received-only --max-reflection 3
+python view_rays.py ..\test.dxf ..\結果\test_raylog.npz --mode particles
+python view_rays.py ..\test.dxf ..\結果\test_raylog.npz --mode particles --movie 広がり.gif
+```
+
+**① 音線（`--mode rays`）**
+
+反射経路を折れ線で描く。点ごとにスカラーを持たせるので、1 本の線の中で色が変わる。
+`--color` で `energy`（バンド平均の dB）/ `time` / `reflection` / `ray` を選ぶ。
+受音した経路は太い黄色で重ね描きする（`--received-only` のときは全部が受音経路なので出さない）。
+
+> **`--max-reflection` は「その回数までで折れ線を打ち切る」動作**。
+> 「その回数以下の音線だけ残す」ではない。閉じた室では全音線が上限まで反射するので、
+> 絞り込みでは何も残らない。初期反射だけを見たいときに使う。
+
+> **`--max-rays` の既定は 80**。多すぎると線が重なって何も読めなくなる。
+> 間引きは**等間隔**（ランダムに抜くと見た目の密度が変わるため）。
+
+**② 音粒子（`--mode particles`）**
+
+離散化時間ごとに粒子が飛ぶ様子を見る。色はエネルギー [dB]。
+`スペース` 再生/停止、`←` `→` コマ送り、`Home` 先頭、下のスライダで時刻指定。
+
+実装上の要点:
+
+- **任意時刻の粒子位置を全音線ぶんまとめて計算する**（`positions_at`）。
+  可変長の軌跡を「行ごとに揃えた 2 次元配列（末尾を +inf で埋める）」に直しておくと、
+  `(距離 <= d) の個数 - 1` で区間の添字が求まり、音線ごとの `searchsorted` が要らない。
+  `RayTrajectory.position_at()` を毎フレーム本数分呼ぶより速く、結果は一致する（テスト済み）
+- **点群は 1 つの actor にまとめる**。音線ごとに actor を作ると本数分の描画呼び出しになる
+- 粒子数はフレームごとに変わるので、`points` だけでなく**頂点セル（`verts`）も作り直す**。
+  座標だけ差し替えると古いセル（最初の 1 点）しか描かれない
+- 動画は追加の依存を増やさず、コマを画像として集めて **Pillow で GIF** にする
+  （Pillow は matplotlib の依存で既に入っている）
+- カラーバーとスライダの見出しは VTK の既定フォントで描かれるため**日本語が出せない**。
+  ここだけ英字にしてある（本文側は日本語フォントを指定している）
 
 ### loop_reflectionmesh.py
 
