@@ -432,6 +432,85 @@ def decay_measures(time, ir, frequencies=None, measures=None, method="butter",
             "curvature": base["curvature"]}
 
 
+def clarity_measures(time, ir, frequencies=None, method="butter",
+                     order=FILTER_ORDER, numtaps=FIR_NUMTAPS, verbose=True):
+    """**明瞭度系の指標**（C50 / C80 / D50 / Ts）をバンド別に求める（TODO G-4）。
+
+    残響指標（EDT / T20 / T30）が「どれだけ長く響くか」を見るのに対し、
+    こちらは「**直接音と初期反射が、後から来る音に対してどれだけ強いか**」を見る。
+    値が大きいほど音が明瞭になる。会議室・教室のように「聞き取りやすさ」が
+    問われる部屋では、残響時間よりこちらが効く。
+
+    境目の時刻は用途で使い分ける（ISO 3382-1）。
+    **C50 / D50 は音声**（50 ms までを有効な音とみなす）、**C80 は音楽**（80 ms）。
+
+    | 指標 | 定義 | 単位 |
+    |---|---|---|
+    | C50 | `10 log10( ∫₀^50ms p² / ∫_50ms^∞ p² )` | dB |
+    | C80 | 同上、境目 80 ms | dB |
+    | D50 | `∫₀^50ms p² / ∫₀^∞ p²`（Deutlichkeit・明瞭度） | 0〜1 |
+    | Ts  | `∫ t·p² / ∫ p²`（重心時刻。小さいほど明瞭） | s |
+
+    C50 と D50 は同じものの言い換えで `C50 = 10 log10(D50 / (1 - D50))` の関係にある。
+    両方出しているのは、資料によってどちらで書かれているかが違うため。
+
+    **時刻の起点は直接音の到来時刻**にする（音源から受音点までの伝搬時間ぶん、
+    インパルス応答の先頭には無音がある。そこを含めると 50 ms の窓がずれる）。
+    ここでは各バンドで**エネルギーが最大になる時刻**を直接音とみなす。
+
+    戻り値: dict  'frequencies' / 'C50' / 'C80' / 'D50' / 'Ts' 各 (nf,)
+    """
+    time = np.asarray(time, dtype=float)
+    ir = np.asarray(ir, dtype=float)
+    fs = 1.0 / float(time[1] - time[0])
+    if frequencies is None:
+        frequencies = np.asarray(DEFAULT_OCTAVE_BANDS, dtype=float)
+    frequencies = np.atleast_1d(np.asarray(frequencies, dtype=float))
+
+    result = {name: np.full(len(frequencies), np.nan)
+              for name in ("C50", "C80", "D50", "Ts")}
+    for i, fc in enumerate(frequencies):
+        band = octave_bandpass(ir, fc, fs, method=method, order=order, numtaps=numtaps)
+        energy = band ** 2
+        total = energy.sum()
+        if total <= 0.0:
+            continue
+
+        # 直接音の到来時刻を起点にする
+        start = int(np.argmax(energy))
+        energy = energy[start:]
+        t = time[start:] - time[start]
+        total = energy.sum()
+
+        for name, limit in (("C50", 0.050), ("C80", 0.080)):
+            early = energy[t < limit].sum()
+            late = total - early
+            if early > 0.0 and late > 0.0:
+                result[name][i] = 10.0 * np.log10(early / late)
+        result["D50"][i] = energy[t < 0.050].sum() / total
+        result["Ts"][i] = float((t * energy).sum() / total)
+
+    result["frequencies"] = frequencies
+    if verbose:
+        print("[reverberation] " + "周波数".rjust(8)
+              + f"{'C50[dB]':>10}{'C80[dB]':>10}{'D50':>10}{'Ts[ms]':>10}")
+        for i, fc in enumerate(frequencies):
+            print(f"[reverberation] {fc:7.0f}Hz{result['C50'][i]:10.2f}"
+                  f"{result['C80'][i]:10.2f}{result['D50'][i]:10.3f}"
+                  f"{result['Ts'][i] * 1000.0:10.1f}")
+    return result
+
+
+def write_clarity_measures(filename, result):
+    """明瞭度系の指標を CSV に保存する。"""
+    header = ["frequency_hz", "C50_db", "C80_db", "D50", "Ts_s"]
+    rows = np.column_stack([result["frequencies"], result["C50"], result["C80"],
+                            result["D50"], result["Ts"]])
+    np.savetxt(filename, rows, delimiter=",", header=",".join(header),
+               comments="", fmt="%.12g")
+    return filename
+
+
 def write_decay_measures(filename, result):
     """EDT / T20 / T30 を CSV に保存する。"""
     names = list(result["measures"])

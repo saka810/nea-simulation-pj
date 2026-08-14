@@ -1,6 +1,7 @@
 import collections
 import csv
 import os
+import re
 
 import numpy as np
 
@@ -111,6 +112,10 @@ class DxfModel:
         self.unit_scale = 1.0
         self.unit_source = ""
         self.layer_counts = {}
+        self.layer_materials = {}   # レイヤ名 → 実際に引けた吸音率表のキー
+        self.orient_mode = "cad"    # 実際に適用された法線モード（'auto' の結果もここに入る）
+        self.flipped_faces = set()  # CAD の巻き順から反転した面のインデックス
+        self.enclosure = None       # 囲まれ具合 0〜1（'auto' で判定したときだけ）
         self.skipped = {"縮退面": 0, "非対応エンティティ": collections.Counter(),
                         "面レコード不正": 0}
         self.face_sources = collections.Counter()
@@ -131,6 +136,12 @@ class DxfModel:
             f"三角形メッシュ: {len(self.mesh)} 枚",
             f"単位: 1 CAD単位 = {self.unit_scale} m（{self.unit_source}）",
             f"レイヤ別の枚数: {self.layer_counts}",
+        ]
+        if self.layer_materials:
+            lines.append("レイヤ→材料: " + ", ".join(
+                f"{layer}→{self.layer_materials[layer]}"
+                for layer in sorted(self.layer_materials)))
+        lines += [
             f"音源: {[np.round(p, 4).tolist() for p in self.source_points]}",
             f"受音点: {[np.round(p, 4).tolist() for p in self.receiver_points]}",
         ]
@@ -280,6 +291,49 @@ def _tags_all(entity_tags, code):
 
 
 # ------------------------------------------------------------------------------
+# OCS（オブジェクト座標系）→ WCS（ワールド座標系）
+# ------------------------------------------------------------------------------
+
+# 任意軸アルゴリズムの分岐しきい値（DXF 仕様で 1/64 と決まっている）
+ARBITRARY_AXIS_EPS = 1.0 / 64.0
+
+
+def ocs_axes(extrusion):
+    """押し出し方向から OCS の 3 軸を作る（DXF の Arbitrary Axis Algorithm）。
+
+    LWPOLYLINE や CIRCLE のような「平面図形」は、頂点を **その図形が乗る平面上の
+    2 次元座標（OCS）** で持っている。押し出し方向 N（グループコード 210/220/230）が
+    Z 軸なら OCS = WCS なのでそのまま使えるが、**壁のような鉛直な面は N が水平を向く**
+    ため、この変換を通さないと座標がまるで違う場所になる。
+
+    軸の取り方は DXF 仕様で決められていて、任意性はない。
+    N が Z 軸に近いときだけ基準を Y 軸に切り替えるのは、
+    Z 軸との外積が退化して軸が決まらなくなるのを避けるため。
+    """
+    normal = np.asarray(extrusion, dtype=float)
+    length = np.linalg.norm(normal)
+    if length == 0.0:
+        return np.eye(3)
+    normal = normal / length
+
+    if abs(normal[0]) < ARBITRARY_AXIS_EPS and abs(normal[1]) < ARBITRARY_AXIS_EPS:
+        reference = np.array([0.0, 1.0, 0.0])   # N が Z 軸に近い
+    else:
+        reference = np.array([0.0, 0.0, 1.0])
+    axis_x = np.cross(reference, normal)
+    axis_x /= np.linalg.norm(axis_x)
+    axis_y = np.cross(normal, axis_x)
+    return np.array([axis_x, axis_y, normal])
+
+
+def ocs_to_wcs(point, extrusion):
+    """OCS の点（x, y, 高度）をワールド座標に直す。"""
+    axes = ocs_axes(extrusion)
+    p = np.asarray(point, dtype=float)
+    return p[0] * axes[0] + p[1] * axes[1] + p[2] * axes[2]
+
+
+# ------------------------------------------------------------------------------
 # 単位
 # ------------------------------------------------------------------------------
 
@@ -316,6 +370,18 @@ def resolve_unit_scale(tags, unit=None):
 # 吸音率
 # ------------------------------------------------------------------------------
 
+class AbsorptionTable(dict):
+    """{キー: 吸音率 ndarray} に、キー → 材料名の対応を添えたもの。
+
+    ID でも材料名でも引けるようにキーを 2 通り登録するので、
+    「ID で引いたときに何の材料だったか」を後から言えるようにしておく。
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.names = {}
+
+
 def read_absorption_csv(file_name, band_number=DEFAULT_BAND_NUMBER):
     """吸音率 CSV を読んで {キー: ndarray(band_number,)} を返す。
 
@@ -343,7 +409,7 @@ def read_absorption_csv(file_name, band_number=DEFAULT_BAND_NUMBER):
     if text is None:
         raise last_error
 
-    table = {}
+    table = AbsorptionTable()
     padded = []          # 列数が足りずに補った材料（まとめて 1 回だけ知らせる）
     for row in csv.reader(text.splitlines()):
         if not row or not row[0].strip() or row[0].lstrip().startswith("#"):
@@ -381,6 +447,7 @@ def read_absorption_csv(file_name, band_number=DEFAULT_BAND_NUMBER):
         for key in keys:
             if key:
                 table[key] = arr
+                table.names[key] = keys[-1]   # ID で引いても材料名が分かるように
 
     if padded:
         columns = sorted({n for _, n in padded})
@@ -415,9 +482,33 @@ def _add_triangles(model, faces, layer, points):
         faces.append((layer, t[0], t[1], t[2]))
 
 
-def _resolve_absorption(layer, absorption_table, default_absorption, band_number, unresolved):
-    if absorption_table and layer in absorption_table:
-        return absorption_table[layer]
+def layer_number(layer):
+    """レイヤ名の先頭の数字を材料 ID として取り出す。無ければ None。
+
+    CAD 側の運用で `01__研修室_床` のように **先頭 2 桁を吸音率表の ID** にして
+    レイヤ名を付けることがある。名前そのものは材料名と一致しないので、
+    この番号で引けるようにしておく。先頭のゼロは落とす（`01` → `1`）。
+    """
+    m = re.match(r"^\s*(\d+)", layer or "")
+    if not m:
+        return None
+    return str(int(m.group(1)))
+
+
+def _resolve_absorption(layer, absorption_table, default_absorption, band_number,
+                        unresolved, resolved=None):
+    names = getattr(absorption_table, "names", {})
+    if absorption_table:
+        if layer in absorption_table:
+            if resolved is not None:
+                resolved[layer] = names.get(layer, layer)
+            return absorption_table[layer]
+        # レイヤ名が材料名と一致しないとき、先頭の番号を材料 ID とみなして引く
+        number = layer_number(layer)
+        if number is not None and number in absorption_table:
+            if resolved is not None:
+                resolved[layer] = f"{number}:{names.get(number, number)}"
+            return absorption_table[number]
     unresolved.add(layer)
     if default_absorption is None:
         return np.full(band_number, 0.1)
@@ -721,6 +812,114 @@ def mesh_shells(triangles, tol=1.0e-9):
     return shells
 
 
+def _count_crossings(origins, directions, triangles, eps=1.0e-9):
+    """各レイが三角形群と何回交わるかを数える（両面。裏からの交差も数える）。
+
+    origins (K,3) / directions (K,3) / triangles list[(v1,v2,v3)] → (K,) の交差回数。
+    """
+    origins = np.asarray(origins, dtype=float)
+    directions = np.asarray(directions, dtype=float)
+    v0 = np.array([t[0] for t in triangles], dtype=float)
+    v1 = np.array([t[1] for t in triangles], dtype=float)
+    v2 = np.array([t[2] for t in triangles], dtype=float)
+
+    # Möller–Trumbore。平面の法線を使わないので、CAD の巻き順に左右されない
+    edge1 = v1 - v0
+    edge2 = v2 - v0
+    pvec = np.cross(directions[:, None, :], edge2[None, :, :])      # (K,M,3)
+    det = np.einsum("kmi,mi->km", pvec, edge1)
+    parallel = np.abs(det) < eps
+    inv_det = np.where(parallel, 1.0, det)
+
+    tvec = origins[:, None, :] - v0[None, :, :]
+    u = np.einsum("kmi,kmi->km", tvec, pvec) / inv_det
+    qvec = np.cross(tvec, edge1[None, :, :])
+    v = np.einsum("kmi,ki->km", qvec, directions) / inv_det
+    t = np.einsum("kmi,mi->km", qvec, edge2) / inv_det
+
+    hit = (~parallel) & (u >= 0.0) & (v >= 0.0) & (u + v <= 1.0) & (t > eps)
+    return hit.sum(axis=1)
+
+
+# 内向き判定に使う試行方向の本数（多数決を取るので奇数にする）
+INWARD_PROBE_DIRECTIONS = 9
+
+
+def orient_inward(triangles, normals, probes=INWARD_PROBE_DIRECTIONS, seed=0):
+    """面ごとに「法線が室内側を向いているか」を判定し、反転すべき面の集合を返す。
+
+    **CAD で法線を意識せずに描いたモデル**（床・壁・天井を 1 枚ずつ描いただけのもの）は
+    巻き順と押し出し方向で法線が決まるため、床は上・天井も上、壁はバラバラ、
+    といったことが普通に起きる。それだと衝突判定で壁がすり抜ける。
+
+    判定は**レイの偶奇**による。閉じた面に囲まれた領域の内側から外へレイを飛ばすと、
+    境界を必ず**奇数回**横切る（外側からなら偶数回）。そこで面の重心を法線側へわずかに
+    浮かせた点から外へレイを飛ばし、交差回数が奇数なら「法線側が室内」＝そのまま、
+    偶数なら反転する。
+
+    1 方向だけだと、辺や頂点をかすめたときに数え間違える。ここでは方向を
+    `probes` 本ばらまいて**多数決**を取る。方向は固定シードで生成するので、
+    同じモデルなら毎回同じ結果になる（再現性のため）。
+
+    戻り値: (反転する面インデックスの集合, 判定に迷った面の数)
+    """
+    triangles = list(triangles)
+    normals = np.asarray(normals, dtype=float)
+    centroids = np.array([(t[0] + t[1] + t[2]) / 3.0 for t in triangles])
+
+    # 面の大きさに合わせて浮かせる量を決める（大きいモデルでも小さいモデルでも効くように）
+    span = float(np.max(np.ptp(np.concatenate([np.asarray(t) for t in triangles]), axis=0)))
+    offset = max(span * 1.0e-7, 1.0e-9)
+
+    rng = np.random.default_rng(seed)
+    flip = set()
+    ambiguous = 0
+    for j in range(len(triangles)):
+        origin = centroids[j] + offset * normals[j]
+        # 法線側の半球へ飛ばす。法線そのものと、それを軸にばらけさせた方向
+        directions = rng.normal(size=(probes, 3))
+        directions /= np.linalg.norm(directions, axis=1)[:, None]
+        # 法線と逆向きのものは反転して、必ず法線側の半球にする
+        sign = np.sign(directions @ normals[j])
+        sign[sign == 0.0] = 1.0
+        directions *= sign[:, None]
+        directions[0] = normals[j]
+
+        counts = _count_crossings(np.repeat(origin[None, :], probes, axis=0),
+                                  directions, triangles)
+        odd = int(np.count_nonzero(counts % 2 == 1))
+        if odd * 2 == probes:
+            ambiguous += 1
+        if odd * 2 < probes:      # 偶数が多数 ＝ 法線側は室外 → 反転
+            flip.add(j)
+    return flip, ambiguous
+
+
+def encloses_point(triangles, point, samples=256, seed=0):
+    """`point` がこの面群に**囲まれているか**の度合い（0〜1）を返す。
+
+    点から全方向へレイを飛ばし、**面に当たった割合**を返す。
+    完全に閉じた室の内側なら 1.0、一面だけの反射板なら 0.5 前後、外側なら 0 に近い。
+
+    法線の自動補正（`orient_normals='auto'`）で「室として扱ってよいか」を判断するために使う。
+    レイの偶奇による内向き判定は**囲まれた形状でしか意味がない**ので、
+    一面反射板のような開いた形状に適用すると、反射させたい側を逆に向けてしまう。
+
+    方向は固定シードで生成するので、同じモデルなら毎回同じ値になる。
+    """
+    rng = np.random.default_rng(seed)
+    directions = rng.normal(size=(int(samples), 3))
+    directions /= np.linalg.norm(directions, axis=1)[:, None]
+    origins = np.repeat(np.asarray(point, dtype=float)[None, :], len(directions), axis=0)
+    counts = _count_crossings(origins, directions, triangles)
+    return float(np.count_nonzero(counts > 0)) / len(directions)
+
+
+# これ以上なら「室として囲まれている」とみなす閾値。
+# 完全な室なら 1.0 になるので、隙間や T 字接合ぶんの余裕を見て 0.95 にしてある。
+ENCLOSURE_THRESHOLD = 0.95
+
+
 def _bbox(points):
     p = np.asarray(points, dtype=float)
     return p.min(axis=0), p.max(axis=0)
@@ -781,7 +980,7 @@ def read_model(file_name, unit=None, absorption_table=None, default_absorption=N
                orient_normals="cad", reference_point=None, band_number=DEFAULT_BAND_NUMBER,
                source_layers=DEFAULT_SOURCE_LAYERS,
                receiver_layers=DEFAULT_RECEIVER_LAYERS,
-               verbose=True):
+               flip_faces=None, verbose=True):
     """DXF を読んで DxfModel を返す。
 
     **閉じた室でも、一面だけの壁のような開いた形状でも読める**（音線追跡側も
@@ -800,10 +999,18 @@ def read_model(file_name, unit=None, absorption_table=None, default_absorption=N
         default_absorption テーブルに無いレイヤに使う値（None なら 0.1 で警告）
         orient_normals    法線の向きの扱い
           'cad'（既定）… CAD の巻き順をそのまま使う
+          'auto'       … **閉じている／室として囲まれていれば内向きに揃え、
+                         開いた形状なら CAD のまま**。開いた形状に内向き補正をかけると
+                         一面反射板の反射させたい側が逆になるので、
+                         `encloses_point()` で実際に囲まれているか確かめてから決める
           'flip'       … 全反転（元コード 276行 ynnmrev='y' に相当）
           'shells'     … シェル（連結成分）単位で空気側へ揃える。
                          外殻は内向き、内側の物体は外向き。
                          巻き順が一貫していない場合は補正を中止して 'cad' と同じ挙動になる
+          'inward'     … 面ごとにレイの偶奇で室内側へ揃える。面のつながりを要求しない
+        flip_faces        **上の判定のあとに反転する面インデックス**（人が目で見て直したぶん）。
+                          `normal_editor.py` が作り、`project.py` が normals.json に保存する。
+                          自動判定を上書きするので、これが最後の決定になる
         reference_point   使わない（旧 'toward' 用。渡すと警告する）
         source_layers     音源として扱う POINT のレイヤ名
         receiver_layers   受音点として扱う POINT のレイヤ名
@@ -890,14 +1097,18 @@ def read_model(file_name, unit=None, absorption_table=None, default_absorption=N
                                   _float(etags, 230, 1.0)])
             if not (flag & 1) or min(len(xs), len(ys)) < 3:
                 model.skipped["非対応エンティティ"]["LWPOLYLINE(開いた線)"] += 1
-            elif not np.allclose(extrusion, [0.0, 0.0, 1.0]):
-                # 押し出し方向が Z 以外だと OCS→WCS の変換が必要。未対応なので読み飛ばす
-                model.skipped["非対応エンティティ"]["LWPOLYLINE(押し出し方向がZ以外)"] += 1
-            else:
+            elif np.allclose(extrusion, [0.0, 0.0, 1.0]):
                 pts = [np.array([float(x), float(y), elevation]) * scale
                        for x, y in zip(xs, ys)]
                 _add_triangles(model, faces, layer, pts)
                 model.face_sources["閉じたLWPOLYLINE"] += 1
+            else:
+                # 押し出し方向が Z 以外 ＝ 頂点が OCS で書かれている（鉛直な壁など）。
+                # 変換しないと座標がまるで違う場所になるので、必ず通す
+                pts = [ocs_to_wcs([float(x), float(y), elevation], extrusion) * scale
+                       for x, y in zip(xs, ys)]
+                _add_triangles(model, faces, layer, pts)
+                model.face_sources["閉じたLWPOLYLINE(OCS)"] += 1
             i += 1
             continue
 
@@ -951,6 +1162,32 @@ def read_model(file_name, unit=None, absorption_table=None, default_absorption=N
             model.volume = abs(signed_volume(triangles))
 
     mode = orient_normals
+    auto_note = ""
+    if mode == "auto":
+        # **閉じている（または室として囲まれている）なら内向きに揃え、
+        #   開いた形状なら CAD のまま**という自動判定。
+        # 開いた形状に内向き補正をかけると、一面反射板の反射させたい側が逆になるので、
+        # 「囲まれているか」を実際にレイを飛ばして確かめてから決める。
+        if not kept:
+            mode, auto_note = "cad", "自動判定: 面が無い / "
+        elif model.is_closed and model.winding_consistent:
+            mode = "shells"
+            auto_note = "自動判定: 閉じていて巻き順も一貫 → シェル単位で空気側へ / "
+        else:
+            probe = (model.source_points[0] if model.source_points
+                     else np.mean([np.mean(t, axis=0) for t in triangles], axis=0))
+            model.enclosure = encloses_point(triangles, probe)
+            if model.enclosure >= ENCLOSURE_THRESHOLD:
+                mode = "inward"
+                auto_note = (f"自動判定: 囲まれている"
+                             f"（全方向の {model.enclosure * 100:.0f}% で面に当たる）"
+                             f" → 内向きへ揃える / ")
+            else:
+                mode = "cad"
+                auto_note = (f"自動判定: 開いた形状"
+                             f"（全方向の {model.enclosure * 100:.0f}% しか面に当たらない）"
+                             f" → CAD のまま（モデル側の指定を尊重する） / ")
+
     if mode == "cad":
         note = "CAD の巻き順をそのまま使う（既定。モデルが法線の正解を持っている前提）"
     elif mode == "flip":
@@ -977,22 +1214,44 @@ def read_model(file_name, unit=None, absorption_table=None, default_absorption=N
                 else:
                     details.append(f"シェル{k}({tag}): {shell['normals']} のまま")
             note = "シェル単位で空気側へ揃える / " + " , ".join(details)
+    elif mode == "inward":
+        # 面ごとにレイの偶奇で「室内側」を判定して揃える。
+        # 'shells' と違って**面のつながり（巻き順の一貫性）を要求しない**ので、
+        # 床・壁・天井を 1 枚ずつ描いた「板の寄せ集め」モデルでも効く。
+        per_face_flip, ambiguous = orient_inward(triangles,
+                                                 [f[4] for f in kept])
+        note = (f"面ごとにレイの偶奇で室内側へ揃える "
+                f"（{len(per_face_flip)} / {len(kept)} 枚を反転）")
+        if ambiguous:
+            note += (f"  ★{ambiguous} 枚は判定が割れました"
+                     f"（隙間のある形状かもしれません。表示で確認してください）")
     else:
         raise ValueError(f"orient_normals に未知の値: {orient_normals!r}"
-                         f"（使えるのは 'cad' / 'flip' / 'shells'）")
+                         f"（使えるのは 'auto' / 'cad' / 'flip' / 'shells' / 'inward'）")
+    note = auto_note + note
+    model.orient_mode = mode
 
     if reference_point is not None:
         print("[read_dxffile] 警告: reference_point は使われません。"
               "法線を音源方向に向ける方式は凸凹の壁や宙に浮いた家具で破綻するため廃止しました。"
               "CAD 側で法線が空気側を向くようにモデルを作ってください。")
 
+    # 自動判定のあとに、**人が目で見て直した指定**を重ねる（normal_editor.py / project.py）。
+    # 自動判定を上書きするので順序が要点。ここが最後の決定になる
+    manual = set(int(i) for i in (flip_faces or ()))
+    if manual:
+        note += f" / 手動で {len(manual)} 枚を反転"
+    model.flipped_faces = set()
+
     for j, (layer, x1, x2, x3, n) in enumerate(kept):
-        if per_face_flip is not None and j in per_face_flip:
+        flipped = flip_all or (per_face_flip is not None and j in per_face_flip)
+        if j in manual:
+            flipped = not flipped
+        if flipped:
             n = -n
-        elif flip_all:
-            n = -n
+            model.flipped_faces.add(j)
         absorption = _resolve_absorption(layer, absorption_table, default_absorption,
-                                         band_number, unresolved)
+                                         band_number, unresolved, model.layer_materials)
         model.mesh.append(Mesh(x1, x2, x3, n, layer, absorption))
         model.layer_counts[layer] = model.layer_counts.get(layer, 0) + 1
 
@@ -1000,7 +1259,9 @@ def read_model(file_name, unit=None, absorption_table=None, default_absorption=N
         allpts = np.concatenate([m.vertexes for m in model.mesh])
         model.extents = np.array([allpts.min(axis=0), allpts.max(axis=0)])
 
-    if unresolved:
+    # verbose=False は「形状だけ知りたい下読み」なので警告も出さない
+    # （面数の照合や受音点の取得で何度も読むため、そのたびに警告が出ると邪魔になる）
+    if unresolved and verbose:
         used = 0.1 if default_absorption is None else default_absorption
         print(f"[read_dxffile] 警告: 吸音率が未指定のレイヤ {sorted(unresolved)} → {used} を使用")
 
@@ -1010,6 +1271,111 @@ def read_model(file_name, unit=None, absorption_table=None, default_absorption=N
             print(f"[read_dxffile] 法線の向き: {note}")
 
     return model
+
+
+def check_model(model, absorption_table=None, verbose=True):
+    """作図ミスを洗い出す（TODO B-10）。
+
+    計算に入る前に「そもそもモデルとして成立しているか」を機械的に確かめる。
+    黙って変な結果を出すより、**先に指摘して直してもらう**ほうが早いため。
+
+    見るところ:
+
+    | 項目 | まずい理由 |
+    |---|---|
+    | 面が 1 枚も無い | DXF のエンティティ種別が非対応かもしれない |
+    | 音源／受音点が無い | src / rec レイヤの POINT を描き忘れ |
+    | 音源／受音点がモデルの外 | 座標系の取り違え。直接音すら出ない |
+    | 吸音率が引けないレイヤ | 既定値 0.1 で計算されるので、結果が意味を持たない |
+    | 同じ位置に重なった面 | 音線がどちらに当たるか定まらず、隙間なく反射して見える |
+    | 開いた辺が多い | 音線が室外へ逃げる。閉じた室のつもりなら作図ミス |
+    | 巻き順が一貫していない | 隣り合う面で法線が反対を向いている |
+    | ねじれた四角形 | 三角形への割り方で形が変わる |
+    | 極端に小さい面 | 数値誤差で交差判定が不安定になる |
+
+    戻り値: list[dict]  {'level': 'error'|'warning'|'info', 'message': str}
+    """
+    issues = []
+
+    def add(level, message):
+        issues.append({"level": level, "message": message})
+
+    mesh = model.mesh
+    if not mesh:
+        add("error", "面が 1 枚も読めていません。"
+                     f"読み飛ばした種別: {dict(model.skipped['非対応エンティティ']) or 'なし'}")
+        return _report_issues(issues, verbose)
+
+    lo, hi = model.extents
+    margin = 0.001 * float(np.max(hi - lo))
+    for name, points in (("音源", model.source_points), ("受音点", model.receiver_points)):
+        if not points:
+            add("warning", f"{name}が DXF にありません"
+                           f"（src / rec レイヤの POINT。計算時に座標を直接指定すれば動きます）")
+            continue
+        for p in points:
+            if np.any(p < lo - margin) or np.any(p > hi + margin):
+                add("error", f"{name} {np.round(p, 3).tolist()} がモデルの外にあります"
+                             f"（範囲 {np.round(lo, 3).tolist()}〜{np.round(hi, 3).tolist()}）")
+
+    if absorption_table is not None:
+        missing = [layer for layer in model.layer_counts
+                   if layer not in model.layer_materials]
+        if missing:
+            add("warning", f"吸音率が引けないレイヤ {missing} → 既定値 0.1 で計算されます")
+
+    # 同じ位置に重なった面。重心を丸めて突き合わせる
+    centres = {}
+    for j, face in enumerate(mesh):
+        key = tuple(np.round(face.vertexes.mean(axis=0), 6))
+        centres.setdefault(key, []).append(j)
+    duplicated = [v for v in centres.values() if len(v) > 1]
+    if duplicated:
+        add("warning", f"同じ位置に重なった面が {len(duplicated)} 組あります"
+                       f"（例: 面 {duplicated[0]}）。"
+                       f"音線がどちらに当たるか定まりません")
+
+    if not model.is_closed:
+        level = "info" if model.open_edges < 4 else "warning"
+        add(level, f"開いた辺が {model.open_edges} 本あります"
+                   f"（閉じた室のつもりなら作図ミス。一面反射板などなら問題ありません）")
+    if not model.winding_consistent:
+        add("warning", "巻き順が一貫していません"
+                       "（隣り合う面で法線が反対を向いている箇所があります）")
+
+    if model.polygon_notes["ねじれた四角形"]:
+        add("warning", f"ねじれた四角形が {model.polygon_notes['ねじれた四角形']} 枚"
+                       f"（最大 {model.polygon_notes['最大ねじれ実寸'] * 1000:.1f} mm）。"
+                       f"三角形への割り方で形が変わります")
+    if model.polygon_notes["分割に失敗"]:
+        add("error", f"三角形に分割できなかった多角形が "
+                     f"{model.polygon_notes['分割に失敗']} 枚あります")
+
+    areas = np.array([0.5 * np.linalg.norm(np.cross(f.vertexes[1] - f.vertexes[0],
+                                                    f.vertexes[2] - f.vertexes[0]))
+                      for f in mesh])
+    tiny = int(np.count_nonzero(areas < 1.0e-6))
+    if tiny:
+        add("warning", f"面積が 1 mm² 未満の面が {tiny} 枚あります"
+                       f"（交差判定が数値的に不安定になります）")
+
+    skipped = model.skipped["非対応エンティティ"]
+    if skipped:
+        add("info", f"読み飛ばしたエンティティ: {dict(skipped)}")
+
+    return _report_issues(issues, verbose)
+
+
+def _report_issues(issues, verbose):
+    if verbose:
+        marks = {"error": "✗ エラー", "warning": "△ 注意", "info": "・"}
+        if not issues:
+            print("[check] 作図チェック: 問題は見つかりませんでした")
+        else:
+            print(f"[check] 作図チェック: {len(issues)} 件")
+            for issue in issues:
+                print(f"[check]   {marks[issue['level']]} {issue['message']}")
+    return issues
 
 
 def read(file_name, unit=None, absorption_table=None, default_absorption=None,

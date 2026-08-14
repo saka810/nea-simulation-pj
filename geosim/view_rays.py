@@ -14,22 +14,26 @@
     # まず計算して軌跡を保存する
     python procedure.py ..\\test.dxf --absorption ..\\absorption.csv --out ..\\結果
 
-    # ① 音線
+    # ①② 両方を同居させる（既定。Tab で切り替え）
     python view_rays.py ..\\test.dxf ..\\結果\\test_raylog.npz
     # 受音した経路だけ
     python view_rays.py ..\\test.dxf ..\\結果\\test_raylog.npz --received-only
-    # ② 音粒子（アニメーション）
+    # 片方だけにする
     python view_rays.py ..\\test.dxf ..\\結果\\test_raylog.npz --mode particles
     # GIF に書き出す
     python view_rays.py ..\\test.dxf ..\\結果\\test_raylog.npz --mode particles --movie 広がり.gif
 
 操作:
     共通      ドラッグ 回転 / ホイール 拡大縮小 / `r` 視点リセット / `q` 終了
+              **`Tab` 音線 ↔ 音粒子の切り替え**（ウィンドウを閉じずに見比べられる）
               左上のチェックボックス レイヤの表示 ON/OFF
-              **左の縦スライダ 不透明度** / `Tab` その対象を切り替え（すべて↔各レイヤ）
+              **左の縦スライダ 不透明度** / `o` その対象を切り替え（すべて↔各レイヤ）
               `m` モデル表示の ON/OFF
     音粒子    `スペース` 再生・一時停止 / `←` `→` 1 コマ送り / `Home` 先頭へ /
               下の横スライダ 時刻を指定
+
+※ `--mode rays` / `--mode particles` で片方だけにした場合は、不透明度の対象切替は
+   従来どおり `Tab`（切り替える相手がいないため）。
 
 壁の透過はレイヤごとに変えられる。起動時に決めておくなら
 `--opacity`（全体）と `--layer-opacity "1=0.6,2=0.05"`（レイヤ別）。
@@ -51,6 +55,13 @@ COLOR_MODES = ("energy", "time", "reflection", "ray")
 
 TEXT_COLOR = "#d6dae2"
 RECEIVED_COLOR = "#ffd166"      # 受音した経路の色
+
+# カラーバーの見出し。VTK の既定フォントで描かれるので**日本語が出せない**（英字にしてある）。
+# 音線と音粒子を同じウィンドウに同居させるので、**見出しは重ならないようにする**
+# （pyvista はカラーバーを見出しで管理しているため、同名だと 1 つにまとめられてしまう）。
+RAY_BAR_TITLE = {"energy": "Ray energy [dB]", "time": "Ray time [ms]",
+                 "reflection": "Reflection", "ray": "Ray index"}
+PARTICLE_BAR_TITLE = "Particle energy [dB]"
 
 
 class RayLog:
@@ -284,13 +295,12 @@ def add_rays(plotter, raylog, index=None, colour="energy", band=None,
     """
     poly = raylog.line_polydata(index, colour=colour, band=band,
                                 max_reflection=max_reflection)
-    label = {"energy": "Energy [dB]", "time": "Time [ms]",
-             "reflection": "Reflection", "ray": "Ray index"}[colour]
+    label = RAY_BAR_TITLE[colour]
     actor = plotter.add_mesh(poly, scalars=colour, cmap=cmap, line_width=line_width,
                              lighting=False, opacity=opacity,
                              scalar_bar_args={"title": label, "color": TEXT_COLOR,
                                               "n_labels": 5, "fmt": "%.1f",
-                                              "position_x": 0.32, "position_y": 0.02,
+                                              "position_x": 0.32, "position_y": 0.11,
                                               "width": 0.5, "height": 0.05})
     # 受音した経路を目立たせる。ただし受音経路しか描いていないときは意味がないので出さない
     received = None
@@ -348,7 +358,7 @@ class ParticleAnimation:
             self.cloud, scalars="energy", cmap=cmap, clim=(max(low, -60.0), 0.0),
             nan_opacity=0.0,
             point_size=point_size, render_points_as_spheres=True, lighting=False,
-            scalar_bar_args={"title": "Energy [dB]", "color": TEXT_COLOR,
+            scalar_bar_args={"title": PARTICLE_BAR_TITLE, "color": TEXT_COLOR,
                              "n_labels": 5, "fmt": "%.0f",
                              "position_x": 0.32, "position_y": 0.11,
                              "width": 0.5, "height": 0.05})
@@ -410,10 +420,96 @@ def animate(plotter, raylog, index=None, frames=240, band=None, point_size=9.0):
     # 見出しは VTK の既定フォントで描かれるので英字にする（日本語は豆腐になる）
     animation.slider = plotter.add_slider_widget(
         lambda value: animation.update(int(round(value))),
-        [0, frames - 1], value=0, title="frame", pointa=(0.32, 0.05),
-        pointb=(0.90, 0.05), style="modern", fmt="%.0f",
+        [0, frames - 1], value=0, title="frame", pointa=(0.32, 0.04),
+        pointb=(0.90, 0.04), style="modern", fmt="%.0f",
         color=TEXT_COLOR, title_color=TEXT_COLOR)
     return animation
+
+
+# ------------------------------------------------------------------------------
+# ①② の切り替え表示
+# ------------------------------------------------------------------------------
+
+class RayParticleView:
+    """音線と音粒子を**同じウィンドウに同居させ、Tab で切り替える**。
+
+    以前は `--mode` でどちらかを選ぶ形だったので、見比べるにはウィンドウを
+    一度閉じてコマンドを打ち直す必要があった。同じ軌跡データから作る 2 つの見せ方なので、
+    両方を組み立てておいて**表示を切り替えるだけ**にした（作り直しは起きない）。
+
+    切り替えるのは以下のひとまとまり。
+
+    | | 音線 | 音粒子 |
+    |---|---|---|
+    | 本体 | 折れ線 ＋ 受音経路のハイライト | 点群 |
+    | カラーバー | Ray … | Particle energy |
+    | 下の横スライダ | なし | 時刻 |
+    | 文字 | なし | 時刻・粒子数 |
+
+    音粒子側を隠している間は `playing` を落として**コマを進めない**。
+    進めたままだと、見えていないのに毎フレーム位置計算が走ることになる。
+    """
+
+    MODES = ("rays", "particles")
+
+    def __init__(self, plotter, animation=None, ray_actors=(), mode="rays",
+                 font=None, label_position=(14, 40)):
+        self.plotter = plotter
+        self.animation = animation
+        self.ray_actors = [a for a in ray_actors if a is not None]
+        self.mode = mode if mode in self.MODES else "rays"
+        self._was_playing = True
+        self.label = plotter.add_text(" ", position=label_position, font_size=9,
+                                      color="#7f8794", font_file=font)
+        self.apply()
+
+    def _scalar_bar(self, title):
+        try:
+            return self.plotter.scalar_bars[title]
+        except (KeyError, AttributeError):
+            return None
+
+    def _set_visible(self, actor, flag):
+        if actor is not None:
+            actor.SetVisibility(bool(flag))
+
+    def apply(self, render=True):
+        rays = self.mode == "rays"
+
+        for actor in self.ray_actors:
+            self._set_visible(actor, rays)
+        for title in RAY_BAR_TITLE.values():
+            self._set_visible(self._scalar_bar(title), rays)
+
+        if self.animation is not None:
+            self._set_visible(self.animation.actor, not rays)
+            self._set_visible(self.animation.label, not rays)
+            self._set_visible(self._scalar_bar(PARTICLE_BAR_TITLE), not rays)
+            slider = getattr(self.animation, "slider", None)
+            if slider is not None:
+                slider.On() if not rays else slider.Off()
+            if rays:
+                # 隠している間は止めておく（見えないコマを進めても意味がない）
+                self._was_playing = self.animation.playing
+                self.animation.playing = False
+            else:
+                self.animation.playing = self._was_playing
+
+        self._refresh_label()
+        if render:
+            self.plotter.render()
+
+    def _refresh_label(self):
+        if self.mode == "rays":
+            text = "表示: 音線    Tab 音粒子へ"
+        else:
+            text = ("表示: 音粒子    Tab 音線へ\n"
+                    "スペース 再生/停止   ← → コマ送り   Home 先頭")
+        ParticleAnimation._set_text(self.label, text)
+
+    def toggle(self):
+        self.mode = "particles" if self.mode == "rays" else "rays"
+        self.apply()
 
 
 def run_animation(plotter, animation, interval=30):
@@ -516,27 +612,44 @@ def view(dxf_path, raylog_path, mode="rays", absorption=None, unit=None,
     plotter.add_text(raylog.summary().replace(" / ", "\n"), position="upper_right",
                      font_size=9, color="#9aa2b1", font_file=vg.japanese_font())
 
+    if mode not in ("rays", "particles", "both"):
+        raise ValueError(f"mode は 'rays' / 'particles' / 'both' です: {mode!r}")
+
     font = vg.japanese_font()
+    want_rays = mode in ("rays", "both")
+    want_particles = mode in ("particles", "both")
+
+    ray_actors = ()
+    if want_rays:
+        ray_actors = add_rays(plotter, raylog, index=index, colour=colour, band=band,
+                              max_reflection=max_reflection)
+
     animation = None
-    if mode == "rays":
-        add_rays(plotter, raylog, index=index, colour=colour, band=band,
-                 max_reflection=max_reflection)
-    elif mode == "particles":
+    if want_particles:
         if off_screen:
+            # 静止画は代表的な 1 コマだけ描く（アニメーションの部品は要らない）
             ParticleAnimation(plotter, raylog, index=index, frames=frames,
                               band=band, point_size=point_size).update(frames // 3)
         else:
             animation = animate(plotter, raylog, index=index, frames=frames,
                                 band=band, point_size=point_size)
-            plotter.add_text("スペース 再生/停止   ← → コマ送り   Home 先頭",
-                             position=(14, 14), font_size=9, color="#7f8794",
-                             font_file=font)
-    else:
-        raise ValueError(f"mode は 'rays' か 'particles' です: {mode!r}")
 
-    # 壁の透過はレイヤごとに変えられる（Tab で対象切替、m で表示 ON/OFF）
+    switch = None
     if not off_screen:
-        vg.add_opacity_control(plotter, font=font)
+        if mode == "both":
+            # 音線と音粒子を同居させて Tab で切り替える。
+            # 不透明度の対象切替は Tab を譲って o に移す
+            switch = RayParticleView(plotter, animation=animation,
+                                     ray_actors=ray_actors, mode="rays", font=font)
+            plotter.add_key_event("Tab", switch.toggle)
+            vg.add_opacity_control(plotter, font=font, target_key="o")
+        else:
+            if animation is not None:
+                plotter.add_text("スペース 再生/停止   ← → コマ送り   Home 先頭",
+                                 position=(14, 14), font_size=9, color="#7f8794",
+                                 font_file=font)
+            # 壁の透過はレイヤごとに変えられる（Tab で対象切替、m で表示 ON/OFF）
+            vg.add_opacity_control(plotter, font=font)
 
     plotter.view_isometric()
     if off_screen:
@@ -567,11 +680,15 @@ def main():
     p = argparse.ArgumentParser(description="音線・音粒子の可視化（G-1 / G-2）")
     p.add_argument("dxf", help="室形状の DXF")
     p.add_argument("raylog", help="RayRecorder が保存した npz")
-    p.add_argument("--mode", default="rays", choices=["rays", "particles"],
-                   help="rays=音線の折れ線 / particles=音粒子のアニメーション")
+    p.add_argument("--mode", default="both", choices=["both", "rays", "particles"],
+                   help="both=両方を同居させて Tab で切替（既定） / "
+                        "rays=音線の折れ線だけ / particles=音粒子だけ")
     p.add_argument("--absorption", help="吸音率 CSV（モデル表示用。省略可）")
     p.add_argument("--unit", help="'mm' / 'm' など")
-    p.add_argument("--orient-normals", default="cad", choices=["cad", "flip", "shells"])
+    p.add_argument("--orient-normals", default="cad",
+                   choices=["cad", "flip", "shells", "inward"],
+                   help="法線の扱い。inward=面ごとに室内側へ揃える"
+                        "（CAD で法線を意識せずに描いたモデル用）")
     p.add_argument("--received-only", action="store_true",
                    help="受音した経路だけを描く")
     p.add_argument("--max-rays", type=int, default=80,

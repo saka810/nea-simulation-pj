@@ -33,7 +33,7 @@ import receiver_sphere as rs
 #       → よくない。両者は独立。上記のとおり追記条件が別。
 # ------------------------------------------------------------------------------
 def loop(soundsource_point, reciever_point, soundray_list, nref, mesh, sphere_radius,
-         recorder=None, ray_chunk=20000):
+         recorder=None, ray_chunk=20000, two_sided=False):
     """音線追跡。
 
     引数:
@@ -47,6 +47,7 @@ def loop(soundsource_point, reciever_point, soundray_list, nref, mesh, sphere_ra
             渡すと可視化用の軌跡を副チャンネルで記録する（本線の結果には影響しない）。
             詳細は ray_recorder.py と docs/出力・可視化方針.md を参照。
         ray_chunk         : int  一度にまとめて追跡する音線の本数（メモリと速度の兼ね合い）
+        two_sided         : bool 面の裏からの入射も当てるか。mesh_method.FaceArrays を参照
 
     【2026-08-14 高速化（TODO F-1）】
     元コードは「音線 1 本ずつ × 面 1 枚ずつ」の二重ループだったが、Python では
@@ -67,7 +68,7 @@ def loop(soundsource_point, reciever_point, soundray_list, nref, mesh, sphere_ra
         Python は可変長リストなので持つ意味がなく、持っていると
         `mesh[history[0]]` が -1 で最後の面を指す事故のもとになるため落とした。
     """
-    faces = mm.FaceArrays(mesh)
+    faces = mm.FaceArrays(mesh, two_sided=two_sided)
     soundray_list = np.atleast_2d(np.asarray(soundray_list, dtype=float))
     results = []
 
@@ -97,6 +98,10 @@ def _trace_chunk(soundsource_point, reciever_point, soundray_list, ray_ids,
     # まだ追跡中の音線（元コードで exit していないもの）の添字
     alive = np.arange(n_ray)
 
+    # 直前に当たった面。両面判定のとき同じ面に当たり直すのを防ぐために持つ
+    # （mesh_method.FaceArrays.nearest_hit の ignore を参照）
+    last_face = np.full(n_ray, -1, dtype=np.int64)
+
     # 記録対象の音線だけを相手にする。
     # ここを全音線で回すと、せっかく配列演算にしても Python のループが復活してしまう
     recorded = np.zeros(n_ray, dtype=bool)
@@ -118,7 +123,9 @@ def _trace_chunk(soundsource_point, reciever_point, soundray_list, ray_ids,
         # ■壁面ループ■ 元コード 576行 do j = 1, sfcount をまとめて処理
         # 向き判定・t>0 判定・交点算出・三角形内部判定・距離算出・最寄り面の決定を
         # 1 回の配列演算で行う（元コード 579〜636行）
-        hit_id, min_distance, node = faces.nearest_hit(origin_alive, direction_alive)
+        hit_id, min_distance, node = faces.nearest_hit(
+            origin_alive, direction_alive,
+            ignore=last_face[alive] if faces.two_sided else None)
 
         # 受音判定（元コード 649〜663行）
         # ★ 壁 ID の追記より前に行う。この時点の履歴が「そこまでに済んだ反射」になる
@@ -148,6 +155,7 @@ def _trace_chunk(soundsource_point, reciever_point, soundray_list, ray_ids,
         # ★ 受音したかどうかに関わらず、衝突のたびに無条件で追記する
         history[alive_next, depth[alive_next]] = hit_id
         depth[alive_next] += 1
+        last_face[alive_next] = hit_id
 
         if recorder is not None:
             for local in np.nonzero(recorded[alive_next])[0]:

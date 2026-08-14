@@ -237,13 +237,31 @@ def layer_actors(plotter):
             or getattr(plotter, "_geosim_layers", None))
 
 
+def set_actor_text(actor, text, corner=0):
+    """`add_text()` が返す actor の文字を書き換える。
+
+    位置を座標で渡すと `vtkTextActor`、`position='upper_right'` のような文字列だと
+    `vtkCornerAnnotation` が返り、**差し替えの API が違う**。
+    どちらが来ても書き換えられるようにここでまとめている。
+    """
+    if hasattr(actor, "SetInput"):
+        actor.SetInput(text)
+    else:
+        actor.SetText(corner, text)
+    return actor
+
+
 def add_opacity_control(plotter, font=None, pointa=(0.075, 0.30),
-                        pointb=(0.075, 0.62), label_position=None):
+                        pointb=(0.075, 0.62), label_position=None,
+                        target_key="Tab"):
     """モデルの不透明度を対話的に変えるスライダとキー操作を足す。
 
-    - **Tab** … 対象を切り替える（すべて → 各レイヤ → すべて …）
+    - **Tab**（`target_key`） … 対象を切り替える（すべて → 各レイヤ → すべて …）
     - **スライダ**（左側の縦） … 対象の不透明度を 0〜1 で設定する
     - **m** … モデル全体の表示 ON / OFF
+
+    `target_key` を変えられるようにしてあるのは、Tab を別の用途
+    （view_rays の音線↔音粒子の切り替え）に使いたい場面があるため。
 
     レイヤごとに変えられるようにしてあるのは、
     「壁だけ薄くして中の様子を見る」「床は残す」といった使い方をするため。
@@ -276,7 +294,7 @@ def add_opacity_control(plotter, font=None, pointa=(0.075, 0.30),
 
     def refresh_label():
         text = (f"不透明度の対象: {target_name()}  ({current_opacity():.2f})\n"
-                f"Tab 対象切替   m モデル表示 ON/OFF")
+                f"{target_key} 対象切替   m モデル表示 ON/OFF")
         if hasattr(label, "SetInput"):
             label.SetInput(text)
         else:
@@ -316,7 +334,7 @@ def add_opacity_control(plotter, font=None, pointa=(0.075, 0.30),
             layers[name]["face"].SetVisibility(state["visible"])
         plotter.render()
 
-    plotter.add_key_event("Tab", next_target)
+    plotter.add_key_event(target_key, next_target)
     plotter.add_key_event("m", toggle_model)
     refresh_label()
     return slider

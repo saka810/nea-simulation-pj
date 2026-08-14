@@ -22,12 +22,14 @@ from ray_recorder import RayRecorder
 def process(soundsource_point, reciever_point, dxf_filename, sphere_radius, nref, soundray_number,
             absorption_csv=None, absorption_kind=None, layer_assignment=None,
             band_number=rd.DEFAULT_BAND_NUMBER, material_library=None,
-            unit=None, orient_normals="cad",
+            unit=None, orient_normals="cad", two_sided=False, volume=None,
             atmosphere=None, raylog_filename=None, raylog_max_rays=2000,
             pulse_filename=None, impulse_filename=None,
             sampling_frequency=ir.SAMPLING_FREQUENCY, max_time=ir.MAX_TIME,
             reverberation_filename=None, decay_filename=None,
-            statistical_filename=None, statistical=True):
+            statistical_filename=None, statistical=True,
+            clarity=True, clarity_filename=None, surface_filename=None,
+            flip_faces=None):
     """
     閉じた室でも、一面だけの壁のような**開いた形状**でも計算できる
     （当たる壁がなくなった音線はそこで打ち切られる）。
@@ -61,7 +63,19 @@ def process(soundsource_point, reciever_point, dxf_filename, sphere_radius, nref
         法線の向きの扱い。既定 'cad' は CAD の巻き順をそのまま使う
         （法線が空気側を向くようにモデルを作るのは CAD 側の責任）。
         'flip' で全反転、'shells' でシェル単位の自動補正。
+        **'inward' は面ごとにレイの偶奇で室内側へ揃える**。面のつながりを要求しないので、
+        床・壁・天井を 1 枚ずつ描いた「板の寄せ集め」モデルはこれで直る。
         詳細は read_dxffile.read_model() を参照。
+    two_sided : bool
+        面の**裏からの入射も当てる**か（既定 False）。
+        既定では法線の側から来た音線しか当たらないので、法線が逆を向いた壁はすり抜ける。
+        CAD で床・壁・天井を 1 枚ずつ描いた「板の寄せ集め」モデルは巻き順や押し出し方向で
+        法線がまちまちになりがちで、そのままだと壁が抜けて音線が室外へ逃げる。
+        そういうモデルは True にする。詳細は mesh_method.FaceArrays。
+    volume : float | None
+        統計残響式に使う室容積 [m³]。None なら DXF が閉じている場合に自動算出する。
+        **閉じていないモデル（板の寄せ集めなど）では自動算出できない**ので、
+        統計式と比べたければここで与える（例: 床面積 × 天井高）。
     raylog_filename : str | None
         可視化用の音線軌跡を npz で保存するパス。None なら記録しない。
         出力①音線の可視化・②音粒子の可視化（動画）に使う。docs/出力・可視化方針.md 参照。
@@ -84,6 +98,15 @@ def process(soundsource_point, reciever_point, dxf_filename, sphere_radius, nref
         音線を飛ばさず面積と吸音率だけから出るので、シミュレーション結果の物差しになる。
     statistical_filename : str | None
         統計残響式の結果の CSV 出力先。
+    clarity : bool
+        明瞭度系の指標（C50 / C80 / D50 / Ts）も出すか（既定 True）。
+        残響時間が「どれだけ長く響くか」なのに対し、こちらは
+        「初期の音が後から来る音に対してどれだけ強いか」を見る。会議室・教室で効く。
+    clarity_filename / surface_filename : str | None
+        明瞭度の指標／レイヤ別の面積と吸音率の CSV 出力先。
+    flip_faces : iterable[int] | None
+        法線を反転する面インデックス（`normal_editor.py` で目で見て直したぶん）。
+        自動判定のあとに重ねて適用される。
 
     戻り値:
         dict … 'model' / 'pulses' / 'impulse' / 'reverberation' / 'statistical'
@@ -112,8 +135,14 @@ def process(soundsource_point, reciever_point, dxf_filename, sphere_radius, nref
     # 室形状・吸音率・音源・受音点をまとめて DXF から読む
     # 元コード132〜283行目に対応
     model = rd.read_model(dxf_filename, unit=unit, absorption_table=absorption_table,
-                          orient_normals=orient_normals, band_number=band_number)
+                          orient_normals=orient_normals, band_number=band_number,
+                          flip_faces=flip_faces)
     mesh = model.mesh
+
+    # 作図ミスの洗い出し（TODO B-10）。計算に入る前に指摘するほうが早い
+    issues = rd.check_model(model, absorption_table=absorption_table)
+    if any(i["level"] == "error" for i in issues):
+        print("[procedure] ★ エラーがあります。結果は当てになりません")
 
     if soundsource_point is None:
         if not model.source_points:
@@ -128,11 +157,22 @@ def process(soundsource_point, reciever_point, dxf_filename, sphere_radius, nref
     # 面積と吸音率だけから決まるので、あとの計算結果と突き合わせる物差しになる
     statistical_result = None
     if statistical:
-        statistical_result = rv.statistical_reverberation_from_model(
-            model, frequencies=frequencies, atmosphere=atmosphere)
+        if volume is not None:
+            print(f"[統計残響] 容積は指定値 {volume:.2f} m³ を使います"
+                  f"（DXF からの自動算出はしません）")
+            statistical_result = rv.statistical_reverberation(
+                mesh, volume, frequencies=frequencies, atmosphere=atmosphere)
+        else:
+            statistical_result = rv.statistical_reverberation_from_model(
+                model, frequencies=frequencies, atmosphere=atmosphere)
         if statistical_result is not None and statistical_filename is not None:
             rv.write_statistical_reverberation(statistical_filename, statistical_result)
             print(f"[統計残響] 書き出しました: {statistical_filename}")
+        if statistical_result is not None and surface_filename is not None:
+            import project as pj
+            pj.write_surface_csv(surface_filename, statistical_result["surface"],
+                                 frequencies)
+            print(f"[統計残響] レイヤ別の面積・吸音率: {surface_filename}")
 
     # 音線ベクトルを作成
     soundray_list = sr.soundray_generator(soundray_number)
@@ -147,7 +187,7 @@ def process(soundsource_point, reciever_point, dxf_filename, sphere_radius, nref
     # 音線ループで反射面のIDを履歴として記録します
     # 元コード524行目に対応
     reflection_history = lr.loop(soundsource_point, reciever_point, soundray_list, nref, mesh,
-                                 sphere_radius, recorder=recorder)
+                                 sphere_radius, recorder=recorder, two_sided=two_sided)
 
     if recorder is not None:
         print("音線軌跡:", recorder.summary())
@@ -162,7 +202,7 @@ def process(soundsource_point, reciever_point, dxf_filename, sphere_radius, nref
     # 吸音率は Mesh が面ごとに持っているので、ここで別途渡す必要はない。
     pulses = ln.loop(soundsource_point, reciever_point, reflection_history, mesh,
                      sound_velocity=sound_velocity, band_number=len(frequencies),
-                     filename=pulse_filename)
+                     filename=pulse_filename, two_sided=two_sided)
 
     # 後部残響が nref で切れていないかの確認。
     # 残響時間は「エネルギーが 35 dB 減衰するまで」を見るので、
@@ -210,6 +250,16 @@ def process(soundsource_point, reciever_point, dxf_filename, sphere_radius, nref
                 impulse[0], impulse[1], rt_filename=reverberation_filename,
                 decay_filename=decay_filename, frequencies=frequencies)
 
+    # 明瞭度系の指標（C50 / C80 / D50 / Ts）。残響時間とは見ている中身が違う。
+    # 「どれだけ長く響くか」ではなく「初期の音が後から来る音に対してどれだけ強いか」
+    clarity_result = None
+    if clarity and impulse is not None:
+        clarity_result = rv.clarity_measures(impulse[0], impulse[1],
+                                            frequencies=frequencies)
+        if clarity_filename is not None:
+            rv.write_clarity_measures(clarity_filename, clarity_result)
+            print(f"[procedure] 明瞭度の指標を書き出しました: {clarity_filename}")
+
     # 統計残響式との突き合わせ。**どちらが正しいという話ではない**。
     # 統計式は拡散音場を前提にした平均像、シミュレーションは特定の受音点での実際の減衰。
     # 大きく食い違うときは、音場が拡散していないか設定に問題があるかの手がかりになる
@@ -226,7 +276,11 @@ def process(soundsource_point, reciever_point, dxf_filename, sphere_radius, nref
                   f"{statistical_result['sabine'][i]:10.3f}{eyring:10.3f}{ratio:>16}")
 
     return {"model": model, "pulses": pulses, "impulse": impulse,
-            "reverberation": reverberation, "statistical": statistical_result}
+            "reverberation": reverberation, "statistical": statistical_result,
+            "clarity": clarity_result, "frequencies": frequencies,
+            "atmosphere": atmosphere,
+            "soundsource_point": np.asarray(soundsource_point, dtype=float),
+            "reciever_point": np.asarray(reciever_point, dtype=float)}
 
 
 def main():
@@ -257,7 +311,17 @@ def main():
     p.add_argument("--max-time", type=float, default=ir.MAX_TIME,
                    help="インパルス応答の長さ [s]")
     p.add_argument("--unit", help="'mm' / 'm' など。省略すると $INSUNITS から自動判定")
-    p.add_argument("--orient-normals", default="cad", choices=["cad", "flip", "shells"])
+    p.add_argument("--orient-normals", default="cad",
+                   choices=["cad", "flip", "shells", "inward"],
+                   help="法線の扱い。cad=そのまま / flip=全反転 / shells=シェル単位 / "
+                        "inward=面ごとにレイの偶奇で室内側へ揃える"
+                        "（CAD で法線を意識せずに描いたモデル用）")
+    p.add_argument("--two-sided", action="store_true",
+                   help="面の裏からの入射も当てる。CAD の法線がまちまちな"
+                        "「板の寄せ集め」モデル用（既定は表からのみ）")
+    p.add_argument("--volume", type=float, default=None,
+                   help="統計残響式に使う室容積 [m3]。"
+                        "閉じていないモデルで統計式と比べたいときに指定する")
     p.add_argument("--source", type=float, nargs=3, metavar=("X", "Y", "Z"),
                    help="音源座標 [m]。省略すると DXF の src レイヤから取る")
     p.add_argument("--receiver", type=float, nargs=3, metavar=("X", "Y", "Z"),
@@ -284,6 +348,7 @@ def main():
             soundray_number=a.rays, absorption_csv=a.absorption,
             absorption_kind=a.absorption_kind, layer_assignment=assignment,
             band_number=a.bands, unit=a.unit, orient_normals=a.orient_normals,
+            two_sided=a.two_sided, volume=a.volume,
             atmosphere=Atmosphere(**air_kwargs),
             raylog_filename=out("raylog.npz"),
             pulse_filename=out("pulses.csv"),

@@ -175,13 +175,17 @@ def backtrace_path(soundsource_point, reciever_point, wall_ids, mesh,
     vini = np.asarray(reciever_point, dtype=float)
     vray = sr.noramlized_soundray(images[ktmp] - vini)
 
+    # 直前に当たった面。両面判定のとき同じ面に当たり直すのを防ぐ（音線追跡側と同じ理由）
+    last_face = -1
+
     # ■バックトレースループ■ 元コード 948行 do k = ktmp, 0, -1
     for k in range(ktmp, -1, -1):
 
         # 基点から音線方向で最も手前に当たる面を探す（元コード 978〜1049 行）。
         # 音線追跡と同じ `FaceArrays` を使うので、全面との判定が 1 回の配列演算で済む
         hit_id_array, hit_distance_array, node_array = faces.nearest_hit(
-            vini[None, :], vray[None, :])
+            vini[None, :], vray[None, :],
+            ignore=[last_face] if faces.two_sided else None)
         hit_id = int(hit_id_array[0])
         hit_distance = float(hit_distance_array[0])
 
@@ -209,6 +213,7 @@ def backtrace_path(soundsource_point, reciever_point, wall_ids, mesh,
                                             absorption[b], energy[b])
 
             # 次の区間へ（元コード 1096〜1110 行）
+            last_face = hit_id
             vini = sr.soundraycomesfrom_renew(node)
             vray = sr.noramlized_soundray(sr.soundray_renew(images[k - 1], vini))
 
@@ -240,7 +245,7 @@ def backtrace_path(soundsource_point, reciever_point, wall_ids, mesh,
 
 def loop(soundsource_point, reciever_point, reflectionmeshid_history, mesh,
          sound_velocity=SOUND_VELOCITY, band_number=None, filename=None,
-         verbose=True):
+         verbose=True, two_sided=False):
     """非重複経路ループ。元コード 878 行 `do i = 1, countred`。
 
     引数:
@@ -254,6 +259,10 @@ def loop(soundsource_point, reciever_point, reflectionmeshid_history, mesh,
             周波数バンド数。None なら mesh の吸音率の長さから決める
         filename                : str | None  パルス列を書き出す CSV のパス
         verbose                 : bool   進捗を表示するか
+        two_sided               : bool
+            面の裏からの入射も当てるか。**音線追跡と必ず揃えること**。
+            食い違うと、追跡側が通した経路をバックトレース側が全部却下する。
+            詳細は mesh_method.FaceArrays
 
     戻り値:
         PulseList
@@ -267,7 +276,7 @@ def loop(soundsource_point, reciever_point, reflectionmeshid_history, mesh,
             raise ValueError("メッシュが空です")
         band_number = len(np.atleast_1d(mesh[0].absorption_coefficient))
 
-    faces = mm.FaceArrays(mesh)
+    faces = mm.FaceArrays(mesh, two_sided=two_sided)
     records = []
     rejected = 0
 

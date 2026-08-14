@@ -17,9 +17,21 @@ class FaceArrays:
     """メッシュを配列にまとめた入れ物。交差判定を配列演算で行うために使う。
 
     面ごとに毎回計算していた値（平面の d、三角形の辺ベクトル）を前もって持っておく。
+
+    two_sided
+        既定（False）は **面の表側（法線の側）から来た音線しか当たらない**。
+        CAD 側で法線が空気側を向いていることを前提にした、元コードと同じ扱い。
+        法線が逆を向いた面はすり抜けるので、モデルの誤りが結果に出て気づける。
+
+        True にすると裏からの入射も当てる。CAD で面を 1 枚ずつ描いた「板の寄せ集め」
+        モデルは、巻き順や押し出し方向で法線がまちまちになりがちで、
+        そのままだと壁が抜ける。反射ベクトル v - 2(v·n)n も
+        エネルギー減衰の cosθ = |v·n| も法線の向きに依らないので、
+        当たり判定だけ両面にすれば板モデルがそのまま計算できる。
     """
 
-    def __init__(self, mesh):
+    def __init__(self, mesh, two_sided=False):
+        self.two_sided = bool(two_sided)
         self.count = len(mesh)
         if self.count == 0:
             raise ValueError("メッシュが空です")
@@ -42,13 +54,20 @@ class FaceArrays:
         self.edge_from_v1_a = self.v2 - self.v1
         self.edge_from_v1_b = self.v0 - self.v1
 
-    def nearest_hit(self, origins, directions, chunk_elements=4_000_000):
+    def nearest_hit(self, origins, directions, chunk_elements=4_000_000, ignore=None):
         """音線の束について、最も手前で当たる面を求める。
 
         引数:
             origins    (A,3) 各音線の基点
             directions (A,3) 各音線の方向（単位ベクトル前提）
             chunk_elements   一度に扱う (音線×面) の要素数の上限。メモリ対策
+            ignore     (A,) | None  音線ごとに「当てない面」の番号（-1 なら無し）。
+                **反射直後は直前に当たった面を必ず渡すこと**（two_sided のとき必須）。
+                基点が面の上に乗っているので、丸め誤差で t がごくわずかな正になり、
+                同じ面にもう一度当たってしまう（いわゆる self-intersection）。
+                片面判定なら反射後の音線は裏側を向くので裏面が捨てられて起きないが、
+                両面判定では捨てられないため、その面を明示的に外す必要がある。
+                直線は同じ平面と 2 回は交わらないので、外しても取りこぼしは無い。
 
         戻り値:
             hit_id   (A,)  面のインデックス。当たらなければ -1
@@ -61,6 +80,8 @@ class FaceArrays:
         origins = np.atleast_2d(np.asarray(origins, dtype=float))
         directions = np.atleast_2d(np.asarray(directions, dtype=float))
         n_ray = len(origins)
+        if ignore is not None:
+            ignore = np.asarray(ignore, dtype=np.int64).reshape(n_ray)
 
         hit_id = np.full(n_ray, -1, dtype=np.int64)
         distance = np.full(n_ray, np.inf)
@@ -71,13 +92,14 @@ class FaceArrays:
         for start in range(0, n_ray, step):
             stop = min(start + step, n_ray)
             block_id, block_distance, block_node = self._nearest_hit_block(
-                origins[start:stop], directions[start:stop])
+                origins[start:stop], directions[start:stop],
+                None if ignore is None else ignore[start:stop])
             hit_id[start:stop] = block_id
             distance[start:stop] = block_distance
             node[start:stop] = block_node
         return hit_id, distance, node
 
-    def _nearest_hit_block(self, origins, directions):
+    def _nearest_hit_block(self, origins, directions, ignore=None):
         """`nearest_hit` の 1 ブロック分。(hit_id, distance, node) を返す。"""
         n_ray = len(origins)
         hit_id = np.full(n_ray, -1, dtype=np.int64)
@@ -87,12 +109,21 @@ class FaceArrays:
         # 音線が面の表側から向かっているか（scalar 版 collision_distance の最初の判定）
         denominator = directions @ self.normal.T                   # (A,M)
         numerator = origins @ self.normal.T + self.d[None, :]      # (A,M)
-        candidate = denominator < 0.0
+        if self.two_sided:
+            candidate = denominator != 0.0     # 面と平行でなければ表裏どちらでも当てる
+        else:
+            candidate = denominator < 0.0
 
         # 交点パラメータ t（scalar 版 parameter_t と同じ）。t > 0 の面だけ残す
         with np.errstate(divide="ignore", invalid="ignore"):
             t = -numerator / denominator
         candidate &= t > 0.0
+
+        if ignore is not None:
+            has_ignore = ignore >= 0
+            if np.any(has_ignore):
+                rows = np.nonzero(has_ignore)[0]
+                candidate[rows, ignore[rows]] = False
 
         ray_index, face_index = np.nonzero(candidate)
         if len(ray_index) == 0:

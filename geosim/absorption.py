@@ -305,25 +305,28 @@ class Material:
         return random_to_normal(self.coefficients, warn=warn, label=self.name)
 
     def resample(self, band_number):
-        """バンド数を合わせる。足りなければ端の値で延長、多ければ切り詰める。
+        """バンド数を合わせる（TODO E-14。2026-08-15 に対数軸の補間へ変更）。
 
-        8 バンド（63〜8k）と 6 バンド（125〜4k）を混ぜて使えるようにするためのもの。
-        **周波数軸を意識した補間ではない**ので、素性の違う表を混ぜるときは注意。
+        8 バンド（63〜8k Hz）と 6 バンド（125〜4k Hz）を混ぜて使えるようにするためのもの。
+
+        **周波数軸（log₂ f）の上で線形補間する。** オクターブバンドは中心周波数が
+        2 倍ずつ並ぶので、対数を取ると等間隔になり、素直に内挿できる。
+
+        以前は「端の値を複製／切り詰める」だけだった。中心周波数が一致する場合
+        （6↔8 バンドはまさにこれ）は結果が同じだが、素性の違う表
+        （1/3 オクターブ表など）を混ぜると値がずれる。
+
+        ⚠ **範囲の外は外挿せず、端の値をそのまま使う**（一定外挿）。
+        吸音率は物理的に 0〜1 に収まるので、傾きを延長すると簡単に範囲外へ出てしまう。
+        6 バンド表を 8 バンドで使えば、**63 Hz は 125 Hz のコピー、
+        8 kHz は 4 kHz のコピー**になる。これは補間ではなく「その帯域のデータが無い」
+        という事実の表れなので、値を鵜呑みにしないこと。
         """
-        n = self.band_number
-        if n == band_number:
+        source = np.asarray(octave_bands(self.band_number), dtype=float)
+        target = np.asarray(octave_bands(band_number), dtype=float)
+        if len(source) == len(target) and np.allclose(source, target):
             return self.coefficients.copy()
-        if n > band_number:
-            # 8 → 6 は 63 Hz と 8k Hz を落とす（両端を 1 つずつ）
-            if n == 8 and band_number == 6:
-                return self.coefficients[1:7].copy()
-            return self.coefficients[:band_number].copy()
-        # 6 → 8 は両端を複製して伸ばす
-        if n == 6 and band_number == 8:
-            return np.concatenate([[self.coefficients[0]], self.coefficients,
-                                   [self.coefficients[-1]]])
-        pad = band_number - n
-        return np.concatenate([self.coefficients, np.repeat(self.coefficients[-1], pad)])
+        return np.interp(np.log2(target), np.log2(source), self.coefficients)
 
     def to_dict(self):
         return {"name": self.name, "coefficients": self.coefficients.tolist(),

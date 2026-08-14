@@ -619,6 +619,189 @@ def test_ray_log():
               np.all(log.received[log.selection(received_only=True)]))
 
 
+# ---------------------------------------------------------------- 法線の向き
+def test_normals():
+    print("\n[13] 法線の向き（自動判定・手動反転）")
+    triangles = [tuple(f.vertexes) for f in load_test_room()[0].mesh]
+
+    # 閉じた直方体の内側は全方向で面に当たる。外側は当たらない
+    inside = rd.encloses_point(triangles, [1.0, 1.5, 0.5])
+    outside = rd.encloses_point(triangles, [10.0, 10.0, 10.0])
+    check("閉じた室の内側は囲まれ度 1.0", abs(inside - 1.0) < 1e-9, f"{inside:.3f}")
+    # 外の点は「その方向に箱が見える」ぶんだけ当たる（張る立体角ぶん）。
+    # 0 にはならないが、閉じているかの判定に使う 0.95 には遠く及ばない
+    check("室の外側は囲まれ度がしきい値をはるかに下回る",
+          outside < 0.1, f"{outside:.3f}（しきい値 {rd.ENCLOSURE_THRESHOLD}）")
+
+    # 'auto' は閉じた室では 'shells' を選ぶ
+    model = rd.read_model(TEST_DXF, orient_normals="auto", verbose=False)
+    check("閉じた室では 'auto' が 'shells' を選ぶ", model.orient_mode == "shells",
+          model.orient_mode)
+    centre = 0.5 * (model.extents[0] + model.extents[1])
+    inward = sum(1 for f in model.mesh
+                 if np.dot(f.normal, centre - f.vertexes.mean(axis=0)) > 0)
+    check("'auto' の結果が全面内向き", inward == len(model.mesh),
+          f"{inward}/{len(model.mesh)}")
+
+    # 開いた形状（test2.dxf）は CAD のまま触らない
+    test2 = os.path.join(ROOT, "test2.dxf")
+    if os.path.exists(test2):
+        opened = rd.read_model(test2, orient_normals="auto", verbose=False)
+        plain = rd.read_model(test2, orient_normals="cad", verbose=False)
+        same = all(np.allclose(a.normal, b.normal)
+                   for a, b in zip(opened.mesh, plain.mesh))
+        check("開いた形状では 'auto' が法線を触らない",
+              opened.orient_mode == "cad" and same,
+              f"mode={opened.orient_mode} 囲まれ度={opened.enclosure:.2f}")
+
+    # レイの偶奇による内向き判定。わざと全反転した状態から復元できるか
+    flipped_all = rd.read_model(TEST_DXF, orient_normals="flip", verbose=False)
+    tri = [tuple(f.vertexes) for f in flipped_all.mesh]
+    normals = np.array([f.normal for f in flipped_all.mesh])
+    to_flip, ambiguous = rd.orient_inward(tri, normals)
+    check("全反転した法線を偶奇判定が全部見つける",
+          len(to_flip) == len(flipped_all.mesh) and ambiguous == 0,
+          f"{len(to_flip)}/{len(flipped_all.mesh)} 判定割れ {ambiguous}")
+
+    # flip_faces で手動指定した面だけが反転する
+    manual = rd.read_model(TEST_DXF, orient_normals="cad", flip_faces=[0, 3],
+                           verbose=False)
+    base = rd.read_model(TEST_DXF, orient_normals="cad", verbose=False)
+    ok = all(np.allclose(m.normal, -b.normal if j in (0, 3) else b.normal)
+             for j, (m, b) in enumerate(zip(manual.mesh, base.mesh)))
+    check("flip_faces で指定した面だけが反転する", ok,
+          f"反転 {sorted(manual.flipped_faces)}")
+
+    # OCS→WCS。押し出し方向が Z なら恒等変換、水平なら鉛直面を張る
+    same = rd.ocs_to_wcs([1.0, 2.0, 3.0], [0.0, 0.0, 1.0])
+    check("押し出し方向 Z の OCS 変換は恒等", np.allclose(same, [1.0, 2.0, 3.0]),
+          np.round(same, 6).tolist())
+    axes = rd.ocs_axes([1.0, 0.0, 0.0])
+    check("押し出し方向が水平なら OCS の 2 軸が鉛直面を張る",
+          abs(np.dot(axes[0], [0, 0, 1])) < 1e-12 and abs(axes[1][2]) > 0.999,
+          f"x軸={np.round(axes[0], 3).tolist()} y軸={np.round(axes[1], 3).tolist()}")
+    check("OCS の 3 軸が正規直交",
+          np.allclose(axes @ axes.T, np.eye(3), atol=1e-12))
+
+
+# ---------------------------------------------------------------- 作図チェック
+def test_check_model():
+    print("\n[14] 作図ミスの自動チェック")
+    model = rd.read_model(TEST_DXF, orient_normals="cad", verbose=False)
+    issues = rd.check_model(model, verbose=False)
+    errors = [i for i in issues if i["level"] == "error"]
+    check("test.dxf にエラーは無い", not errors,
+          f"{len(issues)} 件（{[i['level'] for i in issues]}）")
+
+    # 受音点をわざと室外に置いたらエラーになる
+    broken = rd.read_model(TEST_DXF, orient_normals="cad", verbose=False)
+    broken.receiver_points = [np.array([100.0, 100.0, 100.0])]
+    issues = rd.check_model(broken, verbose=False)
+    check("室外の受音点をエラーにする",
+          any(i["level"] == "error" and "外にあります" in i["message"] for i in issues))
+
+    # 吸音率が引けないレイヤを指摘する（B-19 の状況）
+    table = rd.AbsorptionTable()
+    table["存在しない材料"] = np.zeros(8)
+    issues = rd.check_model(model, absorption_table=table, verbose=False)
+    check("吸音率が引けないレイヤを指摘する",
+          any("吸音率が引けない" in i["message"] for i in issues))
+
+
+# ---------------------------------------------------------------- 明瞭度の指標
+def test_clarity():
+    print("\n[15] 明瞭度の指標（C50 / C80 / D50 / Ts）")
+    fs = 44100.0
+    n = int(fs * 1.0)
+    t = np.arange(n) / fs
+
+    # 直接音のみ → 後続が無いので D50 = 1
+    ir = np.zeros(n)
+    ir[0] = 1.0
+    result = rv.clarity_measures(t, ir, frequencies=[1000.0], verbose=False)
+    check("直接音だけなら D50 = 1", abs(result["D50"][0] - 1.0) < 1e-6,
+          f"D50={result['D50'][0]:.4f}")
+
+    # 既知の指数減衰。D50 は解析的に 1 - exp(-2*50ms/tau)
+    tau = 0.1
+    noise = np.random.default_rng(0).normal(size=n)
+    result = rv.clarity_measures(t, np.exp(-t / tau) * noise,
+                                 frequencies=[1000.0], verbose=False)
+    expected = 1.0 - np.exp(-2.0 * 0.050 / tau)
+    check("指数減衰の D50 が解析値に近い",
+          abs(result["D50"][0] - expected) < 0.10,
+          f"計算 {result['D50'][0]:.3f} / 解析 {expected:.3f}")
+    c50 = 10.0 * np.log10(result["D50"][0] / (1.0 - result["D50"][0]))
+    check("C50 と D50 の関係 C50 = 10log10(D50/(1-D50))",
+          abs(c50 - result["C50"][0]) < 0.05,
+          f"{result['C50'][0]:.3f} vs {c50:.3f}")
+    check("C80 は C50 より大きい", result["C80"][0] > result["C50"][0],
+          f"C50={result['C50'][0]:.2f} C80={result['C80'][0]:.2f}")
+
+    # 減衰が速いほど明瞭になる
+    fast = rv.clarity_measures(t, np.exp(-t / 0.03) * noise,
+                               frequencies=[1000.0], verbose=False)
+    check("減衰が速いほど D50 が大きく Ts が小さい",
+          fast["D50"][0] > result["D50"][0] and fast["Ts"][0] < result["Ts"][0],
+          f"D50 {result['D50'][0]:.3f}→{fast['D50'][0]:.3f} / "
+          f"Ts {result['Ts'][0] * 1000:.1f}→{fast['Ts'][0] * 1000:.1f} ms")
+
+
+# ---------------------------------------------------------------- プロジェクト
+def test_project():
+    print("\n[16] プロジェクトの保存と読み込み")
+    import tempfile
+    import project as pj
+
+    with tempfile.TemporaryDirectory() as folder:
+        p = pj.Project(folder, dxf=TEST_DXF, absorption_kind="random",
+                       rays=12345, radius=0.75, temperature=18.5, band_number=6,
+                       volume=42.0)
+        p.save()
+        q = pj.Project.load(folder)
+        same = all(getattr(p, k) == getattr(q, k)
+                   for k in ("absorption_kind", "rays", "radius", "temperature",
+                             "band_number", "volume"))
+        check("条件が往復する", same, f"rays={q.rays} radius={q.radius}")
+        check("解決したパスが元のファイルを指す",
+              os.path.normcase(q.dxf_path) == os.path.normcase(os.path.abspath(TEST_DXF)),
+              q.dxf_path)
+
+        # 法線の反転指定。面数が合えば読め、合わなければ捨てる
+        p.save_flipped_faces({1, 4, 7}, face_count=12, mode="shells")
+        check("反転指定が往復する",
+              pj.Project.load(folder).flipped_faces_for(12) == {1, 4, 7})
+        check("面数が違えば反転指定を使わない",
+              pj.Project.load(folder).flipped_faces_for(99) == set())
+
+
+# ---------------------------------------------------------------- バンド数変換
+def test_resample():
+    print("\n[17] バンド数の変換（対数軸の補間）")
+    six = [0.09, 0.36, 0.77, 0.97, 0.96, 0.95]
+    m6 = ab.Material("6", six, kind="normal")
+    up = m6.resample(8)
+    check("6→8 は両端が隣のコピー（データが無いことの表れ）",
+          abs(up[0] - six[0]) < 1e-12 and abs(up[-1] - six[-1]) < 1e-12,
+          np.round(up, 3).tolist())
+    check("6→8 で中身の 6 バンドは変わらない", np.allclose(up[1:7], six),
+          np.round(up[1:7], 3).tolist())
+
+    eight = [0.05, 0.09, 0.36, 0.77, 0.97, 0.96, 0.95, 0.90]
+    down = ab.Material("8", eight, kind="normal").resample(6)
+    check("8→6 は 63Hz と 8k を落とす", np.allclose(down, eight[1:7]),
+          np.round(down, 3).tolist())
+    check("同じバンド数なら素通し", np.allclose(m6.resample(6), six))
+
+    # 中心周波数がずれた表からの内挿。log2 f 上で線形なら結果も線形になる
+    source = np.array([125.0, 500.0, 2000.0])
+    values = np.array([0.10, 0.30, 0.50])       # log2 f について線形
+    target = np.array([250.0, 1000.0])
+    got = np.interp(np.log2(target), np.log2(source), values)
+    check("log2 f について線形なデータは中間点で線形補間される",
+          np.allclose(got, [0.20, 0.40]), np.round(got, 4).tolist())
+
+
 def main():
     print("geosim 数値検証")
     print(f"  Python {sys.version.split()[0]} / numpy {np.__version__}")
@@ -628,7 +811,9 @@ def main():
     for fn in (test_read_dxf, test_soundray_generator, test_energy_decay,
                test_backtrace, test_image_sources, test_vectorised_geometry,
                test_atmosphere, test_absorption, test_impulse, test_reverberation,
-               test_statistical_reverberation, test_ray_log):
+               test_statistical_reverberation, test_ray_log,
+               test_normals, test_check_model, test_clarity,
+               test_project, test_resample):
         fn()
 
     failed = [name for name, ok in _results if not ok]
