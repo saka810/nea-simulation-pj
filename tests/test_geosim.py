@@ -1005,6 +1005,36 @@ def test_mode_buildup():
           np.allclose(np.abs(H4[:, 1]) / np.abs(H4[:, 0]), 0.25),
           "0.25 倍")
 
+    # ---- 周波数の刻みをまとめ直す（既定 1 Hz）----
+    fine = np.arange(0.0, 20.0, 0.25)
+    flat = np.full(len(fine), 3.0)
+    coarse, value = plots.rebin_spectrum(fine, flat, 1.0)
+    check("1 Hz 幅にまとめ直せる（刻みが 0.25 → 1 Hz）",
+          abs(float(coarse[1] - coarse[0]) - 1.0) < 1e-9,
+          f"{len(fine)} 点 → {len(coarse)} 点")
+    check("一定値は値が変わらない（二乗平均なので）",
+          np.allclose(value, 3.0))
+
+    # **間引きではなく二乗平均**。ランダム位相の目安 √N が帯域幅に依らず保たれる、
+    # というのが図の基準線を引き直さずに済む理由
+    rng = np.random.default_rng(0)
+    noise = rng.normal(size=len(fine)) + 1j * rng.normal(size=len(fine))
+    _, wide = plots.rebin_spectrum(fine, noise, 1.0)
+    check("ランダムな中身でも二乗平均の総量が保たれる",
+          abs(np.sqrt(np.mean(wide ** 2)) - np.sqrt(np.mean(np.abs(noise) ** 2)))
+          < 1e-9,
+          f"まとめ前 {np.sqrt(np.mean(np.abs(noise)**2)):.4f} / "
+          f"まとめ後 {np.sqrt(np.mean(wide**2)):.4f}")
+
+    # 山を跨いで間引くと見落とすが、二乗平均なら残る
+    spike = np.zeros(len(fine))
+    spike[13] = 100.0                       # 3.25 Hz にだけ立つ鋭い山
+    _, kept = plots.rebin_spectrum(fine, spike, 1.0)
+    check("鋭い山は間引かれず残る", kept.max() > 40.0, f"最大 {kept.max():.1f}")
+
+    check("刻みより細かい指定は何もしない",
+          len(plots.rebin_spectrum(fine, flat, 0.1)[0]) == len(fine))
+
     # ---- バンドの割り当て ----
     bands = np.array([63.0, 125.0, 250.0, 500.0])
     index = plots._band_of(np.array([60.0, 90.0, 130.0, 400.0]), bands)

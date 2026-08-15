@@ -708,6 +708,41 @@ def pulse_spectrum(time, amplitude, max_time=None, bin_rate=8000.0):
     return frequency, (spectrum[:, 0] if single else spectrum)
 
 
+def rebin_spectrum(frequency, spectrum, step):
+    """スペクトルを `step` [Hz] 幅にまとめ直す（＝分析帯域幅 `step` の狭帯域分析）。
+
+    FFT の刻みは応答長で決まってしまう（3 秒なら 0.333 Hz）。細かすぎると
+    線がぎざぎざして読みにくいので、実務で見たい幅（1 Hz 程度）にまとめる。
+
+    **点を間引くのではなく二乗平均する**。`pulse_spectrum` の①（減衰なし）は
+    減衰が無いぶん櫛の歯が鋭く、**幅は応答長でしか決まらない**（3 秒なら 0.333 Hz）。
+    間引くと山を跨いで見落とす。二乗平均なら「その 1 Hz の中にどれだけ入っているか」
+    になるので取りこぼさない。
+
+    位相がばらばらのときの目安 √N も**そのまま保たれる**（帯域幅に依らない）ので、
+    図に引いた基準線を引き直さずに済む。
+
+    引数の `spectrum` は複素でも振幅でもよい。戻り値は (帯域の中心周波数, 振幅)。
+    """
+    frequency = np.asarray(frequency, dtype=float)
+    magnitude = np.abs(np.asarray(spectrum))
+    single = magnitude.ndim == 1
+    magnitude = magnitude.reshape(len(frequency), -1)
+
+    native = float(frequency[1] - frequency[0])
+    if not step or step <= native:
+        return frequency, (magnitude[:, 0] if single else magnitude)
+
+    index = np.floor((frequency - frequency[0]) / step + 1e-9).astype(int)
+    count = np.bincount(index)
+    centre = np.bincount(index, weights=frequency) / np.maximum(count, 1)
+    power = np.column_stack([np.bincount(index, weights=magnitude[:, k] ** 2)
+                             for k in range(magnitude.shape[1])])
+    keep = count > 0
+    result = np.sqrt(power[keep] / count[keep, None])
+    return centre[keep], (result[:, 0] if single else result)
+
+
 def _band_of(frequency, band_frequencies):
     """各周波数点に、いちばん近いオクターブバンドの添字を割り当てる（対数距離）。"""
     band_frequencies = np.asarray(band_frequencies, dtype=float)
@@ -733,7 +768,7 @@ def _spread_labels(index, frequency, strength, count, min_gap):
 def mode_buildup(path, time, energy, distance=None, frequencies=None,
                  lengths=None, volume=None, reverberation_time=None,
                  sound_velocity=343.0, max_frequency=200.0,
-                 min_frequency=None, max_time=None,
+                 min_frequency=None, frequency_step=1.0, max_time=None,
                  bin_rate=8000.0, label_peaks=6):
     """経路差から見たモードの積み上げと、**吸音の効き方**（G-6b）。
 
@@ -764,6 +799,10 @@ def mode_buildup(path, time, energy, distance=None, frequencies=None,
         energy   (n,b)     バンド別エネルギー（**面の吸音だけ**が入っている。
                            距離減衰と空気吸収は impulse.py 側で掛ける約束）
         distance (n,)      経路長 [m]。省略すると time × 音速
+        frequency_step     図の周波数刻み [Hz]。既定 1 Hz。
+                           FFT の刻み（応答長の逆数。3 秒なら 0.333 Hz）は細かすぎて
+                           線がぎざぎざするので、**間引かず二乗平均**でまとめ直す
+                           （`rebin_spectrum`）。None なら FFT の刻みのまま
     """
     time = np.asarray(time, dtype=float)
     energy = np.atleast_2d(np.asarray(energy, dtype=float))
@@ -796,9 +835,15 @@ def mode_buildup(path, time, energy, distance=None, frequencies=None,
 
     keep = (f >= min_frequency) & (f <= max_frequency)
     f, H = f[keep], H[keep]
-    counted = np.abs(H[:, 0])
-    free = np.abs(H[:, 1])
-    absorbed = np.abs(H[:, 2:])[np.arange(len(f)), _band_of(f, frequencies)]
+
+    # FFT の刻みは応答長で決まる（3 秒なら 0.333 Hz）。細かすぎて線がぎざぎざするので
+    # 実務で見る幅にまとめる。**間引かず二乗平均**（理由は rebin_spectrum の説明）
+    width = max(frequency_step or 0.0, float(f[1] - f[0]))
+    f, magnitude = rebin_spectrum(f, H, frequency_step)
+
+    counted = magnitude[:, 0]
+    free = magnitude[:, 1]
+    absorbed = magnitude[:, 2:][np.arange(len(f)), _band_of(f, frequencies)]
 
     with np.errstate(divide="ignore"):
         free_db = 20.0 * np.log10(np.maximum(free * direct, 1e-6))
@@ -811,7 +856,8 @@ def mode_buildup(path, time, energy, distance=None, frequencies=None,
     fig, axes = _figure(2, 1, figsize=(12, 8.5))
 
     # ---- 上段：本数の積み上げ ----
-    _style(axes[0], "経路の重なり（減衰を考えない＝室形状だけで決まる）",
+    _style(axes[0], f"経路の重なり（減衰を考えない＝室形状だけで決まる "
+                    f"/ 分析帯域幅 {width:.2g} Hz）",
            None, "同位相で重なった経路の本数")
     axes[0].axvspan(separable, max_frequency, color="#2a3140", alpha=0.35, zorder=0)
     for fm in modes[modes <= separable]:
