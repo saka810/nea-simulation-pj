@@ -61,7 +61,12 @@ class NormalEditor:
     （自動判定の結果もここに畳み込んでおくので、保存したものを読めば再現できる）。
     """
 
-    def __init__(self, model, flipped=None, title="法線の確認"):
+    def __init__(self, model, flipped=None, title="法線の確認", head_azimuth=None):
+        # 受音点に置く「人」の正面方向 [度]（真上から見て +X から反時計回り）。
+        # G-5 の伝搬方向の図で「前・後ろ・左・右」を決めるのに使う。
+        # CAD で表すのは難しいという判断で、ここ（3D が見えている画面）で決める
+        self.head_azimuth = None if head_azimuth is None else float(head_azimuth)
+        self.head_actor = None
         self.model = model
         self.mesh = model.mesh
         self.count = len(self.mesh)
@@ -265,6 +270,16 @@ class NormalEditor:
 
             vg.add_opacity_control(self.plotter, font=font, panel=panel,
                                    target_key="o")
+
+            # 受音点に置く「人」の正面方向（G-5 の伝搬方向の図で使う）。
+            # CAD で表すのは難しいので、3D が見えているここで決める
+            if self.head_azimuth is not None and self.model.receiver_points:
+                panel.heading("受音点の向き（伝搬方向の図で使う）")
+                panel.slider("正面の方位 [°]", [0.0, 360.0], self.head_azimuth,
+                             lambda v: self.set_head_azimuth(v), fmt="%.0f")
+                panel.text("0°=+X / 90°=+Y（真上から見て反時計回り）\n"
+                           "黄色い矢印が正面です", size=8)
+
             panel.heading("操作")
             panel.text("p 面を枠で選んで反転\n"
                        "数字キー レイヤごと反転\n"
@@ -296,8 +311,11 @@ class NormalEditor:
         self.plotter.enable_cell_picking(callback=self._picked, through=False,
                                          show_message=False, color="#ffd166")
 
+        if self.head_azimuth is not None:
+            self.set_head_azimuth(self.head_azimuth, render=False)
         self.refresh(render=False)
         if panel is not None:
+            panel.enable_value_input("e")
             panel.relayout()
         self.plotter.view_isometric()
         if off_screen:
@@ -317,6 +335,33 @@ class NormalEditor:
             return
         self.toggle(np.asarray(ids))
 
+    def set_head_azimuth(self, degrees, render=True):
+        """受音点に置く「人」の正面方向を変え、矢印を描き直す。
+
+        上下の向きは扱わない（実務では水平面で足りるというユーザー判断）。
+        矢印は**受音点から正面へ**伸ばす。長さは室の対角の 8% にしてあり、
+        「どちらを向いているか」が分かればよい大きさ。
+        """
+        self.head_azimuth = float(degrees) % 360.0
+        if self.plotter is None or not self.model.receiver_points:
+            return
+        if self.head_actor is not None:
+            self.plotter.remove_actor(self.head_actor, render=False)
+            self.head_actor = None
+
+        lo, hi = self.model.extents
+        length = float(np.linalg.norm(np.asarray(hi) - np.asarray(lo))) * 0.08
+        angle = np.deg2rad(self.head_azimuth)
+        direction = np.array([np.cos(angle), np.sin(angle), 0.0])
+        start = np.asarray(self.model.receiver_points[0], dtype=float)
+        arrow = pv.Arrow(start=start, direction=direction, scale=length,
+                         tip_length=0.3, tip_radius=0.12, shaft_radius=0.04)
+        self.head_actor = self.plotter.add_mesh(arrow, color="#ffd166",
+                                                lighting=False)
+        self._refresh_label()
+        if render:
+            self.plotter.render()
+
     def _toggle_normals(self):
         self.show_normals = not self.show_normals
         self.refresh()
@@ -327,19 +372,28 @@ class NormalEditor:
 
 
 def edit(project, model=None, off_screen=False, screenshot=None):
-    """プロジェクトの法線指定を確認・修正して `normals.json` に保存する。
+    """プロジェクトの法線指定と受音点の向きを確認・修正して保存する。
+
+    法線は `normals.json`、受音点の向きは `project.json` に入る
+    （前者はモデルの性質、後者は計算条件なので置き場所を分けている）。
 
     戻り値 (保存したか, 反転する面の集合)。
     """
     if model is None:
         model = load_model_for(project)
-    editor = NormalEditor(model, title=f"{project.name} — 法線の確認")
+    editor = NormalEditor(model, title=f"{project.name} — 法線の確認",
+                          head_azimuth=getattr(project, "head_azimuth", 0.0))
     saved = editor.show(off_screen=off_screen, screenshot=screenshot)
     if saved:
         path = project.save_flipped_faces(editor.flipped, editor.count,
                                           mode=model.orient_mode)
         print(f"[normal_editor] 法線の指定を保存しました: {path}"
               f"（反転 {len(editor.flipped)} / {editor.count} 枚）")
+        if editor.head_azimuth is not None:
+            project.head_azimuth = editor.head_azimuth
+            project.save()
+            print(f"[normal_editor] 受音点の向きを保存しました: "
+                  f"正面 {editor.head_azimuth:.0f}°")
     else:
         print("[normal_editor] 保存せずに閉じました（前回の指定のままです）")
     return saved, editor.flipped

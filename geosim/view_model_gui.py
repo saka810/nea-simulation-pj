@@ -119,8 +119,72 @@ class ControlPanel:
         self.ratio = width_ratio
         self.items = []
         self._widgets = []                 # 参照を残さないと GC で消える
+        self.controls = []                 # 数値入力ダイアログに出すスライダ
         self._measure()
         self._watch_resize()
+
+    # ---- 数値を直接入力する ---------------------------------------------
+
+    def enable_value_input(self, key="e"):
+        """`key` を押すと、スライダの値を**数字で打ち込める**ダイアログを出す。
+
+        VTK のスライダはつまみを動かすことしかできず、
+        「音線を 137 本にしたい」のような指定ができない（ユーザー指摘）。
+        tkinter の小さな窓を出して、いまある全スライダをまとめて入力する。
+
+        3D の描画とは別のイベントループになるが、**ダイアログを閉じるまで
+        そちらに入りきり**なので取り合いにはならない。
+        """
+        if not self.controls:
+            return
+        self.plotter.add_key_event(key, self.open_value_input)
+
+    def open_value_input(self):
+        import tkinter as tk
+        from tkinter import ttk
+
+        root = tk.Tk()
+        root.title("値を入力")
+        root.attributes("-topmost", True)
+        frame = ttk.Frame(root, padding=12)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text="数値を入れて OK を押してください",
+                  foreground="#666").grid(row=0, column=0, columnspan=3,
+                                          sticky="w", pady=(0, 8))
+
+        entries = []
+        for row, control in enumerate(self.controls, start=1):
+            low, high = control["range"]
+            ttk.Label(frame, text=control["label"]).grid(row=row, column=0,
+                                                        sticky="w", pady=3)
+            var = tk.StringVar(value=control["format"] % control["value"])
+            ttk.Entry(frame, textvariable=var, width=12).grid(row=row, column=1,
+                                                              padx=8)
+            ttk.Label(frame, text=f"（{low:g} 〜 {high:g}）",
+                      foreground="#666").grid(row=row, column=2, sticky="w")
+            entries.append((control, var))
+
+        def apply():
+            for control, var in entries:
+                text = var.get().strip()
+                if not text:
+                    continue
+                try:
+                    value = float(text)
+                except ValueError:
+                    continue
+                low, high = control["range"]
+                control["set"](float(min(max(value, low), high)))
+            root.destroy()
+
+        buttons = ttk.Frame(frame)
+        buttons.grid(row=len(entries) + 1, column=0, columnspan=3,
+                     sticky="e", pady=(12, 0))
+        ttk.Button(buttons, text="キャンセル", command=root.destroy).pack(side="right",
+                                                                        padx=4)
+        ttk.Button(buttons, text="OK", command=apply).pack(side="right", padx=4)
+        root.bind("<Return>", lambda _e: apply())
+        root.mainloop()
 
     def _measure(self):
         width, height = self.plotter.window_size
@@ -291,6 +355,7 @@ class ControlPanel:
         def guarded(v):
             if not state["ready"]:
                 return
+            control["value"] = float(v)
             show_value(v)
             self._model()
             callback(v)
@@ -304,6 +369,19 @@ class ControlPanel:
         state["ready"] = True
         self._model()
         self._widgets.append(widget)
+
+        def set_value(v, widget=widget):
+            """つまみを動かさずに値を入れる（数値入力ダイアログから使う）。"""
+            widget.GetRepresentation().SetValue(float(v))
+            control["value"] = float(v)
+            show_value(v)
+            self._model()
+            callback(v)
+            self.plotter.render()
+
+        control = {"label": title, "range": tuple(value_range), "value": float(value),
+                   "format": fmt, "set": set_value, "widget": widget}
+        self.controls.append(control)
 
         def place(y, widget=widget):
             # ★位置は**ウィンドウ全体**の正規化座標（`Normalized Display`）。

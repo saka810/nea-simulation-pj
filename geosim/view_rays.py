@@ -495,6 +495,35 @@ class ParticleAnimation:
         if render:
             self.plotter.render()
 
+    def set_time_step(self, milliseconds, render=True):
+        """**離散化時間**（1 コマあたりの時間）を変える。
+
+        粗くすれば同じ長さを少ないコマ数で見渡せて、細かくすれば
+        初期反射のような速い動きが追える。
+        全体の長さ（最大時刻）は変えずに、その中の刻み方だけを変える。
+
+        コマ数が変わるので、時刻スライダの範囲も合わせて直す。
+        """
+        step = max(1e-4, float(milliseconds) / 1000.0)
+        frames = int(round(self.raylog.max_time / step)) + 1
+        self.frames = max(2, frames)
+        self.times = np.arange(self.frames) * step
+        self.step = min(self.step, self.frames - 1)
+
+        slider = getattr(self, "slider", None)
+        if slider is not None:
+            representation = slider.GetRepresentation()
+            representation.SetMinimumValue(0)
+            representation.SetMaximumValue(self.frames - 1)
+            representation.SetValue(self.step)
+        self.update(self.step, render=render)
+
+    @property
+    def time_step_ms(self):
+        """いまの離散化時間 [ms]。"""
+        return float(self.times[1] - self.times[0]) * 1000.0 if len(self.times) > 1 \
+            else 0.0
+
     def set_count(self, count, render=True):
         """表示する粒子の数を変える。**等間隔に抜く**ので分布の偏りは出ない。"""
         keep = even_subset(np.arange(len(self.index)), count)
@@ -776,6 +805,10 @@ def view(dxf_path, raylog_path, mode="both", absorption=None, unit=None,
         if animation is not None:
             panel.slider("音粒子の数", [1, len(pool)], particle_count,
                          lambda v: animation.set_count(int(round(v))), fmt="%.0f")
+            # 離散化時間（1 コマあたりの時間）。粗くすると全体を見渡せ、
+            # 細かくすると初期反射のような速い動きが追える
+            panel.slider("離散化時間 [ms]", [0.2, 50.0], animation.time_step_ms,
+                         lambda v: animation.set_time_step(v), fmt="%.1f")
 
         switch = None
         if mode == "both":
@@ -787,7 +820,9 @@ def view(dxf_path, raylog_path, mode="both", absorption=None, unit=None,
         panel.heading("音線の情報")
         panel.text(raylog.summary().replace(" / ", "\n"))
         panel.heading("操作")
-        panel.text("z/x/c/v 視点   r リセット   q 終了", color="#7f8794")
+        panel.text("e 値を数字で入力\nz/x/c/v 視点   r リセット   q 終了",
+                   color="#7f8794")
+        panel.enable_value_input("e")
         panel.relayout()
 
     plotter.view_isometric()

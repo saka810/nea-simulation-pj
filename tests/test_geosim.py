@@ -838,6 +838,82 @@ def test_resample():
           np.allclose(got, [0.20, 0.40]), np.round(got, 4).tolist())
 
 
+# ---------------------------------------------------------------- 伝搬方向
+def test_direction():
+    print("\n[18] 伝搬方向の集計（G-5）")
+    import plots
+
+    # 頭の正面を 0 とした相対方位に直せているか
+    edges, totals = plots.direction_histogram([[1.0, 0, 0]], [1.0], head_azimuth=0.0)
+    check("正面(+X)から来る音は 0° の区間に入る", int(np.argmax(totals)) == 0)
+
+    edges, totals = plots.direction_histogram([[0, 1.0, 0]], [1.0], head_azimuth=0.0)
+    check("左(+Y)から来る音は 90° の区間に入る",
+          abs(np.rad2deg(edges[int(np.argmax(totals))]) - 90.0) < 1e-9,
+          f"{np.rad2deg(edges[int(np.argmax(totals))]):.1f}°")
+
+    edges, totals = plots.direction_histogram([[0, 1.0, 0]], [1.0], head_azimuth=90.0)
+    check("頭を +Y に向けると、その音が正面扱いになる",
+          int(np.argmax(totals)) == 0)
+
+    # 上下は見ない（水平面へ投影する）
+    slanted = [[1.0, 0.0, 5.0]]      # ほぼ真上から来るが方位は +X
+    edges, totals = plots.direction_histogram(slanted, [1.0], head_azimuth=0.0)
+    check("上下の傾きは方位に影響しない（水平面へ投影）",
+          int(np.argmax(totals)) == 0)
+
+    # エネルギーが方位ごとに足し合わされるか
+    edges, totals = plots.direction_histogram([[1.0, 0, 0], [1.0, 0, 0], [0, 1.0, 0]],
+                                              [2.0, 3.0, 7.0], head_azimuth=0.0)
+    check("同じ方位のエネルギーが合算される",
+          abs(totals[0] - 5.0) < 1e-12 and abs(totals.sum() - 12.0) < 1e-12,
+          f"正面 {totals[0]:.1f} / 合計 {totals.sum():.1f}")
+
+
+# ---------------------------------------------------------------- モード分布
+def test_modes():
+    print("\n[19] モード分布（G-6）")
+    import plots
+
+    c = 343.0
+    # 1 m 立方体の固有周波数を手計算と突き合わせる
+    got, orders = plots.room_modes([1.0, 1.0, 1.0], 400.0, c)
+    want = np.sort([0.5 * c * np.sqrt(a * a + b * b + d * d)
+                    for a in range(4) for b in range(4) for d in range(4)
+                    if (a or b or d) and 0.5 * c * np.sqrt(a * a + b * b + d * d) <= 400.0])
+    check("1 m 立方体の固有周波数が手計算と一致",
+          len(got) == len(want) and np.allclose(got, want),
+          f"{len(got)} 個 / 最低次 {got[0]:.2f} Hz")
+    check("最低次の軸モードが c/2L", abs(got[0] - 0.5 * c) < 1e-9,
+          f"{got[0]:.3f} / 期待 {0.5 * c:.3f}")
+
+    # (0,0,0) は音場ではないので含めない
+    check("次数 (0,0,0) は含まれない", not np.any(np.all(orders == 0, axis=1)))
+    check("すべて上限以下", got.max() <= 400.0 + 1e-9)
+
+    # 細長い室では軸モードが低いほうへ寄る
+    long_room, _ = plots.room_modes([10.0, 2.0, 2.0], 100.0, c)
+    check("長い室ほど最低次が低い", long_room[0] < got[0],
+          f"{long_room[0]:.2f} Hz（10 m の軸モード {0.5 * c / 10.0:.2f} Hz）")
+
+    # シュレーダー周波数 2000√(T/V)
+    check("シュレーダー周波数が 2000√(T/V)",
+          abs(plots.schroeder_frequency(0.5, 100.0) - 2000.0 * np.sqrt(0.5 / 100.0)) < 1e-9,
+          f"{plots.schroeder_frequency(0.5, 100.0):.1f} Hz")
+    check("容積が無ければ None", plots.schroeder_frequency(0.5, None) is None)
+
+    # 数え上げと近似式（体積・面積・辺長の 3 項）が近いこと
+    lengths = np.array([8.5, 14.6, 3.0])
+    counted, _ = plots.room_modes(lengths, 200.0, c)
+    lx, ly, lz = lengths
+    approx = ((4.0 * np.pi / 3.0) * (lx * ly * lz) * (200.0 / c) ** 3
+              + (np.pi / 4.0) * 2.0 * (lx * ly + ly * lz + lz * lx) * (200.0 / c) ** 2
+              + 4.0 * (lx + ly + lz) / 8.0 * (200.0 / c))
+    check("累積モード数が近似式と 5% 以内で一致",
+          abs(len(counted) - approx) / approx < 0.05,
+          f"数え上げ {len(counted)} / 近似 {approx:.0f}")
+
+
 def main():
     print("geosim 数値検証")
     print(f"  Python {sys.version.split()[0]} / numpy {np.__version__}")
@@ -849,7 +925,7 @@ def main():
                test_atmosphere, test_absorption, test_impulse, test_reverberation,
                test_statistical_reverberation, test_ray_log,
                test_normals, test_check_model, test_clarity,
-               test_project, test_resample):
+               test_project, test_resample, test_direction, test_modes):
         fn()
 
     failed = [name for name, ok in _results if not ok]

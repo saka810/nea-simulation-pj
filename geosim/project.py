@@ -65,6 +65,11 @@ DEFAULTS = {
     "volume": None,                # 統計残響式に使う容積。None なら閉形状から自動
     "source": None,                # None なら DXF の src レイヤ
     "receiver": None,              # None なら DXF の rec レイヤ
+    # 受音点に置く「人」の正面方向。真上から見た方位角 [度]。
+    # **0° = +X 方向、反時計回り**（真上から見て）。
+    # 伝搬方向の図（G-5）で「前・後ろ・左・右」を決めるのに使う。
+    # 上下の向きは扱わない（実務では水平面で足りるため。ユーザー判断）
+    "head_azimuth": 0.0,
     "raylog_max_rays": 2000,
     "statistical": True,
 }

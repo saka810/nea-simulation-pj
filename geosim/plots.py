@@ -305,6 +305,284 @@ def absorption(path, surface, frequencies):
 
 
 # ------------------------------------------------------------------------------
+# ⑤ 伝搬方向（G-5）
+# ------------------------------------------------------------------------------
+
+# 方向を何分割して集計するか（10° 刻み）
+DIRECTION_SECTORS = 36
+
+# 初期と後期の境目 [s]。C50 と同じ 50 ms にしてある
+EARLY_LIMIT = 0.050
+
+
+def _head_patch(ax, radius, colour="#d6dae2"):
+    """真上から見た人の絵を原点に描く（正面は +X 方向）。
+
+    円（頭）＋鼻の三角＋両耳。**どちらが前か**が一目で分かればよいので、
+    細かい形は追わない。図の主役は方向分布のほうなので控えめな色にしてある。
+    """
+    from matplotlib.patches import Circle, Ellipse, Polygon
+
+    ax.add_patch(Circle((0, 0), radius, facecolor="#2a3140",
+                        edgecolor=colour, linewidth=1.2, zorder=5))
+    # 鼻（正面 = +X）
+    nose = radius * 0.42
+    ax.add_patch(Polygon([[radius * 0.92, -nose * 0.5],
+                          [radius * 1.38, 0.0],
+                          [radius * 0.92, nose * 0.5]],
+                         closed=True, facecolor=colour, edgecolor=colour, zorder=6))
+    # 両耳（±Y）
+    for sign in (-1.0, 1.0):
+        ax.add_patch(Ellipse((0.0, sign * radius * 1.02),
+                             width=radius * 0.30, height=radius * 0.52,
+                             facecolor="#2a3140", edgecolor=colour,
+                             linewidth=1.0, zorder=6))
+
+
+def direction_histogram(direction, energy, head_azimuth=0.0,
+                        sectors=DIRECTION_SECTORS):
+    """到来方向を水平面で集計する。
+
+    引数:
+        direction (N,3) 到来方向の単位ベクトル（受音点から音が来る向き）
+        energy    (N,)  その経路のエネルギー
+        head_azimuth    人の正面方向 [度]（真上から見て +X から反時計回り）
+
+    戻り値 (角度の境目 [rad], 区間ごとのエネルギー)。
+    角度は**頭の正面を 0 とした相対方位**。0=正面 / 90=左 / 180=後ろ / 270=右。
+
+    ★上下は見ない（水平面へ投影する）。実務では水平面で足りるため（ユーザー判断）。
+    """
+    direction = np.atleast_2d(np.asarray(direction, dtype=float))
+    energy = np.asarray(energy, dtype=float).ravel()
+
+    azimuth = np.arctan2(direction[:, 1], direction[:, 0])
+    azimuth = azimuth - np.deg2rad(head_azimuth)        # 頭の正面を 0 にする
+    azimuth = np.mod(azimuth, 2.0 * np.pi)
+
+    edges = np.linspace(0.0, 2.0 * np.pi, sectors + 1)
+    totals, _ = np.histogram(azimuth, bins=edges, weights=energy)
+    return edges, totals
+
+
+def propagation_direction(path, direction, energy, distance=None, time=None,
+                          head_azimuth=0.0, frequencies=None, band=None,
+                          dynamic_range=30.0):
+    """受音点にどの方向から音が来ているかを、真上から見た図にする（G-5）。
+
+    左が**全体**（初期と後期を重ねる）、右が**バンド別**。
+    真ん中に人の絵を置き、正面を上に向けて描く。
+
+    半径は**最大を 0 dB としたときのレベル**で、外側ほど強い。
+    `dynamic_range` dB より弱い方向は中心に潰れる（見たいのは強い方向の偏りなので）。
+    """
+    direction = np.atleast_2d(np.asarray(direction, dtype=float))
+    energy = np.atleast_2d(np.asarray(energy, dtype=float))
+    if distance is not None:
+        # 受音点に届くエネルギー（距離減衰を入れる）
+        energy = energy / np.asarray(distance, dtype=float)[:, None] ** 2
+
+    fig, axes = _figure(1, 2, figsize=(13, 6.5))
+
+    def draw(ax, series, title):
+        """series = [(ラベル, 色, エネルギー (N,))]"""
+        ax.set_facecolor(PANEL)
+        ax.set_aspect("equal")
+        ax.axis("off")
+        ax.set_title(title, color=TEXT, fontsize=11, pad=12)
+
+        # 目盛りの円（dB）と方位の線
+        for level in np.arange(0.25, 1.01, 0.25):
+            ax.add_patch(plt.Circle((0, 0), level, fill=False, color=GRID,
+                                    linewidth=0.7, zorder=1))
+            decibel = -dynamic_range * (1.0 - level)
+            ax.text(0.0, level, f"{decibel + 0.0:.0f} dB".replace("-0 dB", "0 dB"),
+                    color="#7f8794", fontsize=7, ha="center", va="bottom", zorder=2)
+        for angle, name in ((0, "正面"), (90, "左"), (180, "後ろ"), (270, "右")):
+            a = np.deg2rad(angle)
+            # 図では正面を上に描く（真上から見た人の絵に合わせる）
+            x, y = -np.sin(a), np.cos(a)
+            ax.plot([0, x * 1.12], [0, y * 1.12], color=GRID, linewidth=0.7, zorder=1)
+            ax.text(x * 1.22, y * 1.22, name, color=TEXT, fontsize=9,
+                    ha="center", va="center")
+
+        for label, colour, values in series:
+            edges, totals = direction_histogram(direction, values,
+                                                head_azimuth=head_azimuth)
+            peak = totals.max()
+            if peak <= 0.0:
+                continue
+            with np.errstate(divide="ignore"):
+                level = 10.0 * np.log10(np.maximum(totals / peak, 1e-12))
+            radius = np.clip(1.0 + level / dynamic_range, 0.0, 1.0)
+            centres = 0.5 * (edges[:-1] + edges[1:])
+            # 閉じた折れ線にする
+            centres = np.append(centres, centres[0])
+            radius = np.append(radius, radius[0])
+            x = -radius * np.sin(centres)
+            y = radius * np.cos(centres)
+            ax.plot(x, y, color=colour, linewidth=1.8, label=label, zorder=4)
+            ax.fill(x, y, color=colour, alpha=0.18, zorder=3)
+
+        _head_patch(ax, 0.15)
+        ax.set_xlim(-1.45, 1.45)
+        ax.set_ylim(-1.35, 1.35)
+        legend = ax.legend(loc="lower right", fontsize=8)
+        if legend is not None:
+            legend.get_frame().set_facecolor(PANEL)
+            legend.get_frame().set_edgecolor(GRID)
+            for text in legend.get_texts():
+                text.set_color(TEXT)
+
+    broadband = energy.sum(axis=1)
+    series = [("すべて", ACCENT, broadband)]
+    if time is not None:
+        t = np.asarray(time, dtype=float)
+        early = np.where(t < t.min() + EARLY_LIMIT, broadband, 0.0)
+        late = np.where(t < t.min() + EARLY_LIMIT, 0.0, broadband)
+        series = [("すべて", "#8b929e", broadband),
+                  (f"初期（〜{EARLY_LIMIT * 1000:.0f} ms）", "#4cc9f0", early),
+                  ("後期", "#f7b801", late)]
+    draw(axes[0], series, "伝搬方向（真上から見た図）")
+
+    if frequencies is not None and energy.shape[1] == len(frequencies):
+        bands = [(f"{f:.0f} Hz", _band_color(i), energy[:, i])
+                 for i, f in enumerate(frequencies)]
+        draw(axes[1], bands, "バンド別")
+    else:
+        axes[1].axis("off")
+
+    fig.text(0.5, 0.02, f"人の正面 = 方位 {head_azimuth:.0f}°"
+                        f"（真上から見て +X から反時計回り）",
+             color="#7f8794", fontsize=8, ha="center")
+    return _save(fig, path)
+
+
+# ------------------------------------------------------------------------------
+# ⑥ モード分布（G-6）
+# ------------------------------------------------------------------------------
+
+def room_modes(lengths, limit, sound_velocity=343.0):
+    """直方体の固有周波数を `limit` [Hz] まで列挙する。
+
+        f = (c/2) √((nx/Lx)² + (ny/Ly)² + (nz/Lz)²)
+
+    書籍『建築音響物理学』2.1 節（波動音響理論）の直方体音場。
+    実際の室は直方体でないことが多いが、**低域でどのあたりに固有周波数が
+    並ぶか**の目安としては外形寸法から出したもので十分役に立つ。
+
+    戻り値 (周波数 (M,), 次数 (M,3))。周波数の昇順。
+    """
+    lengths = np.asarray(lengths, dtype=float)
+    if np.any(lengths <= 0.0):
+        return np.array([]), np.zeros((0, 3), dtype=int)
+    # 各軸で必要な最大次数（他の軸が 0 のときに limit に届く数）
+    top = np.maximum(1, np.ceil(2.0 * limit * lengths / sound_velocity).astype(int))
+    grid = np.stack(np.meshgrid(*[np.arange(n + 1) for n in top], indexing="ij"),
+                    axis=-1).reshape(-1, 3)
+    grid = grid[np.any(grid > 0, axis=1)]           # (0,0,0) は音場ではない
+    frequency = 0.5 * sound_velocity * np.sqrt(
+        np.sum((grid / lengths[None, :]) ** 2, axis=1))
+    keep = frequency <= limit
+    frequency, grid = frequency[keep], grid[keep]
+    order = np.argsort(frequency)
+    return frequency[order], grid[order]
+
+
+def schroeder_frequency(reverberation_time, volume):
+    """シュレーダー周波数 `f = 2000 √(T/V)` [Hz]。
+
+    **これより低い帯域は個々の固有振動が分離して見える**（モードの世界）、
+    高い帯域はモードが重なり合って統計的に扱える（幾何音響の世界）、という境目。
+    幾何音響シミュレーションの結果を低域でどこまで信用してよいかの目安になる。
+    """
+    if not volume or reverberation_time is None or not np.isfinite(reverberation_time):
+        return None
+    return 2000.0 * np.sqrt(float(reverberation_time) / float(volume))
+
+
+def mode_distribution(path, time, ir, lengths=None, volume=None,
+                      reverberation_time=None, sound_velocity=343.0,
+                      max_frequency=300.0):
+    """受音点のモード分布（G-6）。
+
+    上段：インパルス応答の**スペクトル**（低域）。山が立っているところが
+          その受音点で強く出ている固有振動。
+    下段：外形寸法から求めた**直方体の固有周波数**と、その累積数。
+
+    ★寸法は外形（バウンディングボックス）なので、室が直方体でなければ
+      **目安**にしかならない。それでも「低域にどれくらい隙間があるか」は分かる。
+    """
+    time = np.asarray(time, dtype=float)
+    ir = np.asarray(ir, dtype=float)
+    fs = 1.0 / float(time[1] - time[0])
+
+    spectrum = np.abs(np.fft.rfft(ir))
+    frequency = np.fft.rfftfreq(len(ir), d=1.0 / fs)
+    keep = (frequency > 0) & (frequency <= max_frequency)
+    frequency, spectrum = frequency[keep], spectrum[keep]
+    peak = spectrum.max() or 1.0
+    with np.errstate(divide="ignore"):
+        level = 20.0 * np.log10(np.maximum(spectrum / peak, 1e-6))
+
+    modes, orders = (room_modes(lengths, max_frequency, sound_velocity)
+                     if lengths is not None else (np.array([]), None))
+    f_schroeder = schroeder_frequency(reverberation_time, volume)
+
+    # 個々の固有周波数を線で描くのは、**分離して見える帯域だけ**にする。
+    # 全部引くと灰色のベタ塗りになって情報が消える（実際にそうなった）。
+    # 境目はシュレーダー周波数そのもの（これより上はモードが重なり合う、という定義）
+    separable = min(max_frequency,
+                    f_schroeder if f_schroeder else max_frequency * 0.25)
+
+    fig, axes = _figure(2, 1, figsize=(12, 8))
+    _style(axes[0], "受音点のスペクトル（最大を 0 dB）", None, "レベル [dB]")
+    axes[0].axvspan(separable, max_frequency, color="#2a3140", alpha=0.35, zorder=0)
+    for f in modes[modes <= separable]:
+        axes[0].axvline(f, color="#8b929e", linewidth=0.7, alpha=0.65, zorder=1)
+    axes[0].plot(frequency, level, color=ACCENT, linewidth=1.0, zorder=3)
+    axes[0].set_xlim(0, max_frequency)
+    axes[0].set_ylim(-60, 5)
+    if len(modes):
+        axes[0].plot([], [], color="#8b929e", linewidth=0.7,
+                     label="直方体の固有周波数（外形寸法から）")
+    axes[0].axvspan(np.nan, np.nan, color="#2a3140", alpha=0.35,
+                    label="モードが重なり合う帯域")
+
+    if f_schroeder is not None:
+        for ax in axes:
+            ax.axvline(f_schroeder, color="#e5484d", linestyle="--", linewidth=1.2,
+                       zorder=2)
+        axes[0].plot([], [], color="#e5484d", linestyle="--", linewidth=1.2,
+                     label=f"シュレーダー周波数 {f_schroeder:.0f} Hz")
+    axes[0].legend(loc="lower right", fontsize=8)
+
+    _style(axes[1], "固有周波数の累積数（外形寸法から）", "周波数 [Hz]", "累積モード数")
+    if len(modes):
+        axes[1].step(modes, np.arange(1, len(modes) + 1), where="post",
+                     color="#4cc38a", linewidth=1.5, label="数え上げ")
+        if lengths is not None:
+            # 累積モード数の近似式（体積・面積・辺長の 3 項）。
+            # 体積項だけだと数え上げより下に出て比較にならない
+            lx, ly, lz = np.asarray(lengths, dtype=float)
+            box_volume = lx * ly * lz
+            surface = 2.0 * (lx * ly + ly * lz + lz * lx)
+            edges = 4.0 * (lx + ly + lz)
+            f = np.linspace(1.0, max_frequency, 400)
+            approx = ((4.0 * np.pi / 3.0) * box_volume * (f / sound_velocity) ** 3
+                      + (np.pi / 4.0) * surface * (f / sound_velocity) ** 2
+                      + (edges / 8.0) * (f / sound_velocity))
+            axes[1].plot(f, approx, color="#8b929e", linestyle=":", linewidth=1.4,
+                         label="近似 4πVf³/3c³ + πSf²/4c² + Lf/8c")
+        axes[1].legend(loc="upper left", fontsize=8)
+        axes[1].set_xlim(0, max_frequency)
+    else:
+        axes[1].text(0.5, 0.5, "寸法が分からないので固有周波数を出せません",
+                     color="#7f8794", ha="center", transform=axes[1].transAxes)
+    return _save(fig, path, axes)
+
+
+# ------------------------------------------------------------------------------
 # まとめて書き出す
 # ------------------------------------------------------------------------------
 
@@ -353,5 +631,31 @@ def save_all(project, results, verbose=True):
     stat = results.get("statistical")
     if stat is not None and "surface" in stat:
         emit("absorption.png", absorption, stat["surface"], stat["frequencies"])
+
+    # ⑤ 伝搬方向。人の正面方向はプロジェクトが持つ（GUI で決める）
+    if pulse_list is not None and len(pulse_list):
+        emit("direction.png", propagation_direction,
+             pulse_list.direction, pulse_list.energy,
+             distance=pulse_list.distance, time=pulse_list.time,
+             head_azimuth=getattr(project, "head_azimuth", 0.0),
+             frequencies=results.get("frequencies"))
+
+    # ⑥ モード分布。寸法は外形（バウンディングボックス）から
+    model = results.get("model")
+    if impulse is not None and model is not None and model.extents is not None:
+        lengths = np.asarray(model.extents[1]) - np.asarray(model.extents[0])
+        rt = results.get("reverberation")
+        # 代表の残響時間として中域（500 Hz に最も近いバンド）の T30 を使う
+        t_mid = None
+        if rt is not None:
+            frequencies = np.asarray(rt["frequencies"], dtype=float)
+            t_mid = float(rt["measures"]["T30"][
+                int(np.argmin(np.abs(frequencies - 500.0)))])
+        volume = (project.volume if project.volume
+                  else (abs(model.volume) if model.volume else None))
+        atmosphere = results.get("atmosphere")
+        emit("modes.png", mode_distribution, impulse[0], impulse[1],
+             lengths=lengths, volume=volume, reverberation_time=t_mid,
+             sound_velocity=(atmosphere.sound_velocity if atmosphere else 343.0))
 
     return written
