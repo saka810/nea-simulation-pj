@@ -226,19 +226,29 @@ class NormalEditor:
             actor = self.plotter.add_mesh(
                 surface, scalars="verdict", cmap=VERDICT_COLORS, clim=(0, 2),
                 show_scalar_bar=False, show_edges=True, edge_color="#3a4150",
-                line_width=1, opacity=opacity)
+                line_width=1, opacity=opacity,
+                # **裏から見ている面はより透ける**（音線ビューアと同じ扱い）。
+                # 室の外から覗くと手前の壁は裏側なので、そこが薄くなって中が見える
+                backface_params={"opacity": opacity * vg.BACKFACE_OPACITY_RATIO})
             self.surfaces.append((faces, surface))
             registry[name] = {"face": actor, "arrow": None,
                               "colour": "#8b929e", "opacity": opacity}
         vg._attach(self.plotter, "geosim_layers", registry)
         vg._attach(self.plotter, "geosim_panel", panel)
 
-        for point, colour in [(self.model.source_points, "#ffd166"),
-                              (self.model.receiver_points, "#4cc9f0")]:
-            if point:
-                self.plotter.add_mesh(pv.PolyData(np.array(point)), color=colour,
-                                      point_size=16, render_points_as_spheres=True)
+        # 音源・受音点は音線ビューアと同じ球で描く（見た目を揃える）
+        lo, hi = self.model.extents
+        radius = float(np.linalg.norm(np.asarray(hi) - np.asarray(lo))) * 0.012
+        for points, colour in [(self.model.source_points, "#ff5f5f"),
+                               (self.model.receiver_points, "#4dd0a0")]:
+            for point in points:
+                self.plotter.add_mesh(
+                    pv.Sphere(radius=radius, center=np.asarray(point)),
+                    color=colour, lighting=False)
         self.plotter.add_axes(color=TEXT_COLOR)
+        self.plotter.show_bounds(grid="back", location="outer", ticks="outside",
+                                 font_size=9, color="#7f8794", xtitle="X [m]",
+                                 ytitle="Y [m]", ztitle="Z [m]")
 
         if panel is not None:
             panel.text(self.title, size=11, color=TEXT_COLOR)
@@ -287,6 +297,8 @@ class NormalEditor:
                                          show_message=False, color="#ffd166")
 
         self.refresh(render=False)
+        if panel is not None:
+            panel.relayout()
         self.plotter.view_isometric()
         if off_screen:
             if screenshot:

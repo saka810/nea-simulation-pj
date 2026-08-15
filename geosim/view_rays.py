@@ -72,7 +72,12 @@ RECEIVED_COLOR = "#ffd166"      # 受音した経路の色
 # 音線と音粒子を同じウィンドウに同居させるので、**見出しは重ならないようにする**
 # （pyvista はカラーバーを見出しで管理しているため、同名だと 1 つにまとめられてしまう）。
 RAY_BAR_TITLE = {"energy": "Ray energy [dB]", "time": "Ray time [ms]",
-                 "reflection": "Reflection", "ray": "Ray index"}
+                 "reflection": "Reflection", "ray": "Ray number (1 - N)"}
+
+# 音線の色分けに使う配色。`ray`（音線の番号）は**1 本目から最後まで**を
+# 一巡する色相にすると、全方向へ均等に散っているかが目で確かめられる。
+# 明るさが単調に変わる plasma だと「どこが 1 本目か」が分かりにくい
+RAY_CMAP = {"ray": "hsv"}
 PARTICLE_BAR_TITLE = "Particle energy [dB]"
 
 
@@ -329,14 +334,28 @@ class RayDisplay:
         self.colour = colour
         self.band = band
         self.line_width = line_width
-        self.cmap = cmap
+        self.cmap = RAY_CMAP.get(colour, cmap)
         self.highlight_received = highlight_received
         self.opacity = opacity
         self.max_reflection = max_reflection
+        # スライダの上限。これ以上は「打ち切らない」と同じなので None にする
+        self.reflection_limit = int(raylog.reflection_counts.max())
         self.count = int(count or len(self.pool))
         self.actors = []
         self.visible = True
         self.rebuild(self.count, render=False)
+
+    def set_max_reflection(self, value, render=True):
+        """描く反射回数の上限を変える。
+
+        0（＝1 区間だけ）にすると**音源から最初に当たるまで**だけが描かれ、
+        「どの向きへ音線を飛ばしたか」がそのまま見える。
+        上げていくと反射のたびに折れ線が伸びる。
+        全反射まで描くと室内が線で埋まって読めなくなるので、ここで加減する。
+        """
+        value = int(round(value))
+        self.max_reflection = None if value >= self.reflection_limit else max(1, value)
+        self.rebuild(self.count, render=render)
 
     def rebuild(self, count, render=True):
         self.count = int(np.clip(count, 1, len(self.pool)))
@@ -746,10 +765,14 @@ def view(dxf_path, raylog_path, mode="both", absorption=None, unit=None,
 
         panel.heading("表示する本数")
         if rays is not None:
-            panel.slider("rays", [1, len(pool)], ray_count,
+            panel.slider("音線の本数", [1, len(pool)], ray_count,
                          lambda v: rays.rebuild(int(round(v))), fmt="%.0f")
+            # 反射をどこまで描くか。0 に寄せると**音源から出た向き**がそのまま見える
+            panel.slider("描く反射回数", [1, rays.reflection_limit],
+                         rays.max_reflection or rays.reflection_limit,
+                         lambda v: rays.set_max_reflection(v), fmt="%.0f")
         if animation is not None:
-            panel.slider("particles", [1, len(pool)], particle_count,
+            panel.slider("音粒子の数", [1, len(pool)], particle_count,
                          lambda v: animation.set_count(int(round(v))), fmt="%.0f")
 
         switch = None
@@ -763,6 +786,7 @@ def view(dxf_path, raylog_path, mode="both", absorption=None, unit=None,
         panel.text(raylog.summary().replace(" / ", "\n"))
         panel.heading("操作")
         panel.text("z/x/c/v 視点   r リセット   q 終了", color="#7f8794")
+        panel.relayout()
 
     plotter.view_isometric()
     if off_screen:

@@ -33,7 +33,7 @@ import receiver_sphere as rs
 #       → よくない。両者は独立。上記のとおり追記条件が別。
 # ------------------------------------------------------------------------------
 def loop(soundsource_point, reciever_point, soundray_list, nref, mesh, sphere_radius,
-         recorder=None, ray_chunk=20000, two_sided=False):
+         recorder=None, ray_chunk=20000, two_sided=False, progress=None):
     """音線追跡。
 
     引数:
@@ -74,11 +74,15 @@ def loop(soundsource_point, reciever_point, soundray_list, nref, mesh, sphere_ra
 
     # 音線を塊に分けて処理する。1 塊のなかは配列演算なので Python のループが回らない
     step = max(1, int(ray_chunk))
-    for start in range(0, len(soundray_list), step):
-        stop = min(start + step, len(soundray_list))
+    total = len(soundray_list)
+    for start in range(0, total, step):
+        stop = min(start + step, total)
         _trace_chunk(soundsource_point, reciever_point,
                      soundray_list[start:stop], np.arange(start, stop),
                      nref, mesh, faces, sphere_radius, results, recorder)
+        if progress is not None:
+            # 塊ごとに進み具合を知らせる（GUI の進捗表示用。本線の計算には影響しない）
+            progress(stop / total)
     return results
 
 

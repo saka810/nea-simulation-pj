@@ -245,7 +245,7 @@ def backtrace_path(soundsource_point, reciever_point, wall_ids, mesh,
 
 def loop(soundsource_point, reciever_point, reflectionmeshid_history, mesh,
          sound_velocity=SOUND_VELOCITY, band_number=None, filename=None,
-         verbose=True, two_sided=False):
+         verbose=True, two_sided=False, progress=None):
     """非重複経路ループ。元コード 878 行 `do i = 1, countred`。
 
     引数:
@@ -280,13 +280,18 @@ def loop(soundsource_point, reciever_point, reflectionmeshid_history, mesh,
     records = []
     rejected = 0
 
-    for wall_ids in reflectionmeshid_history:
+    total = len(reflectionmeshid_history)
+    # 進捗を知らせる間隔。経路 1 本ごとに呼ぶと通知のほうが重くなる
+    notify_every = max(1, total // 100)
+    for i, wall_ids in enumerate(reflectionmeshid_history):
         record = backtrace_path(soundsource_point, reciever_point, wall_ids, mesh,
                                 band_number, sound_velocity, faces=faces)
         if record is None:
             rejected += 1
         else:
             records.append(record)
+        if progress is not None and (i + 1) % notify_every == 0:
+            progress((i + 1) / total)
 
     pulses = PulseList.from_records(records, band_number, sound_velocity).sort_by_time()
 

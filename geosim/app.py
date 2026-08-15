@@ -41,14 +41,38 @@ def _visualise(project, results=None):
         # ★受音した経路だけに絞らない。**音がどう広がるか**を見るのが目的なので、
         #   受音経路だけにすると（偏ってはいないが）本数が減って様子が分かりにくい。
         #   経路の確認をしたいときは view_rays.py に --received-only を付けて呼ぶ
+        #
+        # 色は `ray`（1 本目から最後の音線までのグラデーション）。
+        # 飛ばした音線が**全方向へ均等に散っている**ことが色で確かめられる。
+        #
+        # 最初は **反射 1 回まで**（音源から最初に当たるまで）にしておく。
+        # 全反射まで描くと室内が線で埋まって何も読めないため。
+        # 左パネルの reflections スライダで伸ばしていける
         vr.view(project.dxf_path, raylog, mode="both",
                 absorption=project.absorption_path,
                 unit=project.unit, orient_normals=project.orient_normals,
-                received_only=False, max_rays=60, max_reflection=4,
-                colour="time", opacity=0.10, frames=300, point_size=7)
+                received_only=False, max_rays=2000, max_reflection=1,
+                colour="ray", opacity=0.10, frames=300, point_size=7)
     except Exception:
         print("[app] 可視化ウィンドウでエラーが起きました:")
         traceback.print_exc()
+
+
+def _run_with_progress(project):
+    """進捗ウィンドウを出しながら計算する。
+
+    条件入力を閉じてから結果が出るまで**何も出ない時間**があり、
+    動いているのか止まっているのか分からなかった（ユーザー指摘）ので挟んでいる。
+    計算は別スレッドで走らせる（tkinter のイベントループを止めないため）。
+    """
+    import progress_window
+    import run_project
+
+    return progress_window.run_with_progress(
+        f"{project.name} を計算中",
+        lambda progress: run_project.run(project, progress=progress),
+        subtitle=(f"音線 {project.rays} 本 / 最大反射 {project.nref} 回 / "
+                  f"受音球 {project.radius} m"))
 
 
 def _report(project, results):
@@ -123,7 +147,7 @@ def main():
         break
 
     try:
-        results = run_project.run(project)
+        results = _run_with_progress(project)
     except Exception:
         print("[app] 計算でエラーが起きました:")
         traceback.print_exc()

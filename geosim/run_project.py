@@ -18,7 +18,7 @@ import project as pj
 from atmosphere import Atmosphere
 
 
-def run(project, verbose=True, make_figures=True):
+def run(project, verbose=True, make_figures=True, progress=None):
     """プロジェクトの条件で計算し、結果 CSV と図を書き出す。
 
     **受音点が複数ある場合は 1 点ずつ回す**（TODO B-9）。
@@ -36,7 +36,8 @@ def run(project, verbose=True, make_figures=True):
     receivers = _receivers(project)
     if len(receivers) <= 1:
         return _run_one(project, receivers[0] if receivers else None,
-                        verbose=verbose, make_figures=make_figures)
+                        verbose=verbose, make_figures=make_figures,
+                        progress=progress)
 
     if verbose:
         print(f"[run] 受音点が {len(receivers)} 点あります。1 点ずつ計算します")
@@ -49,8 +50,17 @@ def run(project, verbose=True, make_figures=True):
         # ★親（k=0）の project.json には受音点を書き戻さない。
         #   書き戻すと `receiver` が 1 点に固定され、**次回から 1 点目しか回らなくなる**
         results.append(_run_one(sub, point, verbose=verbose,
-                                make_figures=make_figures, write_back=(k > 0)))
+                                make_figures=make_figures, write_back=(k > 0),
+                                progress=_prefixed(progress,
+                                                   f"受音点{k + 1}/{len(receivers)} ")))
     return {"receivers": receivers, "results": results, **results[0]}
+
+
+def _prefixed(progress, prefix):
+    """受音点が複数あるとき、どの受音点の処理かを段階名に添える。"""
+    if progress is None:
+        return None
+    return lambda stage, fraction=None: progress(prefix + stage, fraction)
 
 
 def _receivers(project):
@@ -79,7 +89,8 @@ def _sub_project(project, index):
     return sub
 
 
-def _run_one(project, receiver, verbose=True, make_figures=True, write_back=True):
+def _run_one(project, receiver, verbose=True, make_figures=True,
+             write_back=True, progress=None):
     project.ensure_dirs()
     # 前回の結果を消してから回す。条件を変えたときに古いファイルが残っていると、
     # 今回の条件の値だと思って読んでしまう
@@ -122,9 +133,12 @@ def _run_one(project, receiver, verbose=True, make_figures=True, write_back=True
         surface_filename=project.result_path("surface"),
         clarity_filename=project.path(pj.RESULT_DIR, "clarity.csv"),
         statistical=project.statistical,
+        progress=progress,
     )
 
     if make_figures:
+        if progress is not None:
+            progress("図を書き出し中", None)
         written = plots.save_all(project, results, verbose=verbose)
         if verbose:
             print(f"[run] 図を {len(written)} 枚書き出しました → {project.path(pj.FIGURE_DIR)}")

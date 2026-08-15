@@ -29,7 +29,7 @@ def process(soundsource_point, reciever_point, dxf_filename, sphere_radius, nref
             reverberation_filename=None, decay_filename=None,
             statistical_filename=None, statistical=True,
             clarity=True, clarity_filename=None, surface_filename=None,
-            flip_faces=None):
+            flip_faces=None, progress=None):
     """
     閉じた室でも、一面だけの壁のような**開いた形状**でも計算できる
     （当たる壁がなくなった音線はそこで打ち切られる）。
@@ -107,11 +107,19 @@ def process(soundsource_point, reciever_point, dxf_filename, sphere_radius, nref
     flip_faces : iterable[int] | None
         法線を反転する面インデックス（`normal_editor.py` で目で見て直したぶん）。
         自動判定のあとに重ねて適用される。
+    progress : callable(段階名: str, 割合: float|None) | None
+        **進み具合の通知先**（GUI の進捗表示用）。割合は 0〜1、分からない段階は None。
+        重い段階（音線追跡・バックトレース）は途中でも何度か呼ばれる。
+        渡さなければ何もしないので、本線の計算には影響しない。
 
     戻り値:
         dict … 'model' / 'pulses' / 'impulse' / 'reverberation' / 'statistical'
                （計算しなかったものは None）
     """
+    def report(stage, fraction=None):
+        if progress is not None:
+            progress(stage, fraction)
+
     # オクターブバンドの中心周波数。既定は 8 バンド（63〜8k Hz）。
     frequencies = ab.octave_bands(band_number)
 
@@ -134,6 +142,7 @@ def process(soundsource_point, reciever_point, dxf_filename, sphere_radius, nref
 
     # 室形状・吸音率・音源・受音点をまとめて DXF から読む
     # 元コード132〜283行目に対応
+    report("モデルを読み込み中")
     model = rd.read_model(dxf_filename, unit=unit, absorption_table=absorption_table,
                           orient_normals=orient_normals, band_number=band_number,
                           flip_faces=flip_faces)
@@ -155,6 +164,7 @@ def process(soundsource_point, reciever_point, dxf_filename, sphere_radius, nref
 
     # 統計残響式（Sabine / Eyring / Millington）。音線を飛ばす前に出せる。
     # 面積と吸音率だけから決まるので、あとの計算結果と突き合わせる物差しになる
+    report("統計残響式")
     statistical_result = None
     if statistical:
         if volume is not None:
@@ -175,6 +185,7 @@ def process(soundsource_point, reciever_point, dxf_filename, sphere_radius, nref
             print(f"[統計残響] レイヤ別の面積・吸音率: {surface_filename}")
 
     # 音線ベクトルを作成
+    report("音線を生成中")
     soundray_list = sr.soundray_generator(soundray_number)
 
     # 可視化用の軌跡レコーダ（本線の計算には影響しない副チャンネル）
@@ -186,8 +197,10 @@ def process(soundsource_point, reciever_point, dxf_filename, sphere_radius, nref
 
     # 音線ループで反射面のIDを履歴として記録します
     # 元コード524行目に対応
+    report("音線追跡", 0.0)
     reflection_history = lr.loop(soundsource_point, reciever_point, soundray_list, nref, mesh,
-                                 sphere_radius, recorder=recorder, two_sided=two_sided)
+                                 sphere_radius, recorder=recorder, two_sided=two_sided,
+                                 progress=lambda f: report("音線追跡", f))
 
     if recorder is not None:
         print("音線軌跡:", recorder.summary())
@@ -195,6 +208,7 @@ def process(soundsource_point, reciever_point, dxf_filename, sphere_radius, nref
 
     # 重複経路の削除
     # 元コード721行目に対応
+    report("重複経路の削除")
     reflection_history = ld.delete(reflection_history)
 
     # 非重複経路　バックトレース（虚音源法）
@@ -202,7 +216,8 @@ def process(soundsource_point, reciever_point, dxf_filename, sphere_radius, nref
     # 吸音率は Mesh が面ごとに持っているので、ここで別途渡す必要はない。
     pulses = ln.loop(soundsource_point, reciever_point, reflection_history, mesh,
                      sound_velocity=sound_velocity, band_number=len(frequencies),
-                     filename=pulse_filename, two_sided=two_sided)
+                     filename=pulse_filename, two_sided=two_sided,
+                     progress=lambda f: report("バックトレース", f))
 
     # 後部残響が nref で切れていないかの確認。
     # 残響時間は「エネルギーが 35 dB 減衰するまで」を見るので、
@@ -234,6 +249,7 @@ def process(soundsource_point, reciever_point, dxf_filename, sphere_radius, nref
         if len(pulses) == 0:
             print("[procedure] 受音した経路が無いのでインパルス応答は作れません")
         else:
+            report("インパルス応答の合成")
             impulse = ir.impulse_responce(
                 impulse_filename, pulses, octave_frequencies=frequencies,
                 atmosphere=atmosphere, sampling_frequency=sampling_frequency,
@@ -246,6 +262,7 @@ def process(soundsource_point, reciever_point, dxf_filename, sphere_radius, nref
             print("[procedure] インパルス応答が無いので残響時間は算出できません"
                   "（impulse_filename を指定してください）")
         else:
+            report("残響時間の算出")
             reverberation = rv.reverberation_time(
                 impulse[0], impulse[1], rt_filename=reverberation_filename,
                 decay_filename=decay_filename, frequencies=frequencies)
@@ -254,6 +271,7 @@ def process(soundsource_point, reciever_point, dxf_filename, sphere_radius, nref
     # 「どれだけ長く響くか」ではなく「初期の音が後から来る音に対してどれだけ強いか」
     clarity_result = None
     if clarity and impulse is not None:
+        report("明瞭度の指標")
         clarity_result = rv.clarity_measures(impulse[0], impulse[1],
                                             frequencies=frequencies)
         if clarity_filename is not None:

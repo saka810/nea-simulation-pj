@@ -42,6 +42,12 @@ from view_model import LAYER_PALETTE, _hex_to_rgb
 
 # 法線の裏側の色。HTML 版と同じ赤にしてある
 BACK_COLOR = "#C24540"
+
+# 裏面の不透明度を表面の何倍にするか。
+# **裏から見ている面はより透ける**ようにすると、室の外から中を覗いたときに
+# 手前の壁（法線が内向きなので裏から見ることになる）が邪魔をしにくい。
+# 0 にすると裏面が完全に消えて「向きの誤り」に気づけなくなるので、薄く残す。
+BACKFACE_OPACITY_RATIO = 0.3
 BG_BOTTOM = "#1c2027"
 BG_TOP = "#2e3540"
 TEXT_COLOR = "#d6dae2"
@@ -68,104 +74,116 @@ def japanese_font():
 PANEL_RATIO = 0.25
 
 
+class PanelItem:
+    """パネルに積んだ要素 1 つ。**高さと、置き直し方**だけを持つ。
+
+    ウィンドウの大きさが変わったら `place(y)` を呼び直すだけで並べ直せる。
+    """
+
+    __slots__ = ("height", "place")
+
+    def __init__(self, height, place):
+        self.height = height
+        self.place = place
+
+
 class ControlPanel:
-    """ウィンドウ左端の操作パネル（2026-08-15 追加）。
+    """ウィンドウ左端の操作パネル（2026-08-15）。
 
     以前はレイヤのチェックボックス・不透明度スライダ・操作説明を
     **3D 表示の上に直接重ねて**いたため、モデルが見えなくなるうえ、
-    要素どうしが重なって読めなくなっていた（ユーザー指摘）。
+    要素どうしが重なって読めなくなっていた。
+    そこで**ウィンドウを左右に分け、左 1/4 を操作パネル専用**にした
+    （`pv.Plotter(shape=(1,2), col_weights=[...])` の 2 レンダラ構成）。
 
-    そこで**ウィンドウを左右に分け、左 1/4 を操作パネル専用**にした。
-    さらに、このクラスが**上から順に積む**ので要素が重ならない
-    （y 座標を手で決めていたのが重なりの原因だった）。
+    ★**大きさが変わったら並べ直す**（2026-08-15 の作り直し）。
+    最初の版は「文字は絶対ピクセル・スライダは正規化座標」で置いていたので、
+    **ウィンドウを最大化すると両者がずれて重なった**（ユーザー指摘）。
+    いまは要素を `PanelItem`（高さ ＋ 置き直し方）として覚えておき、
+    リサイズのたびに上から積み直す。位置を決めるのは `relayout()` 1 か所だけ。
 
-    2 つのレンダラを使う（`pv.Plotter(shape=(1,2), col_weights=[1,4])`）。
-    文字はレンダラのビューポート内の座標で置かれるので、
-    パネル側のレンダラに追加すれば自然に左 1/5 に収まる。
-    一方**ウィジェット（チェックボックス・スライダ）はウィンドウ全体の座標**なので、
-    パネル側のレンダラを選んでから置いている。
+    文字はレンダラのビューポート内の座標で置かれるので、パネル側のレンダラに
+    追加すれば自然に左側へ収まる。ウィジェット（チェックボックス・スライダ）も
+    **選ばれているレンダラのビューポート**が基準なので、置く前にパネル側を選ぶ。
     """
 
-    LINE = 18           # 文字 1 行ぶんの高さ [px]（font_size 9 のとき）
     CHECK = 18          # チェックボックスの一辺 [px]
-    SLIDER = 80         # スライダ 1 つぶんの高さ [px]（値・バー・見出しの 3 段ぶん）
+    SLIDER = 34         # スライダのバーぶんの高さ [px]（見出しは別に 1 行取る）
     LABEL_FONT = 8      # レイヤ名など、横に長くなりがちな文字
+    LINE = 18           # font_size 9 のときの 1 行 [px]（外から参照される既定値）
 
     def __init__(self, plotter, font=None, margin=14, width_ratio=PANEL_RATIO):
         self.plotter = plotter
         self.font = font
         self.margin = margin
-        self.width = int(plotter.window_size[0] * width_ratio)
-        self.height = plotter.window_size[1]
         self.ratio = width_ratio
-        self.y = self.height - margin      # 上から下へ積んでいく
+        self.items = []
         self._widgets = []                 # 参照を残さないと GC で消える
+        self._measure()
+        self._watch_resize()
 
-    # ---- 配置の道具 ----------------------------------------------------
+    def _measure(self):
+        width, height = self.plotter.window_size
+        self.width = max(120, int(width * self.ratio))
+        self.height = max(120, int(height))
+
+    # ---- レンダラの選択 ------------------------------------------------
 
     def _panel(self):
-        """パネル側のレンダラを選ぶ（文字を置く前に呼ぶ）。"""
+        """パネル側のレンダラを選ぶ（文字やウィジェットを置く前に呼ぶ）。"""
         self.plotter.subplot(0, 0)
 
     def _model(self):
         """3D 側のレンダラに戻す。"""
         self.plotter.subplot(0, 1)
 
-    def gap(self, pixels=10):
-        self.y -= pixels
-        return self
+    # ---- 並べ直し ------------------------------------------------------
+
+    def _add(self, height, place):
+        item = PanelItem(height, place)
+        self.items.append(item)
+        return item
+
+    def relayout(self, render=False):
+        """いまのウィンドウの大きさに合わせて、上から順に積み直す。"""
+        self._measure()
+        y = self.height - self.margin
+        for item in self.items:
+            y -= item.height
+            item.place(y)
+        if render:
+            self.plotter.render()
+
+    def _watch_resize(self):
+        """ウィンドウの大きさが変わったら並べ直す。
+
+        VTK は `ConfigureEvent` でリサイズを知らせる。
+        off_screen では interactor が無いことがあるので、失敗しても黙って諦める
+        （その場合は作ったときの大きさのまま。画像書き出しなので問題ない）。
+        """
+        try:
+            self.plotter.iren.add_observer("ConfigureEvent",
+                                           lambda *a: self.relayout())
+        except Exception:
+            pass
+
+    # ---- 幅に収める ----------------------------------------------------
 
     @staticmethod
     def line_height(size):
         """フォントサイズから 1 行の高さ [px] を見積もる。
 
         VTK は行間を含めておよそ文字サイズの 2 倍を使う。
-        ここを小さく見積もると**文字どうしが重なる**（実際に重なった）。
+        小さく見積もると**文字どうしが重なる**（実際に重なった）。
         """
         return int(round(size * 2.0))
-
-    def text(self, message, size=9, color="#9aa2b1", indent=0):
-        """複数行の文字を置く。使ったぶんだけ下へ進むので、次の要素と重ならない。
-
-        ★VTK は**渡した位置がブロックの下端**で、そこから上へ書いていく。
-        だから先に高さぶん引いてから、その位置に置くのが正しい。
-        """
-        height = self.line_height(size)
-        available = self.width - 2 * self.margin - indent
-        message = "\n".join(self.fit(line, available, size)
-                            for line in str(message).split("\n"))
-        lines = message.count("\n") + 1
-        self.y -= height * lines
-        self._panel()
-        self.plotter.add_text(message, position=(self.margin + indent, self.y),
-                              font_size=size, color=color, font_file=self.font)
-        self._model()
-        return self
-
-    def reserve_text(self, lines, size=9, color=TEXT_COLOR):
-        """あとから書き換える文字のために場所を空け、その actor を返す。
-
-        行数が変わりうる表示（判定の内訳など）に使う。
-        **最大行数ぶんを確保**しておけば、行が減っても上に隙間ができるだけで重ならない。
-        """
-        self.y -= self.line_height(size) * lines
-        self._panel()
-        actor = self.plotter.add_text(" ", position=(self.margin, self.y),
-                                      font_size=size, color=color,
-                                      font_file=self.font)
-        self._model()
-        return actor
-
-    def heading(self, message):
-        self.gap(8)
-        return self.text(message, size=10, color=TEXT_COLOR)
 
     def fit(self, text, available, size=None):
         """パネルの幅に収まるように文字を切り詰める（末尾を … にする）。
 
-        レイヤ名は日本語で長くなりがちで、そのままだとパネルの外へはみ出して
-        **途中で切れて読めなくなる**。全角はおよそ文字サイズと同じ幅、
-        半角はその半分として見積もる（正確な幅は VTK 側でしか測れないので概算）。
+        レイヤ名は日本語で長くなりがちで、そのままだとパネルからはみ出して
+        **途中で切れて読めなくなる**。全角は文字サイズの約 1.9 倍、
+        半角は約 1 倍として見積もる（正確な幅は VTK 側でしか測れないので概算）。
         """
         size = size or self.LABEL_FONT
         width = 0.0
@@ -175,36 +193,94 @@ class ControlPanel:
                 return text[:max(1, i - 1)] + "…"
         return text
 
+    # ---- 要素を積む ----------------------------------------------------
+
+    def gap(self, pixels=10):
+        self._add(pixels, lambda y: None)
+        return self
+
+    def text(self, message, size=9, color="#9aa2b1", indent=0):
+        """複数行の文字を置く。
+
+        ★VTK は**渡した位置がブロックの下端**で、そこから上へ書いていく。
+        だから高さを引いた位置に置くのが正しい。
+        """
+        height = self.line_height(size)
+        lines = str(message).count("\n") + 1
+        self._panel()
+        actor = self.plotter.add_text(" ", position=(self.margin + indent, 0),
+                                      font_size=size, color=color,
+                                      font_file=self.font)
+        self._model()
+
+        def place(y, actor=actor, message=message, size=size, indent=indent):
+            # 幅は並べ直しのたびに測り直す（ウィンドウを広げたら切り詰めが緩む）
+            available = self.width - 2 * self.margin - indent
+            actor.SetInput("\n".join(self.fit(line, available, size)
+                                     for line in str(message).split("\n")))
+            actor.SetDisplayPosition(self.margin + indent, int(y))
+
+        self._add(height * lines, place)
+        return self
+
+    def reserve_text(self, lines, size=9, color=TEXT_COLOR):
+        """あとから書き換える文字のために場所を空け、その actor を返す。
+
+        行数が変わりうる表示（判定の内訳など）に使う。
+        **最大行数ぶんを確保**しておけば、行が減っても上に隙間ができるだけで重ならない。
+        """
+        self._panel()
+        actor = self.plotter.add_text(" ", position=(self.margin, 0),
+                                      font_size=size, color=color,
+                                      font_file=self.font)
+        self._model()
+        self._add(self.line_height(size) * lines,
+                  lambda y, a=actor: a.SetDisplayPosition(self.margin, int(y)))
+        return actor
+
+    def heading(self, message):
+        self.gap(8)
+        return self.text(message, size=10, color=TEXT_COLOR)
+
     def checkbox(self, label, value, callback, colour="#4cc9f0"):
         """チェックボックス 1 つと、その右のラベル。"""
-        self.y -= self.CHECK + 4
-        # ★ウィジェットは**そのとき選ばれているレンダラのビューポート**に置かれる。
-        #   パネル側を選んでおかないと 3D 側に出てしまう
         self._panel()
         widget = self.plotter.add_checkbox_button_widget(
-            callback, value=value, position=(self.margin, self.y),
+            callback, value=value, position=(self.margin, 0),
             size=self.CHECK, border_size=2, color_on=colour,
             color_off="#454c58", background_color="#2b303a")
-        self._widgets.append(widget)
-        left = self.margin + self.CHECK + 8
-        self.plotter.add_text(self.fit(label, self.width - left - self.margin),
-                              position=(left, self.y + 3),
-                              font_size=self.LABEL_FONT, color=TEXT_COLOR,
-                              font_file=self.font)
+        text = self.plotter.add_text(" ", position=(0, 0),
+                                     font_size=self.LABEL_FONT, color=TEXT_COLOR,
+                                     font_file=self.font)
         self._model()
+        self._widgets.append(widget)
+
+        def place(y, widget=widget, text=text, label=label):
+            left = self.margin + self.CHECK + 8
+            representation = widget.GetRepresentation()
+            representation.SetPlaceFactor(1.0)
+            representation.PlaceWidget([self.margin, self.margin + self.CHECK,
+                                        y, y + self.CHECK, 0.0, 0.0])
+            text.SetInput(self.fit(label, self.width - left - self.margin))
+            text.SetDisplayPosition(left, int(y) + 3)
+
+        self._add(self.CHECK + 4, place)
         return widget
 
     def slider(self, title, value_range, value, callback, fmt="%.2f"):
-        """横向きのスライダ。**見出しは英字にする**（VTK の既定フォントは日本語を持たない）。
+        """横向きのスライダ。見出しと値は**自前の文字**で出す。
 
-        位置は**パネル側ビューポートの正規化座標**で与える（0〜1 がパネルの幅）。
+        VTK のスライダにも見出し・値の表示はあるが、こちらで位置を動かしたときに
+        文字が追随せず**消えたように見えた**。自分で描けば位置も内容も確実で、
+        ついでに**日本語の見出しが使える**（VTK の既定フォントは日本語を持たない）。
         """
-        self.y -= self.SLIDER
+        label = self.reserve_text(1, size=9)
+
+        def show_value(v):
+            set_actor_text(label, f"{title}  {fmt % v}")
+
+        show_value(value)
         self._panel()
-        x0 = self.margin / self.width
-        x1 = (self.width - self.margin) / self.width
-        # バーの位置。**見出しはバーの下**に描かれるので、確保した帯の中に収まるよう上寄せする
-        y = (self.y + 44) / self.height
 
         # ★スライダは**生成時にコールバックを 1 回呼ぶ**。そのときはパネル側の
         #   レンダラが選ばれているので、コールバックの中で 3D の actor を作り直すと
@@ -212,20 +288,40 @@ class ControlPanel:
         #   生成時の 1 回は無視し、以降は必ず 3D 側を選んでから呼ぶ。
         state = {"ready": False}
 
-        def guarded(value):
+        def guarded(v):
             if not state["ready"]:
                 return
+            show_value(v)
             self._model()
-            callback(value)
+            callback(v)
 
         widget = self.plotter.add_slider_widget(
-            guarded, value_range, value=value, title=title,
-            pointa=(x0, y), pointb=(x1, y), style="modern", fmt=fmt,
-            color=TEXT_COLOR, title_color=TEXT_COLOR,
-            title_height=0.022, tube_width=0.004, slider_width=0.02)
+            guarded, value_range, value=value, title=None,
+            pointa=(0.0, 0.0), pointb=(1.0, 0.0), style="modern",
+            color=TEXT_COLOR, tube_width=0.004, slider_width=0.018)
+        # VTK 側の値表示は消す（自前のラベルと二重になるため）
+        widget.GetRepresentation().ShowSliderLabelOff()
         state["ready"] = True
-        self._widgets.append(widget)
         self._model()
+        self._widgets.append(widget)
+
+        def place(y, widget=widget):
+            # ★位置は**ウィンドウ全体**の正規化座標（`Normalized Display`）。
+            #   パネル側のレンダラに置いても、ビューポート基準にはならない。
+            #   パネルの幅で割ると右端がウィンドウの外まで伸び、
+            #   見えている部分だけが切り取られて**つまみの効く範囲がずれる**
+            window_width, window_height = self.plotter.window_size
+            representation = widget.GetRepresentation()
+            representation.GetPoint1Coordinate().SetValue(
+                self.margin / window_width, (y + self.SLIDER * 0.4) / window_height)
+            representation.GetPoint2Coordinate().SetValue(
+                (self.width - self.margin) / window_width,
+                (y + self.SLIDER * 0.4) / window_height)
+            # 座標を変えただけでは描き直されない（内部の計算結果を持っているため）
+            representation.Modified()
+            representation.BuildRepresentation()
+
+        self._add(self.SLIDER, place)
         return widget
 
 
@@ -335,7 +431,8 @@ def build_plotter(model, title="モデルビューア", off_screen=False,
             line_width=1, lighting=True, ambient=0.32, diffuse=0.70,
             specular=0.06, smooth_shading=False, opacity=alpha,
             backface_params={"color": BACK_COLOR, "ambient": 0.32,
-                             "diffuse": 0.70},
+                             "diffuse": 0.70,
+                             "opacity": alpha * BACKFACE_OPACITY_RATIO},
         )
         arrows = normal_arrows(poly, arrow_len)
         arrow_actors[name] = plotter.add_mesh(arrows, color="#f2f4f8",
@@ -431,6 +528,19 @@ def control_panel(plotter):
             or getattr(plotter, "_geosim_panel", None))
 
 
+def set_face_opacity(actor, value, ratio=BACKFACE_OPACITY_RATIO):
+    """面の不透明度を変える。**裏面は表面より薄く**する。
+
+    裏面は別の vtkProperty なので、表だけ変えると比率が崩れて
+    「裏から見るほうが濃い」という妙な見え方になる。
+    """
+    actor.GetProperty().SetOpacity(value)
+    back = actor.GetBackfaceProperty()
+    if back is not None:
+        back.SetOpacity(value * ratio)
+    return actor
+
+
 def set_actor_text(actor, text, corner=0):
     """`add_text()` が返す actor の文字を書き換える。
 
@@ -491,12 +601,12 @@ def add_opacity_control(plotter, font=None, panel=None, target_key="o"):
         targets = names if state["target"] == 0 else [target_name()]
         for name in targets:
             layers[name]["opacity"] = value
-            layers[name]["face"].GetProperty().SetOpacity(value)
+            set_face_opacity(layers[name]["face"], value)
         refresh_label()
         plotter.render()
 
-    panel.heading("不透明度")
-    slider = panel.slider("opacity", [0.0, 1.0], current_opacity(), apply)
+    panel.heading("透過設定")
+    slider = panel.slider("不透明度", [0.0, 1.0], current_opacity(), apply)
     label = panel.reserve_text(2)
     state["ready"] = True
 
@@ -548,6 +658,7 @@ def view(dxf_path, absorption=None, unit=None, orient_normals="cad",
         panel.heading("操作")
         panel.text("z/x/c/v 視点\nn 法線矢印\nw/s ワイヤ/面\nr リセット   q 終了",
                    color="#7f8794")
+        panel.relayout()
     if screenshot is not None:
         plotter.screenshot(screenshot)
         plotter.close()
