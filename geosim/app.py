@@ -181,7 +181,14 @@ def main():
                 traceback.print_exc()
             continue
         if action == "view":
-            # 計算し直さずに、保存済みの結果を見る
+            # 計算し直さずに、保存済みの結果を見る。
+            # **図も描き直す**（図の作り方を直したあと、古いプロジェクトを開いても
+            # 前の見た目のままだった。音線追跡はやり直さないので数秒で済む）
+            try:
+                run_project.redraw(project)
+            except Exception:
+                print("[app] 図を描き直せませんでした（保存済みの図をそのまま使います）:")
+                traceback.print_exc()
             _report_saved(project)
             if not a.no_view:
                 _visualise(project)

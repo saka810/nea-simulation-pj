@@ -1051,6 +1051,55 @@ def test_mode_buildup():
     check("mode_buildup.png が書ける", os.path.exists(path))
 
 
+# ---------------------------------------------------------------- 図の描き直し
+def test_redraw():
+    print("\n[21] 保存済みの結果から図を描き直す")
+    import shutil
+    import tempfile
+
+    import project as pj
+    import run_project
+
+    folder = tempfile.mkdtemp(prefix="geosim_redraw_")
+    project = pj.Project(folder, dxf=TEST_DXF, band_number=6, rays=2000,
+                         nref=8, radius=0.3, max_time=0.5, statistical=True,
+                         volume=6.0)
+    if os.path.exists(ABSORPTION):
+        project.absorption_csv = ABSORPTION
+    project.ensure_dirs()
+
+    # まず本番と同じ手順で 1 回だけ計算し、結果 CSV を作る
+    run_project.run(project, verbose=False, make_figures=True)
+    before = sorted(os.listdir(project.path(pj.FIGURE_DIR)))
+    check("計算すると図が書き出される", len(before) > 0, f"{len(before)} 枚")
+
+    # 図を全部消してから、**計算し直さずに**描き直せるか
+    shutil.rmtree(project.path(pj.FIGURE_DIR))
+    stamps = {name: os.path.getmtime(project.path(pj.RESULT_DIR, name))
+              for name in os.listdir(project.path(pj.RESULT_DIR))}
+    written = run_project.redraw(project, verbose=False)
+    after = sorted(os.listdir(project.path(pj.FIGURE_DIR)))
+    check("描き直しで同じ図が揃う", after == before,
+          f"{len(after)} 枚 / 足りない {sorted(set(before) - set(after))}")
+    check("描き直しは結果 CSV を書き換えない",
+          all(os.path.getmtime(project.path(pj.RESULT_DIR, n)) == t
+              for n, t in stamps.items()),
+          f"{len(stamps)} ファイル")
+    check("書き出したファイルの一覧が返る", len(written) == len(after))
+
+    # 結果が無いフォルダでは、黙って空の図を作らずに知らせる
+    empty = pj.Project(tempfile.mkdtemp(prefix="geosim_empty_"), dxf=TEST_DXF)
+    empty.ensure_dirs()
+    try:
+        run_project.redraw(empty, verbose=False)
+        check("結果が無ければエラーにする", False, "例外が出なかった")
+    except FileNotFoundError:
+        check("結果が無ければエラーにする（黙って空の図を作らない）", True)
+
+    shutil.rmtree(folder, ignore_errors=True)
+    shutil.rmtree(empty.folder, ignore_errors=True)
+
+
 def main():
     print("geosim 数値検証")
     print(f"  Python {sys.version.split()[0]} / numpy {np.__version__}")
@@ -1063,7 +1112,7 @@ def main():
                test_statistical_reverberation, test_ray_log,
                test_normals, test_check_model, test_clarity,
                test_project, test_resample, test_direction, test_modes,
-               test_mode_buildup):
+               test_mode_buildup, test_redraw):
         fn()
 
     failed = [name for name, ok in _results if not ok]

@@ -151,6 +151,93 @@ def _run_one(project, receiver, verbose=True, make_figures=True,
     return results
 
 
+def redraw(project, verbose=True):
+    """**計算し直さずに**、保存済みの結果から図を一式描き直す。
+
+    音線追跡（重い）はやり直さない。プロジェクトフォルダに残っている
+    `pulses.csv` と `ir.csv` を読み、そこから先だけを計算して `図/` を作り直す。
+    研修室（パルス 3901 本）で数秒。
+
+    使いどころ：
+    - 図の描き方を直したあと、**過去のプロジェクトに新しい図を反映する**
+    - 図だけ消してしまった／新しい図（`mode_buildup.png` など）を後から足す
+
+    ★パルス列とインパルス応答は**そのまま使う**（再合成しない）ので、
+      前回の計算結果と食い違うことはない。残響指標・明瞭度・統計残響式は
+      本番と同じ関数で計算し直すため、CSV の読み方を別に書かずに済む。
+    """
+    import read_dxffile as rd
+    import reverberation as rv
+    import absorption as ab
+    import loop_noredundancy as ln
+
+    saved = pj.load_results(project)
+    if saved["pulses"] is None:
+        raise FileNotFoundError(
+            f"{project.result_path('pulses')} がありません。先に計算してください")
+
+    atmosphere = Atmosphere(temperature=project.temperature,
+                            humidity=project.humidity,
+                            pressure=project.pressure)
+    frequencies = ab.octave_bands(project.band_number)
+
+    # ---- パルス列を PulseList に戻す ----
+    rows = np.atleast_1d(saved["pulses"])
+    names = [n for n in rows.dtype.names if n.startswith("energy_")]
+    pulses = ln.PulseList(len(names), atmosphere.sound_velocity)
+    pulses.reflection_count = rows["reflection_count"].astype(int)
+    pulses.time = rows["time_s"].astype(float)
+    pulses.distance = rows["distance_m"].astype(float)
+    pulses.direction = np.column_stack([rows["dir_x"], rows["dir_y"], rows["dir_z"]])
+    pulses.energy = np.column_stack([rows[n] for n in names])
+    if verbose:
+        print(f"[redraw] {pulses.summary()}")
+
+    # ---- モデル（外形寸法・容積・レイヤ別面積に要る）----
+    # 吸音率の作り方は procedure.process() と同じ手順に揃える
+    # （残響室法なら Paris の式で垂直入射へ、レイヤ対応は assignment で差し替え）
+    absorption_table = None
+    if project.absorption_path:
+        library = ab.MaterialLibrary.from_csv(project.absorption_path,
+                                              kind=project.absorption_kind)
+        absorption_table = library.absorption_table(project.assignment,
+                                                    band_number=project.band_number)
+    model = rd.read_model(project.dxf_path, band_number=project.band_number,
+                          absorption_table=absorption_table, unit=project.unit,
+                          orient_normals=project.orient_normals,
+                          flip_faces=_flip_faces_for(project), verbose=False)
+
+    results = {"model": model, "pulses": pulses, "frequencies": frequencies,
+               "atmosphere": atmosphere, "impulse": None,
+               "reverberation": None, "clarity": None, "statistical": None}
+
+    # ---- インパルス応答から先を計算し直す ----
+    impulse = saved["ir"]
+    if impulse is not None:
+        rows = np.atleast_1d(impulse)
+        results["impulse"] = (rows["time_s"].astype(float), rows["ir"].astype(float))
+        results["reverberation"] = rv.reverberation_time(
+            results["impulse"][0], results["impulse"][1], frequencies=frequencies)
+        results["clarity"] = rv.clarity_measures(
+            results["impulse"][0], results["impulse"][1], frequencies=frequencies)
+
+    # ---- 統計残響式（レイヤ別の面積・吸音率の図に要る）----
+    if project.statistical:
+        volume = project.volume
+        if volume is not None:
+            results["statistical"] = rv.statistical_reverberation(
+                model.mesh, volume, frequencies=frequencies, atmosphere=atmosphere)
+        else:
+            results["statistical"] = rv.statistical_reverberation_from_model(
+                model, frequencies=frequencies, atmosphere=atmosphere)
+
+    written = plots.save_all(project, results, verbose=verbose)
+    if verbose:
+        print(f"[redraw] 図を {len(written)} 枚書き出しました "
+              f"→ {project.path(pj.FIGURE_DIR)}")
+    return written
+
+
 def _flip_faces_for(project):
     """法線の手動指定を読む。面数の照合のために DXF を軽く 1 回読む。
 
@@ -176,12 +263,17 @@ def main():
     p = argparse.ArgumentParser(description="プロジェクトの条件で計算を回す")
     p.add_argument("folder", help="プロジェクトフォルダ（project.json があるところ）")
     p.add_argument("--no-figures", action="store_true", help="図を書き出さない")
+    p.add_argument("--redraw", action="store_true",
+                   help="計算し直さず、保存済みの結果から図だけ作り直す")
     a = p.parse_args()
 
     project = pj.Project.load(a.folder)
     if not project.dxf:
         raise SystemExit(f"{a.folder} に project.json が無いか、DXF が設定されていません。"
                          f"先に app.py で条件を入力してください")
+    if a.redraw:
+        redraw(project)
+        return
     run(project, make_figures=not a.no_figures)
 
 
