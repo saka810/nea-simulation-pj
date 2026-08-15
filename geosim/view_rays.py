@@ -689,7 +689,7 @@ def save_movie(raylog, model, filename, index=None, frames=240, band=None,
 # ------------------------------------------------------------------------------
 
 def view(dxf_path, raylog_path, mode="both", absorption=None, unit=None,
-         orient_normals="cad", received_only=False, max_rays=60,
+         band_number=None, orient_normals="cad", received_only=False, max_rays=60,
          max_particles=None, pool_size=2000,
          max_reflection=None, colour="energy", band=None, frames=240,
          opacity=0.12, layer_opacity=None, movie=None, point_size=9.0,
@@ -703,8 +703,10 @@ def view(dxf_path, raylog_path, mode="both", absorption=None, unit=None,
     pool_size
         描く候補として抱えておく音線の本数。スライダの上限になる。
     """
+    # バンド数は計算時と揃える。既定のままだと「列が足りない」と注意が出て紛らわしい
+    kwargs = {} if band_number is None else {"band_number": band_number}
     model = rd.read_model(dxf_path, unit=unit, absorption_table=absorption,
-                          orient_normals=orient_normals)
+                          orient_normals=orient_normals, **kwargs)
     raylog = RayLog(raylog_path)
     print(f"[view_rays] {raylog.summary()}")
 

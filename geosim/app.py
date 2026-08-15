@@ -50,7 +50,8 @@ def _visualise(project, results=None):
         # 左パネルの reflections スライダで伸ばしていける
         vr.view(project.dxf_path, raylog, mode="both",
                 absorption=project.absorption_path,
-                unit=project.unit, orient_normals=project.orient_normals,
+                unit=project.unit, band_number=project.band_number,
+                orient_normals=project.orient_normals,
                 received_only=False, max_rays=2000, max_reflection=1,
                 colour="ray", opacity=0.10, frames=300, point_size=7)
     except Exception:
