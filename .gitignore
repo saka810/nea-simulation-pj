@@ -15,10 +15,12 @@ venv/
 # 形式のサンプルは data/absorption_sample.csv にある。
 /absorption.csv
 
-# 実案件のモデルと吸音率データ。fortran/ や absorption.csv と同じ扱いでローカルのみ。
+# 実案件のプロジェクトフォルダ（モデル・吸音率・計算結果）。
+# fortran/ や absorption.csv と同じ扱いでローカルのみ。
 # このリポジトリは public なので、客先の図面と材料データは置かない。
 # 何を試したか・何が分かったかは Claude履歴 と PROGRAM_STRUCTURE.md に書き残す。
-/JRE/
+# ★プロジェクトフォルダはリポジトリの外（デスクトップ等）に置くのが本来。
+#   中に作ってしまったときのために、名前を足していく。
 /JR/
 
 # 参考文献の PDF 本体は Git 管理外（このリポジトリは public のため）。
