@@ -367,7 +367,7 @@ def direction_histogram(direction, energy, head_azimuth=0.0,
 
 def propagation_direction(path, direction, energy, distance=None, time=None,
                           head_azimuth=0.0, frequencies=None, band=None,
-                          dynamic_range=30.0):
+                          dynamic_range=30.0, reflection_count=None):
     """受音点にどの方向から音が来ているかを、真上から見た図にする（G-5）。
 
     左が**全体**（初期と後期を重ねる）、右が**バンド別**。
@@ -375,12 +375,27 @@ def propagation_direction(path, direction, energy, distance=None, time=None,
 
     半径は**最大を 0 dB としたときのレベル**で、外側ほど強い。
     `dynamic_range` dB より弱い方向は中心に潰れる（見たいのは強い方向の偏りなので）。
+
+    `reflection_count` を渡すと、**直接音（反射 0 回）の方向を矢印で示す**。
+    どちらから直接届いているかは真っ先に知りたい情報なので、
+    分布の線に埋もれないよう別に描く（遮蔽されていて直接音が無ければ描かない）。
     """
     direction = np.atleast_2d(np.asarray(direction, dtype=float))
     energy = np.atleast_2d(np.asarray(energy, dtype=float))
     if distance is not None:
         # 受音点に届くエネルギー（距離減衰を入れる）
         energy = energy / np.asarray(distance, dtype=float)[:, None] ** 2
+
+    # 直接音（反射 0 回）の方位。頭の正面を 0 とした相対方位で持つ
+    direct_azimuth = None
+    if reflection_count is not None:
+        direct = np.nonzero(np.asarray(reflection_count) == 0)[0]
+        if len(direct):
+            # 複数あることは無いはずだが、あれば最も強いものを採る
+            pick = direct[int(np.argmax(energy[direct].sum(axis=1)))]
+            angle = np.arctan2(direction[pick, 1], direction[pick, 0])
+            direct_azimuth = float(np.mod(angle - np.deg2rad(head_azimuth),
+                                          2.0 * np.pi))
 
     fig, axes = _figure(1, 2, figsize=(13, 6.5))
 
@@ -424,9 +439,19 @@ def propagation_direction(path, direction, energy, distance=None, time=None,
             ax.plot(x, y, color=colour, linewidth=1.8, label=label, zorder=4)
             ax.fill(x, y, color=colour, alpha=0.18, zorder=3)
 
+        # 直接音の方向。分布の線に埋もれないよう、外から中心へ向かう矢印で示す
+        if direct_azimuth is not None:
+            x, y = -np.sin(direct_azimuth), np.cos(direct_azimuth)
+            ax.annotate("", xy=(x * 0.20, y * 0.20), xytext=(x * 1.30, y * 1.30),
+                        arrowprops=dict(arrowstyle="-|>", color="#ff5f5f",
+                                        linewidth=2.4, shrinkA=0, shrinkB=0),
+                        zorder=7)
+            ax.text(x * 1.36, y * 1.36, "直接音", color="#ff5f5f", fontsize=9,
+                    ha="center", va="center", zorder=7)
+
         _head_patch(ax, 0.15)
-        ax.set_xlim(-1.45, 1.45)
-        ax.set_ylim(-1.35, 1.35)
+        ax.set_xlim(-1.55, 1.55)
+        ax.set_ylim(-1.45, 1.45)
         legend = ax.legend(loc="lower right", fontsize=8)
         if legend is not None:
             legend.get_frame().set_facecolor(PANEL)
@@ -501,17 +526,37 @@ def schroeder_frequency(reverberation_time, volume):
     return 2000.0 * np.sqrt(float(reverberation_time) / float(volume))
 
 
+def spectrum_peaks(frequency, level, prominence=3.0, distance_hz=2.0):
+    """スペクトルの山を拾う。
+
+    戻り値は山の添字。`prominence` [dB] より高く盛り上がっていて、
+    互いに `distance_hz` 以上離れているものだけを残す
+    （隣り合う細かい揺れを全部拾うと印だらけになって逆に読めない）。
+    """
+    from scipy.signal import find_peaks
+
+    step = float(frequency[1] - frequency[0])
+    indices, _ = find_peaks(level, prominence=prominence,
+                            distance=max(1, int(round(distance_hz / step))))
+    return indices
+
+
 def mode_distribution(path, time, ir, lengths=None, volume=None,
                       reverberation_time=None, sound_velocity=343.0,
-                      max_frequency=300.0):
+                      max_frequency=200.0, label_peaks=8):
     """受音点のモード分布（G-6）。
 
     上段：インパルス応答の**スペクトル**（低域）。山が立っているところが
-          その受音点で強く出ている固有振動。
+          その受音点で強く出ている固有振動。**山には印を付ける**
+          （減衰が大きい室ではモードの幅が広く、目で山を拾いにくいため）。
     下段：外形寸法から求めた**直方体の固有周波数**と、その累積数。
 
     ★寸法は外形（バウンディングボックス）なので、室が直方体でなければ
       **目安**にしかならない。それでも「低域にどれくらい隙間があるか」は分かる。
+
+    ★**山が鋭くないのは正しい**。モードの半値幅はおよそ `2.2 / T` [Hz] で、
+      T = 0.5 s なら 4.4 Hz にもなる。残響が短い室ほど山はなだらかになる。
+      図にもこの値を書き添えてある。
     """
     time = np.asarray(time, dtype=float)
     ir = np.asarray(ir, dtype=float)
@@ -540,9 +585,24 @@ def mode_distribution(path, time, ir, lengths=None, volume=None,
     axes[0].axvspan(separable, max_frequency, color="#2a3140", alpha=0.35, zorder=0)
     for f in modes[modes <= separable]:
         axes[0].axvline(f, color="#8b929e", linewidth=0.7, alpha=0.65, zorder=1)
-    axes[0].plot(frequency, level, color=ACCENT, linewidth=1.0, zorder=3)
+    axes[0].plot(frequency, level, color=ACCENT, linewidth=1.2, zorder=3)
+
+    # 山に印を付ける。減衰が大きい室ではモードの幅が広く、
+    # 線を眺めただけでは「どこが山か」を拾いにくい（ユーザー指摘）
+    found = spectrum_peaks(frequency, level)
+    if len(found):
+        axes[0].plot(frequency[found], level[found], "v", color="#ffd166",
+                     markersize=6, linestyle="none", zorder=5,
+                     label=f"スペクトルの山（{len(found)} 個）")
+        # 強い順にいくつかだけ周波数を書く（全部書くと読めない）
+        strongest = found[np.argsort(level[found])[::-1][:label_peaks]]
+        for i in strongest:
+            axes[0].annotate(f"{frequency[i]:.0f}", (frequency[i], level[i]),
+                             textcoords="offset points", xytext=(0, 9),
+                             ha="center", color="#ffd166", fontsize=8, zorder=6)
+
     axes[0].set_xlim(0, max_frequency)
-    axes[0].set_ylim(-60, 5)
+    axes[0].set_ylim(-60, 8)
     if len(modes):
         axes[0].plot([], [], color="#8b929e", linewidth=0.7,
                      label="直方体の固有周波数（外形寸法から）")
@@ -556,6 +616,14 @@ def mode_distribution(path, time, ir, lengths=None, volume=None,
         axes[0].plot([], [], color="#e5484d", linestyle="--", linewidth=1.2,
                      label=f"シュレーダー周波数 {f_schroeder:.0f} Hz")
     axes[0].legend(loc="lower right", fontsize=8)
+
+    # **山がなだらかなのは正しい**ことを図の中で断っておく。
+    # モードの半値幅は 2.2/T で決まり、残響が短い室ほど広がる
+    if reverberation_time:
+        axes[0].set_title(
+            f"受音点のスペクトル（最大を 0 dB / モードの半値幅は "
+            f"約 2.2÷T = {2.2 / reverberation_time:.1f} Hz）",
+            color=TEXT, fontsize=11, pad=10)
 
     _style(axes[1], "固有周波数の累積数（外形寸法から）", "周波数 [Hz]", "累積モード数")
     if len(modes):
@@ -638,7 +706,8 @@ def save_all(project, results, verbose=True):
              pulse_list.direction, pulse_list.energy,
              distance=pulse_list.distance, time=pulse_list.time,
              head_azimuth=getattr(project, "head_azimuth", 0.0),
-             frequencies=results.get("frequencies"))
+             frequencies=results.get("frequencies"),
+             reflection_count=pulse_list.reflection_count)
 
     # ⑥ モード分布。寸法は外形（バウンディングボックス）から
     model = results.get("model")

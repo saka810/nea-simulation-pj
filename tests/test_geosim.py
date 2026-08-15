@@ -862,6 +862,17 @@ def test_direction():
     check("上下の傾きは方位に影響しない（水平面へ投影）",
           int(np.argmax(totals)) == 0)
 
+    # 直接音（反射 0 回）の方位が、音源と受音点の位置から出る値と一致するか
+    source, receiver = np.array([7.5, 7.0, 1.5]), np.array([4.5, 9.0, 1.2])
+    toward_source = source - receiver
+    want = np.rad2deg(np.arctan2(toward_source[1], toward_source[0])) % 360.0
+    unit = toward_source / np.linalg.norm(toward_source)
+    edges, totals = plots.direction_histogram([unit], [1.0], head_azimuth=0.0)
+    got = np.rad2deg(edges[int(np.argmax(totals))])
+    check("直接音の方位が幾何どおりの区間に入る",
+          abs(((got + 5.0) - want + 180.0) % 360.0 - 180.0) < 5.0,
+          f"区間 {got:.0f}° / 幾何 {want:.1f}°")
+
     # エネルギーが方位ごとに足し合わされるか
     edges, totals = plots.direction_histogram([[1.0, 0, 0], [1.0, 0, 0], [0, 1.0, 0]],
                                               [2.0, 3.0, 7.0], head_azimuth=0.0)
@@ -895,6 +906,20 @@ def test_modes():
     long_room, _ = plots.room_modes([10.0, 2.0, 2.0], 100.0, c)
     check("長い室ほど最低次が低い", long_room[0] < got[0],
           f"{long_room[0]:.2f} Hz（10 m の軸モード {0.5 * c / 10.0:.2f} Hz）")
+
+    # スペクトルの山の検出：合成した山をそのまま拾えるか
+    f = np.linspace(20.0, 200.0, 1800)
+    level = np.full_like(f, -40.0)
+    for centre in (40.0, 80.0, 150.0):
+        level += 30.0 * np.exp(-0.5 * ((f - centre) / 2.0) ** 2)
+    found = plots.spectrum_peaks(f, level)
+    check("合成した 3 つの山を拾える", len(found) == 3, f"{len(found)} 個")
+    check("拾った位置が合っている",
+          np.allclose(np.round(f[found]), [40.0, 80.0, 150.0], atol=1.0),
+          np.round(f[found], 1).tolist())
+
+    flat = np.zeros_like(f)
+    check("平坦なら山は拾わない", len(plots.spectrum_peaks(f, flat)) == 0)
 
     # シュレーダー周波数 2000√(T/V)
     check("シュレーダー周波数が 2000√(T/V)",
