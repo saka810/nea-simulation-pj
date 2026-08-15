@@ -86,7 +86,8 @@ def estimate_volume(dxf_path, unit=None):
 class SetupWindow:
     """条件入力のウィンドウ。`run()` が (Project, 押されたボタン) を返す。
 
-    ボタンは 'run'（計算する）/ 'normals'（法線を確認する）/ None（閉じた）。
+    ボタンは 'run'（計算する）/ 'normals'（法線を確認する）/
+    'view'（前回の結果を見る）/ None（閉じた）。
     """
 
     def __init__(self, project=None, folder=None):
@@ -200,6 +201,10 @@ class SetupWindow:
 
         ttk.Button(frame, text="閉じる", command=self._close).pack(side="right", padx=4)
         ttk.Button(frame, text="計算する ▶", command=self._on_run).pack(side="right", padx=4)
+        # 既存プロジェクトを開いたときは、計算し直さずに前回の結果を見たいことがある
+        self.view_button = ttk.Button(frame, text="前回の結果を見る",
+                                      command=self._on_view)
+        self.view_button.pack(side="right", padx=4)
         ttk.Button(frame, text="法線を確認…", command=self._on_normals).pack(side="right",
                                                                            padx=4)
         ttk.Button(frame, text="条件だけ保存", command=self._on_save).pack(side="right",
@@ -361,6 +366,16 @@ class SetupWindow:
             return
         self.project.save()
         self.action = "normals"
+        self.root.destroy()
+
+    def _on_view(self):
+        """計算し直さずに、保存済みの結果を開く。"""
+        if not pj.has_results(self.project):
+            messagebox.showinfo("結果がありません",
+                                f"{self.project.folder} にまだ計算結果がありません。\n"
+                                f"「計算する ▶」を先に実行してください。")
+            return
+        self.action = "view"
         self.root.destroy()
 
     def _on_run(self):

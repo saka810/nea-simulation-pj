@@ -72,6 +72,45 @@ def _run_with_progress(project):
                   f"受音球 {project.radius} m"))
 
 
+def _report_saved(project):
+    """保存済みの CSV から要約を出す（計算し直さずに前回の結果を見るとき）。
+
+    計算直後の `_report` と違い、手元にあるのは CSV だけなので読み直して並べる。
+    **同じ見え方にする**ことで「いま計算したのか、前回のものか」で
+    読み方が変わらないようにしている。
+    """
+    import numpy as np
+    import project as pj
+
+    print("\n" + "=" * 70)
+    print(f"前回の結果を読み込みました → {project.folder}")
+    print("=" * 70)
+
+    saved = pj.load_results(project)
+    rt, stat = saved.get("rt"), saved.get("statistical")
+    if rt is None:
+        print("  残響指標の CSV がありません")
+    else:
+        # CSV の列名はそのままだと読みにくいので短くする
+        short = {"EDT_s": "EDT", "T20_s": "T20", "T30_s": "T30",
+                 "curvature_percent": "曲率%"}
+        rt = np.atleast_1d(rt)
+        names = [n for n in rt.dtype.names if n != "frequency_hz"]
+        print("  " + "周波数".rjust(8)
+              + "".join(f"{short.get(n, n):>9}" for n in names)
+              + ("" if stat is None else f"{'Sabine':>9}{'Eyring':>9}"))
+        stat = None if stat is None else np.atleast_1d(stat)
+        for i, fc in enumerate(rt["frequency_hz"]):
+            cells = "".join(f"{rt[n][i]:9.3f}" for n in names)
+            extra = ("" if stat is None
+                     else f"{stat['sabine_s'][i]:9.3f}{stat['eyring_s'][i]:9.3f}")
+            print(f"  {fc:7.0f}Hz{cells}{extra}")
+
+    clarity = saved.get("clarity")
+    print(f"\n  結果 CSV : {project.path(pj.RESULT_DIR)}")
+    print(f"  図 PNG   : {project.path(pj.FIGURE_DIR)}")
+
+
 def _report(project, results):
     """計算が終わったあとの要約を文字で出す。"""
     import project as pj
@@ -128,7 +167,7 @@ def main():
             _visualise(project, results)
         return
 
-    # 条件入力 → 法線確認 の往復。法線を保存したら入力に戻る
+    # 条件入力 → 法線確認 / 結果表示 の往復。どちらも終わったら入力に戻る
     while True:
         project, action = setup_window.ask(project=project)
         if action is None:
@@ -140,6 +179,12 @@ def main():
             except Exception:
                 print("[app] 法線の確認ウィンドウでエラーが起きました:")
                 traceback.print_exc()
+            continue
+        if action == "view":
+            # 計算し直さずに、保存済みの結果を見る
+            _report_saved(project)
+            if not a.no_view:
+                _visualise(project)
             continue
         break
 
