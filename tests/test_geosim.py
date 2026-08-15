@@ -939,6 +939,88 @@ def test_modes():
           f"数え上げ {len(counted)} / 近似 {approx:.0f}")
 
 
+# ---------------------------------------------------------------- 積み上げ
+def test_mode_buildup():
+    print("\n[20] 経路差からのモードの積み上げ（G-6b）")
+    import plots
+
+    c = 343.0
+
+    # ---- 1 次元室（平行 2 面）で軸モードが出るか ----
+    # 虚音源は x = 2nL ± xs。経路差が波長の整数倍になる周波数で強め合うはず
+    L, xs, xr = 4.0, 1.0, 3.0
+    n = np.arange(-400, 401)
+    distance = np.abs(xr - np.concatenate([2 * n * L + xs, 2 * n * L - xs]))
+    distance = distance[distance > 1e-9]
+    time = distance / c
+
+    f, H = plots.pulse_spectrum(time, np.ones_like(time),
+                                max_time=time.max() * 1.05, bin_rate=16000.0)
+    keep = (f > 5.0) & (f <= 200.0)
+    f, magnitude = f[keep], np.abs(H[keep])
+    level = 20.0 * np.log10(np.maximum(magnitude, 1e-9))
+    found = plots.spectrum_peaks(f, level, prominence=6.0)
+    found = found[magnitude[found] > np.sqrt(len(time))]
+    peaks = f[found]
+
+    # 軸モード f = m*c/(2L)。ただし音源・受音点が節に乗る次数は出ない（正しい）
+    axial = np.array([m * c / (2.0 * L) for m in range(1, 6)])
+    shape = np.array([np.cos(m * np.pi * xs / L) * np.cos(m * np.pi * xr / L)
+                      for m in range(1, 6)])
+    want = axial[np.abs(shape) > 1e-9]
+    want = want[want <= 200.0]
+    hit = [np.min(np.abs(peaks - w)) < 1.0 for w in want]
+    check("平行 2 面の軸モードが山として出る",
+          len(peaks) and all(hit),
+          f"期待 {np.round(want, 1)} / 検出 {np.round(peaks, 1)}")
+
+    # xs=1, xr=3, L=4 では 2 次（85.8 Hz）が両方とも節になるので出てはいけない
+    node = axial[np.abs(shape) <= 1e-9]
+    check("節に当たる次数は出ない（モード形状まで再現している）",
+          all(np.min(np.abs(peaks - w)) > 1.0 for w in node),
+          f"節 {np.round(node, 1)} Hz")
+
+    # ---- 「重なった本数」がそのまま値になるか ----
+    # 同じ時刻のパルスを k 本置けば、どの周波数でも |H| = k
+    for k in (1, 2, 5):
+        f2, H2 = plots.pulse_spectrum(np.full(k, 0.01), np.ones(k),
+                                      max_time=0.1, bin_rate=8000.0)
+        check(f"同位相に {k} 本重なれば値は {k}",
+              np.allclose(np.abs(H2), float(k)),
+              f"最大 {np.abs(H2).max():.3f} / 最小 {np.abs(H2).min():.3f}")
+
+    # 半波長ずれた 2 本は打ち消し合う（位相を見ている証拠）
+    half = 0.5 / 100.0                      # 100 Hz の半周期
+    f3, H3 = plots.pulse_spectrum(np.array([0.01, 0.01 + half]), np.ones(2),
+                                  max_time=0.2, bin_rate=64000.0)
+    at100 = int(np.argmin(np.abs(f3 - 100.0)))
+    check("半波長ずれた 2 本は打ち消し合う", abs(H3[at100]) < 0.02,
+          f"|H(100 Hz)| = {abs(H3[at100]):.4f}")
+
+    # ---- 重み（減衰）が効いているか ----
+    # 完全反射は 1/d、吸音ありは sqrt(E)/d。1 本だけならその比がそのまま出る
+    f4, H4 = plots.pulse_spectrum(np.array([0.02]), np.array([[1.0, 0.25]]),
+                                  max_time=0.1, bin_rate=8000.0)
+    check("重みの比がそのまま振幅の比になる",
+          np.allclose(np.abs(H4[:, 1]) / np.abs(H4[:, 0]), 0.25),
+          "0.25 倍")
+
+    # ---- バンドの割り当て ----
+    bands = np.array([63.0, 125.0, 250.0, 500.0])
+    index = plots._band_of(np.array([60.0, 90.0, 130.0, 400.0]), bands)
+    check("周波数に最も近いオクターブバンドを当てる（対数距離）",
+          list(index) == [0, 1, 1, 3], f"{list(index)}")
+
+    # ---- 図が書けるか（吸音ありと完全反射で差が出るか）----
+    import tempfile
+    energy = np.column_stack([np.full(len(time), 0.5)] * 4)
+    path = os.path.join(tempfile.mkdtemp(prefix="geosim_"), "mode_buildup.png")
+    plots.mode_buildup(path, time, energy, distance=distance,
+                       frequencies=bands, lengths=[L, 3.0, 2.5],
+                       volume=L * 3.0 * 2.5, reverberation_time=0.5)
+    check("mode_buildup.png が書ける", os.path.exists(path))
+
+
 def main():
     print("geosim 数値検証")
     print(f"  Python {sys.version.split()[0]} / numpy {np.__version__}")
@@ -950,7 +1032,8 @@ def main():
                test_atmosphere, test_absorption, test_impulse, test_reverberation,
                test_statistical_reverberation, test_ray_log,
                test_normals, test_check_model, test_clarity,
-               test_project, test_resample, test_direction, test_modes):
+               test_project, test_resample, test_direction, test_modes,
+               test_mode_buildup):
         fn()
 
     failed = [name for name, ok in _results if not ok]

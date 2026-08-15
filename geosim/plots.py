@@ -9,6 +9,9 @@
     clarity.png            C50 / C80 / D50 / Ts（明瞭度系）
     absorption.png         レイヤ別の吸音率と面積
     pulses.png             パルス列（到来時刻とエネルギー）
+    direction.png          伝搬方向（真上から見た人と、音の来る向き）
+    modes.png              受音点のスペクトルと直方体の固有周波数
+    mode_buildup.png       経路差から見たモードの積み上げと、吸音の効果
 
 画面には出さず**ファイルに書くだけ**なので Agg バックエンドを使う
 （GUI のイベントループと取り合わないようにするため）。
@@ -651,6 +654,227 @@ def mode_distribution(path, time, ir, lengths=None, volume=None,
 
 
 # ------------------------------------------------------------------------------
+# ⑥-2 モードの積み上げ（経路差からの重なり）
+# ------------------------------------------------------------------------------
+
+def pulse_spectrum(time, amplitude, max_time=None, bin_rate=8000.0):
+    """パルス列を**位相込みで足し合わせて**周波数特性にする。
+
+        H(f) = Σ_n a_n exp(-i 2π f t_n)
+
+    到来時刻の差がそのまま経路差なので、`exp` の中身は経路差ぶんの位相。
+    **同じ位相で重なった経路だけが足し算になる**（ずれていれば打ち消し合う）。
+    だから `a_n = 1`（減衰を考えない）で計算すると、`|H(f)|` は
+    「その周波数で同位相に重なった経路の本数」そのものになる。
+    1 本なら 1、2 本重なれば 2。3 本がばらばらの向きなら 1 前後にしかならない。
+
+    **経路差から固有周波数が出る理由**：往復の経路差 Δ で戻ってきた音は、
+    Δ が波長の整数倍のときに元の音と強め合う。つまり `f = m·c/Δ`。
+    直方体の x 方向の往復は Δ = 2Lx なので `f = m·c/(2Lx)` となり、
+    これは軸モード `f = (c/2)·(m/Lx)` に一致する。`room_modes` の式そのもの。
+
+    **速さ**：素直に書くと「パルス本数 × 周波数点数」の掛け算になって重いが、
+    到来時刻を細かい格子に**投げ込んで（ヒストグラムにして）から FFT** すれば
+    O(n log n) で済む。要はインパルス応答を作るのと同じ手順なので、
+    パルスが 100 万本あっても一瞬で終わる（重み違いで 3 回やっても同じ）。
+
+    引数:
+        time      (n,)  到来時刻 [s]
+        amplitude (n,) | (n,k)  重み（**振幅**。エネルギーなら sqrt を取ってから渡す）
+        bin_rate  時刻を丸める格子の細かさ [Hz]。8 kHz なら 0.125 ms = 4.3 cm 刻みで、
+                  200 Hz での位相誤差は最大 4.5°。低域の図には十分
+
+    戻り値: (周波数 (m,), H (m,) または (m,k) complex)
+    """
+    time = np.asarray(time, dtype=float)
+    amplitude = np.asarray(amplitude, dtype=float)
+    single = amplitude.ndim == 1
+    amplitude = amplitude.reshape(len(time), -1)
+
+    if max_time is None:
+        max_time = float(time.max()) * 1.05 + 1e-3
+    count = max(2, int(round(max_time * bin_rate)))
+
+    index = np.rint(time * bin_rate).astype(int)
+    keep = (index >= 0) & (index < count)
+
+    binned = np.empty((count, amplitude.shape[1]))
+    for k in range(amplitude.shape[1]):
+        binned[:, k] = np.bincount(index[keep], weights=amplitude[keep, k],
+                                   minlength=count)
+
+    spectrum = np.fft.rfft(binned, axis=0)
+    frequency = np.fft.rfftfreq(count, d=1.0 / bin_rate)
+    return frequency, (spectrum[:, 0] if single else spectrum)
+
+
+def _band_of(frequency, band_frequencies):
+    """各周波数点に、いちばん近いオクターブバンドの添字を割り当てる（対数距離）。"""
+    band_frequencies = np.asarray(band_frequencies, dtype=float)
+    ratio = np.log2(np.maximum(frequency, 1e-6)[:, None] / band_frequencies[None, :])
+    return np.argmin(np.abs(ratio), axis=1)
+
+
+def _spread_labels(index, frequency, strength, count, min_gap):
+    """強い順に拾いつつ、**すでに拾ったものと近すぎるものは飛ばす**。
+
+    山の印は全部付けてよいが、文字まで全部書くと重なって読めなくなる
+    （実際に「125 Hz」と「128 Hz」が重なった）。
+    """
+    picked = []
+    for i in index[np.argsort(strength[index])[::-1]]:
+        if len(picked) >= count:
+            break
+        if all(abs(frequency[i] - frequency[j]) >= min_gap for j in picked):
+            picked.append(i)
+    return picked
+
+
+def mode_buildup(path, time, energy, distance=None, frequencies=None,
+                 lengths=None, volume=None, reverberation_time=None,
+                 sound_velocity=343.0, max_frequency=200.0,
+                 min_frequency=None, max_time=None,
+                 bin_rate=8000.0, label_peaks=6):
+    """経路差から見たモードの積み上げと、**吸音の効き方**（G-6b）。
+
+    上段：**減衰をいっさい考えずに**、経路差から決まる位相だけで経路を積み上げる。
+          その周波数で同位相に重なった経路の本数がそのまま縦軸になる。
+          室形状だけで決まる図で、吸音材を貼っても変わらない。
+          ばらばらに重なったときの目安 √N を引いてあり、**これを超えている山が
+          「本当に強め合っている周波数」**。固有周波数の線とだいたい合う。
+
+    下段：同じ足し算に減衰を入れる。2 本の線の差が**吸音の効果**。
+          ・完全反射：距離減衰 1/d だけ。壁は 100% 跳ね返る
+          ・設計の吸音：距離減衰 + 各面の吸音率（斜入射のエネルギー反射率）
+          どちらも直接音（1/d₀）を 0 dB にしてあるので、**0 dB より上に出た分が
+          室の反響ぶん**。塗りつぶした帯が、その周波数で吸音が削った量。
+
+    ★空気吸収は入れていない。この帯域では効かないため
+      （125 Hz で 100 m 進んで 0.05 dB。ISO 9613-1、20℃ 湿度 40%）。
+
+    ★吸音率はオクターブバンドでしか持っていないので、各周波数点には**いちばん
+      近いバンドの値**を当てる。6 バンド（125 Hz 始まり）だと 88 Hz より下は
+      すべて 125 Hz の吸音率になる。低域を細かく見たいときは 8 バンドにすること。
+
+    ★パルス列は受音球が拾えた経路の**標本**なので、本数の絶対値は音線数と
+      受音球の半径で変わる。**山と谷の位置**と**2 本の線の差**を読むための図。
+
+    引数:
+        time     (n,)      到来時刻 [s]
+        energy   (n,b)     バンド別エネルギー（**面の吸音だけ**が入っている。
+                           距離減衰と空気吸収は impulse.py 側で掛ける約束）
+        distance (n,)      経路長 [m]。省略すると time × 音速
+    """
+    time = np.asarray(time, dtype=float)
+    energy = np.atleast_2d(np.asarray(energy, dtype=float))
+    if distance is None:
+        distance = time * sound_velocity
+    distance = np.maximum(np.asarray(distance, dtype=float), 1e-9)
+    if frequencies is None:
+        from absorption import octave_bands
+        frequencies = octave_bands(energy.shape[1])
+    frequencies = np.asarray(frequencies, dtype=float)
+
+    direct = float(distance.min())          # 直接音（いちばん短い経路）を基準にする
+
+    # 重み 3 種。**振幅**なのでエネルギーは sqrt を取る
+    weights = np.column_stack([
+        np.ones_like(distance),             # ①減衰なし＝本数の積み上げ
+        1.0 / distance,                     # ②完全反射（距離減衰のみ）
+        np.sqrt(energy) / distance[:, None],  # ③設計の吸音（バンドごと）
+    ])
+    f, H = pulse_spectrum(time, weights, max_time=max_time, bin_rate=bin_rate)
+
+    modes, _ = (room_modes(lengths, max_frequency, sound_velocity)
+                if lengths is not None else (np.array([]), None))
+
+    # **0 Hz では全部の経路が同位相になる**（位相差が消えるので当たり前）。
+    # そのぶんが図の左端に山として立ってしまい、肝心の帯域が潰れる。
+    # いちばん低い固有周波数より下には見るものが無いので、そこから描く
+    if min_frequency is None:
+        min_frequency = float(modes[0]) if len(modes) else max_frequency / 40.0
+
+    keep = (f >= min_frequency) & (f <= max_frequency)
+    f, H = f[keep], H[keep]
+    counted = np.abs(H[:, 0])
+    free = np.abs(H[:, 1])
+    absorbed = np.abs(H[:, 2:])[np.arange(len(f)), _band_of(f, frequencies)]
+
+    with np.errstate(divide="ignore"):
+        free_db = 20.0 * np.log10(np.maximum(free * direct, 1e-6))
+        absorbed_db = 20.0 * np.log10(np.maximum(absorbed * direct, 1e-6))
+
+    f_schroeder = schroeder_frequency(reverberation_time, volume)
+    separable = min(max_frequency,
+                    f_schroeder if f_schroeder else max_frequency * 0.25)
+
+    fig, axes = _figure(2, 1, figsize=(12, 8.5))
+
+    # ---- 上段：本数の積み上げ ----
+    _style(axes[0], "経路の重なり（減衰を考えない＝室形状だけで決まる）",
+           None, "同位相で重なった経路の本数")
+    axes[0].axvspan(separable, max_frequency, color="#2a3140", alpha=0.35, zorder=0)
+    for fm in modes[modes <= separable]:
+        axes[0].axvline(fm, color="#8b929e", linewidth=0.7, alpha=0.65, zorder=1)
+    axes[0].plot(f, counted, color=ACCENT, linewidth=1.2, zorder=3)
+
+    # 位相がばらばらなら和はランダムウォークになって √N 程度にしかならない。
+    # **この線を超えている山だけが、本当に強め合っている周波数**
+    random_walk = np.sqrt(len(time))
+    axes[0].axhline(random_walk, color="#7f8794", linestyle="--", linewidth=1.0,
+                    zorder=2, label=f"ばらばらに重なった場合の目安 √N = {random_walk:.0f}")
+    found = spectrum_peaks(f, 20.0 * np.log10(np.maximum(counted, 1e-9)))
+    found = found[counted[found] > random_walk]
+    if len(found):
+        axes[0].plot(f[found], counted[found], "v", color="#ffd166", markersize=6,
+                     linestyle="none", zorder=5,
+                     label=f"強め合っている周波数（{len(found)} 個）")
+        for i in _spread_labels(found, f, counted, label_peaks,
+                                max_frequency / 12.0):
+            axes[0].annotate(f"{f[i]:.0f} Hz / {counted[i]:.0f} 本",
+                             (f[i], counted[i]), textcoords="offset points",
+                             xytext=(0, 8), ha="center", color="#ffd166",
+                             fontsize=8, zorder=6)
+    if len(modes):
+        axes[0].plot([], [], color="#8b929e", linewidth=0.7,
+                     label="直方体の固有周波数（外形寸法から）")
+    axes[0].set_yscale("log")
+    axes[0].set_xlim(min_frequency, max_frequency)
+    # 深い谷まで入れると肝心の帯域が潰れるので下は √N の 1/20 で切る。
+    # 上は凡例と山の文字がぶつからないよう余白を取る
+    axes[0].set_ylim(max(counted.min() * 0.7, random_walk / 20.0),
+                     counted.max() * 5.0)
+    axes[0].legend(loc="upper right", fontsize=8)
+
+    # ---- 下段：吸音の効果 ----
+    _style(axes[1], "吸音の効果（直接音を 0 dB とした重なり）",
+           "周波数 [Hz]", "レベル [dB]")
+    axes[1].axvspan(separable, max_frequency, color="#2a3140", alpha=0.35, zorder=0)
+    axes[1].fill_between(f, absorbed_db, free_db, color="#e5484d", alpha=0.22,
+                         zorder=2, label="吸音が削っている分")
+    axes[1].plot(f, free_db, color="#f7b801", linewidth=1.2, zorder=3,
+                 label="完全反射（距離減衰のみ）")
+    axes[1].plot(f, absorbed_db, color=ACCENT, linewidth=1.2, zorder=4,
+                 label="設計の吸音あり")
+    axes[1].axhline(0.0, color="#7f8794", linestyle=":", linewidth=1.0, zorder=1)
+    axes[1].set_xlim(min_frequency, max_frequency)
+
+    gap = float(np.mean(free_db - absorbed_db))
+    axes[1].set_title(f"吸音の効果（直接音を 0 dB とした重なり / "
+                      f"平均 {gap:.1f} dB 下がっている）", color=TEXT,
+                      fontsize=11, pad=10)
+
+    if f_schroeder is not None:
+        for ax in axes:
+            ax.axvline(f_schroeder, color="#e5484d", linestyle="--",
+                       linewidth=1.2, zorder=2)
+        axes[1].plot([], [], color="#e5484d", linestyle="--", linewidth=1.2,
+                     label=f"シュレーダー周波数 {f_schroeder:.0f} Hz")
+    axes[1].legend(loc="upper right", fontsize=8)
+    return _save(fig, path, axes)
+
+
+# ------------------------------------------------------------------------------
 # まとめて書き出す
 # ------------------------------------------------------------------------------
 
@@ -711,7 +935,7 @@ def save_all(project, results, verbose=True):
 
     # ⑥ モード分布。寸法は外形（バウンディングボックス）から
     model = results.get("model")
-    if impulse is not None and model is not None and model.extents is not None:
+    if model is not None and model.extents is not None:
         lengths = np.asarray(model.extents[1]) - np.asarray(model.extents[0])
         rt = results.get("reverberation")
         # 代表の残響時間として中域（500 Hz に最も近いバンド）の T30 を使う
@@ -723,8 +947,18 @@ def save_all(project, results, verbose=True):
         volume = (project.volume if project.volume
                   else (abs(model.volume) if model.volume else None))
         atmosphere = results.get("atmosphere")
-        emit("modes.png", mode_distribution, impulse[0], impulse[1],
-             lengths=lengths, volume=volume, reverberation_time=t_mid,
-             sound_velocity=(atmosphere.sound_velocity if atmosphere else 343.0))
+        velocity = atmosphere.sound_velocity if atmosphere else 343.0
+        if impulse is not None:
+            emit("modes.png", mode_distribution, impulse[0], impulse[1],
+                 lengths=lengths, volume=volume, reverberation_time=t_mid,
+                 sound_velocity=velocity)
+
+        # ⑥-2 経路差からの積み上げと吸音の効果。パルス列だけで描ける
+        if pulse_list is not None and len(pulse_list):
+            emit("mode_buildup.png", mode_buildup, pulse_list.time,
+                 pulse_list.energy, distance=pulse_list.distance,
+                 frequencies=results.get("frequencies"), lengths=lengths,
+                 volume=volume, reverberation_time=t_mid,
+                 sound_velocity=velocity)
 
     return written
