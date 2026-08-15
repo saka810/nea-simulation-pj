@@ -157,6 +157,11 @@ class SetupWindow:
                 ttk.Button(cell, text="モデルから見積もる", width=18,
                            command=self._estimate_volume).pack(side="left",
                                                                padx=(0, 8))
+            if key == "rays":
+                # 音線がどう飛ぶかは**室形状と関係ない**ので、ここで先に見られるようにする
+                ttk.Button(cell, text="音線の飛び方を見る", width=18,
+                           command=self._show_directions).pack(side="left",
+                                                               padx=(0, 8))
             ttk.Label(cell, text=hint, foreground="#666").pack(side="left")
 
     def _build_options(self, parent):
@@ -302,6 +307,24 @@ class SetupWindow:
                                           initialdir=start or os.getcwd())
         if path:
             self.vars[key].set(os.path.normpath(path))
+
+    def _show_directions(self):
+        """音線がどの向きへ飛ぶかを見る（室形状は関係ないので単体で開ける）。"""
+        text = self.vars["rays"].get().strip()
+        try:
+            total = int(float(text))
+        except ValueError:
+            messagebox.showerror("音線数を確認してください",
+                                 f"数値になっていません: {text!r}")
+            return
+        if total < 1:
+            messagebox.showerror("音線数を確認してください", "1 以上にしてください")
+            return
+        import view_directions
+        try:
+            view_directions.show(total=total)
+        except Exception as e:
+            messagebox.showerror("表示できませんでした", f"{type(e).__name__}: {e}")
 
     def _estimate_volume(self):
         dxf = self.vars["dxf"].get().strip()

@@ -38,22 +38,18 @@ def _visualise(project, results=None):
         print("[app] 音線軌跡が無いので可視化は開きません（先に計算してください）")
         return
     try:
-        # ★受音した経路だけに絞らない。**音がどう広がるか**を見るのが目的なので、
-        #   受音経路だけにすると（偏ってはいないが）本数が減って様子が分かりにくい。
-        #   経路の確認をしたいときは view_rays.py に --received-only を付けて呼ぶ
+        # ここは**経路がどう通ったか**を見るための画面。
+        # 受音した経路の初期反射だけを到来時刻で色分けするのがいちばん読みやすい。
         #
-        # 色は `ray`（1 本目から最後の音線までのグラデーション）。
-        # 飛ばした音線が**全方向へ均等に散っている**ことが色で確かめられる。
-        #
-        # 最初は **反射 1 回まで**（音源から最初に当たるまで）にしておく。
-        # 全反射まで描くと室内が線で埋まって何も読めないため。
-        # 左パネルの reflections スライダで伸ばしていける
+        # ※「音線がどう飛ぶか」（球状に出ている様子）は室形状と関係ないので、
+        #   条件入力の「音線の飛び方を見る」（view_directions.py）で見る。
+        #   こちらで全音線を描くと室内が線で埋まって読めなくなる
         vr.view(project.dxf_path, raylog, mode="both",
                 absorption=project.absorption_path,
                 unit=project.unit, band_number=project.band_number,
                 orient_normals=project.orient_normals,
-                received_only=False, max_rays=2000, max_reflection=1,
-                colour="ray", opacity=0.10, frames=300, point_size=7)
+                received_only=True, max_rays=60, max_reflection=4,
+                colour="time", opacity=0.10, frames=300, point_size=7)
     except Exception:
         print("[app] 可視化ウィンドウでエラーが起きました:")
         traceback.print_exc()
