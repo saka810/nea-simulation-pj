@@ -413,6 +413,19 @@ class ControlPanel:
 # ウィンドウのタイトル（日本語が化ける件の対処）
 # ------------------------------------------------------------------------------
 
+# 画面ごとのウィンドウタイトル。(日本語, 化けたときの英字) の組。
+#
+# **物件名は入れない**（ユーザー判断 2026-08-17）。タイトルバーに欲しいのは
+# 「法線の確認なのか、音線の可視化なのか」だけ。物件名は画面の中の見出しに出ている。
+# ここに集めてあるので、画面が増えたら 1 行足すだけで済む。
+WINDOW_TITLES = {
+    "normals":    ("法線の確認",     "geosim - normals"),
+    "rays":       ("音線・音粒子",   "geosim - rays and particles"),
+    "directions": ("音線の飛び方",   "geosim - ray directions"),
+    "model":      ("モデルビューア", "geosim - model viewer"),
+}
+
+
 def ascii_tag(text):
     """ASCII だけで書かれていればそのまま返す。そうでなければ空。
 
@@ -422,10 +435,15 @@ def ascii_tag(text):
     return text if text and all(ord(c) < 128 for c in text) else ""
 
 
-def ascii_title(what, name=""):
-    """タイトルの予備（ASCII 版）を組み立てる。`geosim - normals [JR]` の形。"""
-    name = ascii_tag(name)
-    return f"geosim - {what}" + (f" [{name}]" if name else "")
+def window_titles(screen, default=""):
+    """画面の種類から (タイトル, 化けたときの英字) を引く。
+
+    知らない種類なら `default` をそのまま使い、英字の予備は
+    そこから ASCII だけ抜いて作る（無ければ `geosim`）。
+    """
+    if screen in WINDOW_TITLES:
+        return WINDOW_TITLES[screen]
+    return default, (ascii_tag(default) or "geosim")
 
 
 def _window_handle(plotter):
@@ -475,24 +493,35 @@ def set_window_title(plotter, title, fallback=None):
     **画面の中の見出しは日本語のまま**（フォントを指定して描いているので化けない）。
 
     Windows 以外では検証を飛ばす（化ける現象自体が Windows のもの）。
+
+    ★**決まった題は `plotter.title` にも書き戻す。** pyvista の `show()` は
+      そのつど `self.title` をウィンドウ名に**貼り直す**ので、書き戻しておかないと
+      せっかく差し替えた題が日本語（＝化ける方）に戻ってしまう。実際に戻った。
     """
+    def remember(text):
+        try:                       # 版によっては書けないので黙って諦める
+            plotter.title = text
+        except Exception:
+            pass
+        return text
+
     try:
         plotter.ren_win.SetWindowName(title)
     except Exception:
         return title
     if sys.platform != "win32":
-        return title
+        return remember(title)
 
     shown = _shown_window_title(plotter)
     if shown is None or shown == title:
-        return title
+        return remember(title)
 
-    safe = fallback or ascii_title("viewer")
+    safe = fallback or "geosim"
     try:
         plotter.ren_win.SetWindowName(safe)
     except Exception:
         pass
-    return safe
+    return remember(safe)
 
 
 def prepare_window(plotter, title, fallback=None):
@@ -557,20 +586,25 @@ def add_screenshot_key(plotter, folder, stem, key="p"):
     return save
 
 
-def make_plotter(title, window_size, off_screen, panel=True, ascii_fallback=None):
+def make_plotter(title, window_size, off_screen, panel=True, screen=None):
     """左に操作パネル、右に 3D を持つ Plotter を作る。
 
     `panel=False` なら従来どおり 1 画面（画像の書き出しなど、操作しないとき用）。
-    `ascii_fallback` … タイトルが化けたときに使う ASCII の題（`set_window_title` 参照）。
+
+    `title` は**画面の中の見出し**（物件名を含んでよい。日本語も化けない）。
+    `screen` は画面の種類（`'normals'` など）で、**ウィンドウのタイトル**を決める。
+    分けてあるのは、タイトルバーには物件名が要らないという判断のため
+    （`WINDOW_TITLES` 参照）。
     """
+    bar, fallback = window_titles(screen, title)
     if not panel:
-        plotter = pv.Plotter(window_size=window_size, title=title,
+        plotter = pv.Plotter(window_size=window_size, title=bar,
                              off_screen=off_screen)
         plotter.set_background(BG_BOTTOM, top=BG_TOP)
     else:
         plotter = pv.Plotter(shape=(1, 2),
                              col_weights=[PANEL_RATIO, 1.0 - PANEL_RATIO],
-                             window_size=window_size, title=title,
+                             window_size=window_size, title=bar,
                              off_screen=off_screen, border=False)
         plotter.subplot(0, 0)
         plotter.set_background(BG_BOTTOM)
@@ -579,8 +613,7 @@ def make_plotter(title, window_size, off_screen, panel=True, ascii_fallback=None
 
     # タイトルの確定は `show()` の直前（`prepare_window`）。ここではまだ
     # OS のウィンドウが無いので検証できない
-    _attach(plotter, "geosim_title", (title, ascii_fallback) if not off_screen
-            else None)
+    _attach(plotter, "geosim_title", None if off_screen else (bar, fallback))
     if not panel:
         return plotter, None
     return plotter, ControlPanel(plotter, font=japanese_font(),
@@ -644,7 +677,7 @@ def normal_arrows(poly, length):
 def build_plotter(model, title="モデルビューア", off_screen=False,
                   show_normals=True, normal_ratio=0.06, window_size=(1280, 860),
                   opacity=1.0, show_bounds=True, show_summary=True,
-                  layer_opacity=None, panel=True, ascii_fallback=None):
+                  layer_opacity=None, panel=True, screen=None):
     """DxfModel から Plotter を組み立てて返す（show() はしない）。
 
     opacity … 面の不透明度。音線を重ねるときは 0.15 くらいにすると中が見える
@@ -671,7 +704,7 @@ def build_plotter(model, title="モデルビューア", off_screen=False,
     arrow_len = diag * normal_ratio
 
     plotter, panel = make_plotter(title, window_size, off_screen, panel=panel,
-                                  ascii_fallback=ascii_fallback)
+                                  screen=screen)
 
     face_actors = {}
     arrow_actors = {}
@@ -902,7 +935,7 @@ def view(dxf_path, absorption=None, unit=None, orient_normals="cad",
     model = rd.read_model(dxf_path, unit=unit, absorption_table=absorption,
                           orient_normals=orient_normals)
     base = os.path.splitext(os.path.basename(dxf_path))[0]
-    plotter = build_plotter(model, title=f"{base} モデルビューア",
+    plotter = build_plotter(model, title=f"{base} モデルビューア", screen="model",
                             off_screen=screenshot is not None,
                             show_normals=show_normals, opacity=opacity,
                             layer_opacity=layer_opacity)

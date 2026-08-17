@@ -65,7 +65,7 @@ class NormalEditor:
     """
 
     def __init__(self, model, flipped=None, title="法線の確認", head_azimuth=None,
-                 save_dir=None, ascii_fallback=None):
+                 save_dir=None):
         # 受音点に置く「人」の正面方向 [度]（真上から見て +X から反時計回り）。
         # G-5 の伝搬方向の図で「前・後ろ・左・右」を決めるのに使う。
         # CAD で表すのは難しいという判断で、ここ（3D が見えている画面）で決める
@@ -87,7 +87,6 @@ class NormalEditor:
         self.title = title
         # `g` で撮った画像の置き場（`図/画面/`）。指定が無ければ撮影キーを出さない
         self.save_dir = save_dir
-        self.ascii_fallback = ascii_fallback
 
         # 自動判定（レイの偶奇）。ここでは**反転するか否かの判定にしか使わない**
         self.layers = sorted({f.material for f in self.mesh})
@@ -225,8 +224,7 @@ class NormalEditor:
         """
         want_panel = (not off_screen) if panel is None else bool(panel)
         self.plotter, panel = vg.make_plotter(self.title, window_size, off_screen,
-                                              panel=want_panel,
-                                              ascii_fallback=self.ascii_fallback)
+                                              panel=want_panel, screen="normals")
         self.panel = panel
         font = vg.japanese_font()
 
@@ -396,9 +394,7 @@ def edit(project, model=None, off_screen=False, screenshot=None):
         model = load_model_for(project)
     editor = NormalEditor(model, title=f"{project.name} — 法線の確認",
                           head_azimuth=getattr(project, "head_azimuth", 0.0),
-                          save_dir=project.screenshot_dir(),
-                          ascii_fallback=vg.ascii_title("normals",
-                                                        project.ascii_tag()))
+                          save_dir=project.screenshot_dir())
     saved = editor.show(off_screen=off_screen, screenshot=screenshot)
     if saved:
         path = project.save_flipped_faces(editor.flipped, editor.count,

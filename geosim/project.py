@@ -110,19 +110,6 @@ class Project:
         os.makedirs(folder, exist_ok=True)
         return folder
 
-    def ascii_tag(self):
-        """ウィンドウのタイトルの予備に使う短い名前（ASCII で書けるときだけ）。
-
-        VTK のウィンドウは日本語のタイトルが化けることがあり、その場合に
-        英字の題へ差し替える（`view_model_gui.set_window_title`）。
-        プロジェクト名は日本語のことが多いので**フォルダ名のほうを先に見る**。
-        """
-        for candidate in (os.path.basename(self.folder), self.name):
-            candidate = (candidate or "").strip()
-            if candidate and all(ord(c) < 128 for c in candidate):
-                return candidate
-        return ""
-
     def resolve(self, value):
         """project.json に入っている相対パスを実際のパスに直す。"""
         if not value:

@@ -1109,16 +1109,29 @@ def test_capture():
     import project as pj
     import view_model_gui as vg
 
-    # ---- タイトルの予備（ASCII 判定）----
+    # ---- ウィンドウのタイトル ----
     check("ASCII ならそのまま通す", vg.ascii_tag("JR") == "JR")
     check("日本語は通さない（化けるので）", vg.ascii_tag("研修室") == "")
     check("空や空白は通さない",
           vg.ascii_tag("") == "" and vg.ascii_tag("   ") == "")
-    check("予備の題を組み立てる",
-          vg.ascii_title("normals", "JR") == "geosim - normals [JR]",
-          vg.ascii_title("normals", "JR"))
-    check("名前が使えなければ題だけ",
-          vg.ascii_title("normals", "研修室") == "geosim - normals")
+
+    # **物件名は入れない**（ユーザー判断）。画面の種類が分かればよい
+    for screen, want in (("normals", "法線の確認"),
+                         ("rays", "音線・音粒子"),
+                         ("directions", "音線の飛び方"),
+                         ("model", "モデルビューア")):
+        bar, fallback = vg.window_titles(screen)
+        check(f"{screen} の題が「{want}」だけ（物件名を入れない）",
+              bar == want and "JR" not in fallback and "研修室" not in bar,
+              f"{bar} / {fallback}")
+    check("予備はすべて英字",
+          all(vg.ascii_tag(f) == f for _, f in vg.WINDOW_TITLES.values()),
+          str([f for _, f in vg.WINDOW_TITLES.values()]))
+    check("知らない画面は渡した題を使う",
+          vg.window_titles("なにか", "モデル") == ("モデル", "geosim"),
+          str(vg.window_titles("なにか", "モデル")))
+    check("知らない画面でも英字ならそれを予備に",
+          vg.window_titles("なにか", "viewer") == ("viewer", "viewer"))
 
     # ---- 連番（撮るたびに増える。上書きしない）----
     folder = tempfile.mkdtemp(prefix="geosim_shot_")
@@ -1140,13 +1153,6 @@ def test_capture():
     check("画面の置き場が 図/画面/", os.path.isdir(shots)
           and os.path.basename(shots) == "画面"
           and os.path.basename(os.path.dirname(shots)) == "図", shots)
-    check("フォルダ名が ASCII ならタイトルの予備に使える",
-          project.ascii_tag() == os.path.basename(project.folder),
-          project.ascii_tag())
-    check("プロジェクト名が日本語でも落ちない",
-          isinstance(pj.Project(os.path.join(project.folder, "研修室"),
-                                name="研修室").ascii_tag(), str))
-
     # ★ここが肝。**計算し直しても手で撮った画像は消えない**こと。
     #   `clear_results()` は 図/ の PNG を消すので、同じ場所に置くと巻き添えになる
     manual = os.path.join(shots, "法線_01.png")

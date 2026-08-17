@@ -100,12 +100,11 @@ class DirectionPreview:
 
 def show(total=2000, drawn=None, title="音線の飛び方", off_screen=False,
          screenshot=None, window_size=(1100, 800), panel=None,
-         save_dir=None, ascii_fallback=None):
+         save_dir=None):
     """音線ベクトルのプレビューを開く。"""
     want_panel = (not off_screen) if panel is None else bool(panel)
     plotter, panel = vg.make_plotter(title, window_size, off_screen,
-                                     panel=want_panel,
-                                     ascii_fallback=ascii_fallback)
+                                     panel=want_panel, screen="directions")
     preview = DirectionPreview(plotter, total, drawn=drawn)
 
     # 音源の位置に球を置く（原点）。大きさは音線の長さ 1 に対する目安

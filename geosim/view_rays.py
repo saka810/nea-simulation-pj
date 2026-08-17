@@ -790,7 +790,7 @@ def view(dxf_path, raylog_path, mode="both", absorption=None, unit=None,
          max_particles=None, pool_size=2000,
          max_reflection=None, colour="energy", band=None, frames=240,
          opacity=0.12, layer_opacity=None, movie=None, point_size=9.0,
-         screenshot=None, interval=30, save_dir=None, ascii_fallback=None):
+         screenshot=None, interval=30, save_dir=None):
     """モデルの上に音線と音粒子を重ねて表示する。
 
     max_rays / max_particles
@@ -835,7 +835,7 @@ def view(dxf_path, raylog_path, mode="both", absorption=None, unit=None,
     plotter = vg.build_plotter(model, title=title, off_screen=off_screen,
                                show_normals=False, opacity=opacity,
                                layer_opacity=layer_opacity, show_summary=False,
-                               panel=True, ascii_fallback=ascii_fallback)
+                               panel=True, screen="rays")
     panel = vg.control_panel(plotter)
     font = vg.japanese_font()
 
