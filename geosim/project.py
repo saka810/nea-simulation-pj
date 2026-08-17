@@ -11,7 +11,7 @@ CSV にしてあるのは Excel でそのまま開けるようにするため。
         pulses.csv          パルス列（反射回数・到来時刻・到来方向・バンド別エネルギー）
         ir.csv              インパルス応答
         rt.csv              残響指標 EDT / T20 / T30
-        rt_statistical.csv  統計残響式 Sabine / Eyring / Millington
+        rt_statistical.csv  統計残響式 Sabine / Eyring / Eyring-Knudsen
         decay.csv           減衰曲線
         surface.csv         レイヤ別の面積と吸音率
         raylog.npz          音線軌跡（可視化用。可変長なので npz）
@@ -269,7 +269,10 @@ class Project:
 def write_surface_csv(filename, surface, frequencies):
     """レイヤ別の面積と吸音率を CSV にする（`reverberation.surface_summary` の結果）。"""
     os.makedirs(os.path.dirname(filename), exist_ok=True)
-    header = ["material", "area_m2"] + [f"alpha_{int(f)}Hz" for f in frequencies]
+    import table as tb
+    # 1 行が材料なので、周波数は**列**（table.py の共通ルール）
+    header = ["material", "area_m2"] + [tb.band_column("alpha", f)
+                                        for f in frequencies]
     lines = [",".join(header)]
     for name, area, alpha in zip(surface["names"], surface["areas"],
                                  surface["absorption"]):
@@ -286,14 +289,32 @@ def _read_csv(path):
     return np.genfromtxt(path, delimiter=",", names=True, encoding="utf-8-sig")
 
 
+# 周波数を横に並べてある CSV（`table.write_frequency_table` が書いたもの）。
+# 1 行が指標なので、普通の genfromtxt では読めない
+FREQUENCY_TABLES = ("rt", "statistical", "clarity")
+
+
 def load_results(project):
     """プロジェクトフォルダの結果を読み戻す。
 
     戻り値の dict。**無いものは None**（途中まで計算した状態も開けるように）。
+
+    `rt` / `statistical` / `clarity` は**周波数が横**に並んだ表なので、
+    `{'frequencies': (nf,), 'rows': {行の名前: (nf,)}}` の形で返す
+    （`table.read_frequency_table`。古い縦向きのファイルもそのまま読める）。
+    それ以外は `np.genfromtxt` の構造化配列。
     """
+    import table as tb
+
     result = {}
-    for key in ("pulses", "ir", "rt", "statistical", "decay", "surface"):
+    for key in ("pulses", "ir", "decay", "surface"):
         result[key] = _read_csv(project.result_path(key))
+    for key in FREQUENCY_TABLES:
+        path = (project.path(RESULT_DIR, "clarity.csv") if key == "clarity"
+                else project.result_path(key))
+        frequencies, rows = tb.read_frequency_table(path)
+        result[key] = None if frequencies is None else {"frequencies": frequencies,
+                                                        "rows": rows}
     raylog = project.result_path("raylog")
     result["raylog"] = raylog if os.path.exists(raylog) else None
     return result

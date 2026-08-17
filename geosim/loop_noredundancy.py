@@ -97,8 +97,13 @@ class PulseList:
         列: reflection_count, time_s, distance_m, dir_x, dir_y, dir_z, energy_1..energy_b
         元コードの 11 列との対応は本クラスの docstring を参照。
         """
+        # バンドは**周波数そのもの**を列名にする（`energy_1` だと 6 バンドと
+        # 8 バンドで意味が変わって読み違える）。table.py の共通ルール
+        import absorption as ab
+        import table as tb
+        bands = ab.octave_bands(self.band_number)
         header = ["reflection_count", "time_s", "distance_m", "dir_x", "dir_y", "dir_z"]
-        header += [f"energy_{b + 1}" for b in range(self.band_number)]
+        header += [tb.band_column("energy", f) for f in bands]
         rows = np.column_stack([self.reflection_count, self.time, self.distance,
                                 self.direction, self.energy])
         np.savetxt(filename, rows, delimiter=",", header=",".join(header),

@@ -483,7 +483,7 @@ def test_reverberation():
 
 # ---------------------------------------------------------------- 統計残響式
 def test_statistical_reverberation():
-    print("\n[10] 統計残響式（Sabine / Eyring / Millington）")
+    print("\n[10] 統計残響式（Sabine / Eyring / Eyring-Knudsen）")
     model, _, _ = load_test_room()
     mesh = model.mesh
 
@@ -515,8 +515,8 @@ def test_statistical_reverberation():
     check("Eyring が解析解と一致",
           np.abs(result["eyring"] - want_eyring).max() < 1e-12,
           f"{result['eyring'][0]:.9f} / 期待 {want_eyring:.9f}")
-    check("吸音率が一様なら Millington と Eyring が一致",
-          np.abs(result["millington"] - result["eyring"]).max() < 1e-12)
+    check("空気吸収を切れば Eyring-Knudsen は Eyring と一致",
+          np.abs(result["eyring_knudsen"] - result["eyring"]).max() < 1e-12)
     check("Eyring は Sabine より短く出る（吸音率が大きいほど差が開く）",
           np.all(result["eyring"] < result["sabine"]))
     check("平均自由行程が 4V/S", abs(result["mean_free_path"] - 4 * 6.0 / 22.0) < 1e-12,
@@ -538,15 +538,25 @@ def test_statistical_reverberation():
                                             convert_to_random=False,
                                             include_air_absorption=True,
                                             verbose=False)
-    check("空気吸収を入れると残響時間が短くなる（高音ほど顕著）",
-          with_air["sabine"][-1] < with_air["sabine"][0] < result["sabine"][0],
-          f"63Hz {with_air['sabine'][0]:.4f} / 8kHz {with_air['sabine'][-1]:.4f} s")
+    # ★Sabine と Eyring は**空気吸収を入れない素の形**。足したのが Eyring-Knudsen で、
+    #   差がそのまま空気吸収の効きになる（ユーザー判断 2026-08-17）
+    check("Sabine と Eyring は空気吸収の設定で変わらない",
+          np.allclose(with_air["sabine"], result["sabine"])
+          and np.allclose(with_air["eyring"], result["eyring"]))
+    check("Eyring-Knudsen は Eyring より短い（空気吸収のぶん）",
+          np.all(with_air["eyring_knudsen"] < with_air["eyring"]))
+    check("空気吸収の効きは高音ほど大きい",
+          (with_air["eyring"][-1] - with_air["eyring_knudsen"][-1])
+          > (with_air["eyring"][0] - with_air["eyring_knudsen"][0]),
+          f"63Hz {with_air['eyring'][0] - with_air['eyring_knudsen'][0]:.4f} s / "
+          f"8kHz {with_air['eyring'][-1] - with_air['eyring_knudsen'][-1]:.4f} s")
+    check("ミリントンは落とした", "millington" not in with_air)
 
     # 実際のモデルで面ごとに吸音率が違う場合
     real = rv.statistical_reverberation_from_model(model, atmosphere=air, verbose=False)
     check("DxfModel から直接計算できる", real is not None)
-    check("吸音率がばらつくと Millington < Eyring < Sabine",
-          np.all(real["millington"] < real["eyring"])
+    check("Eyring-Knudsen < Eyring < Sabine の順になる",
+          np.all(real["eyring_knudsen"] <= real["eyring"])
           and np.all(real["eyring"] < real["sabine"]))
 
     # 開いた形状では計算できない
@@ -1168,6 +1178,78 @@ def test_capture():
     shutil.rmtree(project.folder, ignore_errors=True)
 
 
+# ---------------------------------------------------------------- 表の向き
+def test_table():
+    print("\n[23] 表の並べ方（周波数は横）")
+    import csv
+    import shutil
+    import tempfile
+
+    import table as tb
+
+    folder = tempfile.mkdtemp(prefix="geosim_table_")
+    frequencies = [125.0, 250.0, 500.0, 1000.0]
+    rows = {"EDT_s": [0.9, 0.6, 0.5, 0.3], "T30_s": [0.8, 0.5, 0.4, 0.2]}
+
+    path = tb.write_frequency_table(os.path.join(folder, "rt.csv"),
+                                    frequencies, rows)
+    with open(path, encoding="utf-8-sig", newline="") as f:
+        table = list(csv.reader(f))
+
+    # ★ここが共通ルール。1 行目が周波数、2 行目以降が指標
+    check("1 行目が周波数（横に並ぶ）",
+          table[0] == ["項目", "125", "250", "500", "1000"], str(table[0]))
+    check("2 行目以降が指標", [r[0] for r in table[1:]] == ["EDT_s", "T30_s"],
+          str([r[0] for r in table[1:]]))
+    check("Excel で開けるよう BOM 付き",
+          open(path, "rb").read(3) == b"\xef\xbb\xbf")
+
+    got_f, got_rows = tb.read_frequency_table(path)
+    check("書いたものを読み戻せる",
+          np.allclose(got_f, frequencies)
+          and all(np.allclose(got_rows[k], v) for k, v in rows.items()))
+
+    # NaN は空欄にする（Excel で「---」より扱いやすい）
+    nan_path = tb.write_frequency_table(os.path.join(folder, "nan.csv"),
+                                        frequencies,
+                                        {"x": [1.0, np.nan, 3.0, 4.0]})
+    with open(nan_path, encoding="utf-8-sig", newline="") as f:
+        body = list(csv.reader(f))[1]
+    check("NaN は空欄で書く", body[2] == "", repr(body))
+    check("空欄は NaN で読み戻る",
+          np.isnan(tb.read_frequency_table(nan_path)[1]["x"][1]))
+
+    # **古い縦向きのファイルも読めること**（向きを変える前のプロジェクトが開けるように）
+    old = os.path.join(folder, "old.csv")
+    with open(old, "w", encoding="utf-8", newline="") as f:
+        f.write("frequency_hz,EDT_s,T30_s\n125,0.9,0.8\n250,0.6,0.5\n")
+    old_f, old_rows = tb.read_frequency_table(old)
+    check("★古い縦向きの CSV も読める",
+          np.allclose(old_f, [125, 250])
+          and np.allclose(old_rows["EDT_s"], [0.9, 0.6])
+          and np.allclose(old_rows["T30_s"], [0.8, 0.5]),
+          f"{list(old_rows)}")
+
+    check("無いファイルは (None, {}) を返す",
+          tb.read_frequency_table(os.path.join(folder, "無い.csv")) == (None, {}))
+
+    # 要素数が合わなければ黙って書かない
+    try:
+        tb.write_frequency_table(os.path.join(folder, "ng.csv"), frequencies,
+                                 {"x": [1.0, 2.0]})
+        check("要素数が合わなければエラー", False, "例外が出なかった")
+    except ValueError:
+        check("要素数が合わなければエラー（黙って壊れた表を書かない）", True)
+
+    # 1 行が周波数以外のときの列名。**番号ではなく周波数そのものを入れる**
+    check("バンドの列名が周波数入り",
+          tb.band_column("alpha", 125.0) == "alpha_125Hz"
+          and tb.band_column("decay", 1000.0, "db") == "decay_1000Hz_db",
+          tb.band_column("decay", 1000.0, "db"))
+
+    shutil.rmtree(folder, ignore_errors=True)
+
+
 def main():
     print("geosim 数値検証")
     print(f"  Python {sys.version.split()[0]} / numpy {np.__version__}")
@@ -1180,7 +1262,7 @@ def main():
                test_statistical_reverberation, test_ray_log,
                test_normals, test_check_model, test_clarity,
                test_project, test_resample, test_direction, test_modes,
-               test_mode_buildup, test_redraw, test_capture):
+               test_mode_buildup, test_redraw, test_capture, test_table):
         fn()
 
     failed = [name for name, ok in _results if not ok]

@@ -93,7 +93,7 @@ def process(soundsource_point, reciever_point, dxf_filename, sphere_radius, nref
         残響指標（EDT / T20 / T30）・減衰曲線の CSV 出力先。
         どちらかを指定すると算出する（インパルス応答の合成が前提）。
     statistical : bool
-        Sabine / Eyring-Knudsen / Millington の統計残響式でも残響時間を出すか（既定 True）。
+        Sabine / Eyring / Eyring-Knudsen の統計残響式でも残響時間を出すか（既定 True）。
         **室が閉じている場合のみ**（容積が決まらないと計算できない）。
         音線を飛ばさず面積と吸音率だけから出るので、シミュレーション結果の物差しになる。
     statistical_filename : str | None
@@ -162,7 +162,7 @@ def process(soundsource_point, reciever_point, dxf_filename, sphere_radius, nref
             raise ValueError("受音点が指定されておらず、DXF に rec レイヤの POINT もありません")
         reciever_point = model.receiver_points[0]
 
-    # 統計残響式（Sabine / Eyring-Knudsen / Millington）。音線を飛ばす前に出せる。
+    # 統計残響式（Sabine / Eyring / Eyring-Knudsen）。音線を飛ばす前に出せる。
     # 面積と吸音率だけから決まるので、あとの計算結果と突き合わせる物差しになる
     report("統計残響式")
     statistical_result = None
@@ -282,16 +282,21 @@ def process(soundsource_point, reciever_point, dxf_filename, sphere_radius, nref
     # 統計式は拡散音場を前提にした平均像、シミュレーションは特定の受音点での実際の減衰。
     # 大きく食い違うときは、音場が拡散していないか設定に問題があるかの手がかりになる
     if statistical_result is not None and reverberation is not None:
-        print(f"[procedure] {'周波数':>10}{'T30(計算)':>12}{'Sabine':>10}"
-              f"{'Eyring-Knudsen':>16}{'比(T30/E-K)':>14}")
+        # **周波数は横**（table.py の共通ルール）
         measured = reverberation["measures"]["T30"]
-        for i, fc in enumerate(frequencies):
-            eyring = statistical_result["eyring"][i]
-            ratio = ("---" if (np.isnan(measured[i]) or np.isnan(eyring) or eyring == 0)
-                     else f"{measured[i] / eyring:.2f}")
-            got = "---" if np.isnan(measured[i]) else f"{measured[i]:.3f}"
-            print(f"[procedure] {fc:9.0f}Hz{got:>12}"
-                  f"{statistical_result['sabine'][i]:10.3f}{eyring:16.3f}{ratio:>14}")
+        knudsen = statistical_result["eyring_knudsen"]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ratio = np.where(knudsen > 0, measured / knudsen, np.nan)
+        rows = [("T30(計算)", measured)]
+        rows += [(label, statistical_result[key])
+                 for key, label in rv.STATISTICAL_LABELS.items()]
+        rows += [("比 T30/E-K", ratio)]
+        print("[procedure] " + " " * 14
+              + "".join(f"{f:>10.0f}" for f in frequencies))
+        for name, values in rows:
+            print(f"[procedure] {name:>14}"
+                  + "".join("       ---" if np.isnan(v) else f"{v:10.3f}"
+                            for v in values))
 
     return {"model": model, "pulses": pulses, "impulse": impulse,
             "reverberation": reverberation, "statistical": statistical_result,

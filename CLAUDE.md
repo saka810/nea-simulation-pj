@@ -100,8 +100,23 @@
   scalar 版（`collision_distance` など）は参照実装・一致確認の基準として残してあるので**消さない**。
   交差判定に手を入れたら、必ず `tests/test_geosim.py` の
   「ベクトル化した交差判定（scalar 版との一致）」が通ることを確認する。
+- **表は「周波数を横」に並べる**（2026-08-17 ユーザー判断。`geosim/table.py` に共通ルール）。
+  グラフにしたときの横軸が周波数なので、CSV も画面の表もそれに揃える。
+  縦だと Excel でグラフを作るたびに行と列を選び直す手間が要る。
+  - 1 行が指標のとき（`rt.csv` / `rt_statistical.csv` / `clarity.csv`）は
+    `table.write_frequency_table()` を使う。1 列目が `項目`、2 列目以降が周波数
+  - 1 行が周波数以外（時刻・材料・経路）のときは、周波数を**列名**にする。
+    列名は `table.band_column()` で作る（`alpha_125Hz` / `energy_125Hz` / `decay_125Hz_db`）。
+    **番号（`energy_1`）にしない**。バンド数 6 と 8 で意味が変わって読み違えるため
+  - 読むときは `table.read_frequency_table()`（**古い縦向きも読める**）
+  - **新しい出力を書くときもこの向きにすること。**
+    どうしても縦にしたい事情が出たら、勝手に決めずにユーザーに確認する
 - **残響指標は EDT / T20 / T30 を出す**（`reverberation.decay_measures`）。
   60 dB 減を厳密に見る運用ではない。
+- **統計残響式は Sabine / Eyring / Eyring-Knudsen の 3 つ**（`reverberation.STATISTICAL_LABELS`）。
+  アイリングの式は `-S ln(1-ᾱ)` までで、**空気吸収 `4mV` を足した形はヌードセンの寄与**。
+  2 つを並べると差がそのまま空気吸収の効きになる。
+  ミリントン（ミリントン・セッテ）は実務で使われないので**落とした**（2026-08-17）。
 - **吸音率は「垂直入射」か「残響室法」かを必ず区別する**。取り違えると吸音を大きく誤る。
   CSV に `# kind: normal|random` を書くか `--absorption-kind` で指定する。
   残響室法なら Paris の式で自動変換される（`geosim/absorption.py`）。

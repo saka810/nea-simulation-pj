@@ -94,20 +94,22 @@ def _report_saved(project):
     else:
         # CSV の列名はそのままだと読みにくいので短くする
         short = {"EDT_s": "EDT", "T20_s": "T20", "T30_s": "T30",
-                 "curvature_percent": "曲率%"}
-        rt = np.atleast_1d(rt)
-        names = [n for n in rt.dtype.names if n != "frequency_hz"]
-        print("  " + "周波数".rjust(8)
-              + "".join(f"{short.get(n, n):>9}" for n in names)
-              + ("" if stat is None else f"{'Sabine':>9}{'Eyring-Knudsen':>16}"))
-        stat = None if stat is None else np.atleast_1d(stat)
-        for i, fc in enumerate(rt["frequency_hz"]):
-            cells = "".join(f"{rt[n][i]:9.3f}" for n in names)
-            extra = ("" if stat is None
-                     else f"{stat['sabine_s'][i]:9.3f}{stat['eyring_s'][i]:16.3f}")
-            print(f"  {fc:7.0f}Hz{cells}{extra}")
+                 "curvature_percent": "曲率%", "sabine_s": "Sabine",
+                 "eyring_s": "Eyring", "eyring_knudsen_s": "Eyring-Knudsen"}
+        rows = dict(rt["rows"])
+        if stat is not None:
+            for key in ("sabine_s", "eyring_s", "eyring_knudsen_s"):
+                if key in stat["rows"]:
+                    rows[key] = stat["rows"][key]
 
-    clarity = saved.get("clarity")
+        # **周波数は横**（table.py の共通ルール）。CSV・図と向きを揃える
+        frequencies = rt["frequencies"]
+        print("  " + " " * 16 + "".join(f"{f:>10.0f}" for f in frequencies))
+        for name, values in rows.items():
+            print(f"  {short.get(name, name):>16}"
+                  + "".join("       ---" if np.isnan(v) else f"{v:10.3f}"
+                            for v in values))
+
     print(f"\n  結果 CSV : {project.path(pj.RESULT_DIR)}")
     print(f"  図 PNG   : {project.path(pj.FIGURE_DIR)}")
 
@@ -120,18 +122,23 @@ def _report(project, results):
     print(f"計算が終わりました → {project.folder}")
     print("=" * 70)
 
+    import numpy as np
+    import reverberation as rv
+
     rt = results.get("reverberation")
     stat = results.get("statistical")
     if rt is not None:
-        names = list(rt["measures"])
-        print("  " + "周波数".rjust(8) + "".join(f"{n:>9}" for n in names)
-              + f"{'Sabine':>9}{'Eyring-Knudsen':>16}")
-        for i, fc in enumerate(rt["frequencies"]):
-            cells = "".join(f"{rt['measures'][n][i]:9.3f}" for n in names)
-            extra = ""
-            if stat is not None:
-                extra = f"{stat['sabine'][i]:9.3f}{stat['eyring'][i]:16.3f}"
-            print(f"  {fc:7.0f}Hz{cells}{extra}")
+        # **周波数は横**（table.py の共通ルール）。CSV・図と向きを揃える
+        rows = dict(rt["measures"])
+        rows["曲率%"] = rt["curvature"]
+        if stat is not None:
+            for key, label in rv.STATISTICAL_LABELS.items():
+                rows[label] = stat[key]
+        print("  " + " " * 16 + "".join(f"{f:>10.0f}" for f in rt["frequencies"]))
+        for name, values in rows.items():
+            print(f"  {name:>16}"
+                  + "".join("       ---" if np.isnan(v) else f"{v:10.3f}"
+                            for v in values))
 
     if stat is None and project.statistical:
         print("\n  ※ 統計残響式（Sabine / Eyring-Knudsen）は計算できませんでした。")

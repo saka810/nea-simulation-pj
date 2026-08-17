@@ -31,6 +31,7 @@ import numpy as np
 from scipy.signal import butter, fftconvolve, firwin, sosfilt
 
 import absorption as ab
+import table as tb
 from absorption import DEFAULT_OCTAVE_BANDS
 from atmosphere import Atmosphere
 
@@ -59,7 +60,7 @@ FIR_NUMTAPS = 4096
 
 
 # ------------------------------------------------------------------------------
-# 統計的残響式（Sabine / Eyring-Knudsen / Millington）
+# 統計的残響式（Sabine / Eyring / Eyring-Knudsen）
 #
 # 音線を飛ばさず、**室容積 V と各面の面積・吸音率だけ**から残響時間を見積もる。
 # 拡散音場（音がどの方向からも等確率に来る）を前提にした古典的な式で、
@@ -120,7 +121,7 @@ def surface_summary(mesh, convert_to_random=True, warn=True):
 def statistical_reverberation(mesh, volume, frequencies=None, atmosphere=None,
                               convert_to_random=True, include_air_absorption=True,
                               verbose=True):
-    """Sabine / Eyring / Millington-Sette の残響式で残響時間を見積もる。
+    """Sabine / Eyring / Eyring-Knudsen の残響式で残響時間を見積もる。
 
     引数:
         mesh       list[Mesh]  室形状（`read_dxffile` の出力）
@@ -137,29 +138,26 @@ def statistical_reverberation(mesh, volume, frequencies=None, atmosphere=None,
 
     | 式 | 等価吸音面積 A | 性質 |
     |---|---|---|
-    | Sabine | `S·ᾱ + 4mV` | 最も古典的。**吸音率が小さいとき（〜0.2）に妥当**。ᾱ→1 でも T が 0 にならない欠点 |
-    | Eyring-Knudsen | `-S·ln(1-ᾱ) + 4mV` | 反射のたびに (1-ᾱ) 倍になると考える。**吸音率が大きいときはこちら** |
-    | Millington | `-Σ Sᵢ·ln(1-αᵢ) + 4mV` | 面ごとに個別に対数を取る。αᵢ→1 の面があると発散する |
+    | Sabine | `S·ᾱ` | 最も古典的。**吸音率が小さいとき（〜0.2）に妥当**。ᾱ→1 でも T が 0 にならない欠点 |
+    | Eyring | `-S·ln(1-ᾱ)` | 反射のたびに (1-ᾱ) 倍になると考える。**吸音率が大きいときはこちら** |
+    | Eyring-Knudsen | `-S·ln(1-ᾱ) + 4mV` | Eyring に**空気吸収**を足したもの。高域で効く |
 
     ᾱ は面積で重み付けした平均吸音率 `Σ Sᵢαᵢ / S`。
 
-    ★**名前について。** アイリングの式そのものは `-S ln(1-ᾱ)` までで、
-      **空気吸収の項 `4mV` を足した形はヌードセンの寄与**なので
-      `アイリング・ヌードセンの式` と呼ぶのが正しい（ユーザー指摘 2026-08-17）。
-      `include_air_absorption=False` にしたときだけ素の `Eyring`。
-      表示名は `statistical_labels()` が切り替える。
+    ★**名前について**（ユーザー指摘 2026-08-17）。アイリングの式そのものは
+      `-S ln(1-ᾱ)` までで、**空気吸収の項 `4mV` を足した形はヌードセンの寄与**。
+      なので 2 つを別の列として並べる。差がそのまま**空気吸収の効き**になる。
 
-    ★**ミリントンの式は参考値**。`ミリントン・セッテの式`（Millington 1932 /
-      Sette 1933）で、平均してから対数を取る Eyring と違い**面ごとに対数を取る**。
-      吸音率が面ごとに大きく違うときの理屈は通っているが、
-      **αᵢ→1 の面が 1 枚でもあると A が発散して T→0 になる**（開口が 1 つあるだけで
-      残響ゼロという結論になってしまう）ため、実務ではまず使われない。
-      研修室（吸音面 α=0.951）では Eyring-Knudsen の半分近い値が出る。
+    ★**ミリントンの式は落とした**（2026-08-17 ユーザー判断）。
+      `ミリントン・セッテの式`（Millington 1932 / Sette 1933）は面ごとに対数を取る
+      `-Σ Sᵢ ln(1-αᵢ)` で、**αᵢ→1 の面が 1 枚でもあると A が発散して T→0** になる
+      （開口が 1 つあるだけで残響ゼロという結論になる）。実務では使われないため。
+      研修室（吸音面 α=0.951）では Eyring-Knudsen の半分近い値が出ていた。
 
     戻り値: dict
         'frequencies' / 'volume' / 'total_area' / 'mean_free_path'
-        'mean_absorption' (nf,) / 'equivalent_area' (nf,)
-        'sabine' / 'eyring' / 'millington' 各 (nf,) [s]
+        'mean_absorption' (nf,) / 'equivalent_area' (nf,) / 'air_absorption_area' (nf,)
+        'sabine' / 'eyring' / 'eyring_knudsen' 各 (nf,) [s]
         'surface'  … `surface_summary()` の結果
     """
     if atmosphere is None:
@@ -182,12 +180,11 @@ def statistical_reverberation(mesh, volume, frequencies=None, atmosphere=None,
 
     mean_absorption = (areas @ alpha) / total_area          # (nf,)
 
-    # ln(1-α) は α → 1 で発散する。1 に張り付いた材料があると Eyring/Millington は
+    # ln(1-ᾱ) は ᾱ → 1 で発散する。1 に張り付いた材料ばかりだと Eyring は
     # 意味を持たなくなるので、そこは NaN にして知らせる
     with np.errstate(divide="ignore", invalid="ignore"):
         eyring_area = -total_area * np.log(np.where(mean_absorption < 1.0,
                                                     1.0 - mean_absorption, np.nan))
-        millington_area = -(areas @ np.log(np.where(alpha < 1.0, 1.0 - alpha, np.nan)))
 
     def to_time(equivalent_area):
         with np.errstate(divide="ignore", invalid="ignore"):
@@ -203,9 +200,11 @@ def statistical_reverberation(mesh, volume, frequencies=None, atmosphere=None,
         "mean_absorption": mean_absorption,
         "equivalent_area": total_area * mean_absorption,
         "air_absorption_area": air,
-        "sabine": to_time(total_area * mean_absorption + air),
-        "eyring": to_time(eyring_area + air),
-        "millington": to_time(millington_area + air),
+        # **Sabine と Eyring は空気吸収を入れない素の形**。
+        # 空気吸収を足したのが Eyring-Knudsen で、差がそのまま空気吸収の効きになる
+        "sabine": to_time(total_area * mean_absorption),
+        "eyring": to_time(eyring_area),
+        "eyring_knudsen": to_time(eyring_area + air),
         "surface": surface,
     }
 
@@ -220,38 +219,31 @@ def statistical_reverberation(mesh, volume, frequencies=None, atmosphere=None,
             entry = surface["materials"][name]
             print(f"[統計残響]   {name:<20} 面積 {entry['area']:8.3f} m2  "
                   f"α {np.array2string(entry['absorption'], precision=3)}")
-        labels = statistical_labels(result)
-        print(f"[統計残響] {'周波数':>10}{'平均α':>9}{labels['sabine']:>10}"
-              f"{labels['eyring']:>16}{labels['millington']:>12}")
-        for i, fc in enumerate(frequencies):
-            def cell(key, width):
-                value = result[key][i]
-                return "---".rjust(width) if np.isnan(value) else f"{value:{width}.3f}"
-            print(f"[統計残響] {fc:9.0f}Hz{mean_absorption[i]:9.3f}"
-                  f"{cell('sabine', 10)}{cell('eyring', 16)}{cell('millington', 12)}")
+        # 周波数を**横**に並べる（table.py の共通ルール）。
+        # 画面の表とグラフと CSV で向きを揃えておく
+        print(f"[統計残響] {'':>16}" + "".join(f"{f:>10.0f}" for f in frequencies))
+        for key, label in ([("mean_absorption", "平均α")]
+                           + list(STATISTICAL_LABELS.items())):
+            def cell(value):
+                return "     ---" if np.isnan(value) else f"{value:10.3f}"
+            print(f"[統計残響] {label:>16}"
+                  + "".join(cell(v) for v in result[key]))
 
     return result
 
 
-def statistical_labels(result=None, include_air_absorption=None):
-    """表示に使う式の名前。**空気吸収を入れているかで呼び名が変わる。**
+# 統計残響式の表示名。**空気吸収の有無で名前が変わる**（ユーザー指摘 2026-08-17）。
+# アイリングの式そのものは -S ln(1-ᾱ) までで、4mV を足した形はヌードセンの寄与
+STATISTICAL_LABELS = {
+    "sabine": "Sabine",
+    "eyring": "Eyring",
+    "eyring_knudsen": "Eyring-Knudsen",
+}
 
-    アイリングの式そのものは `-S ln(1-ᾱ)` までで、**空気吸収の項 `4mV` を
-    足した形はヌードセンの寄与**なので `アイリング・ヌードセンの式` と呼ぶ
-    （ユーザー指摘 2026-08-17。それまで空気吸収込みなのに `Eyring` と出していた）。
 
-    `result` は `statistical_reverberation()` の戻り値。
-    `air_absorption_area` が 0 でなければ空気吸収込みと判断する。
-    """
-    if include_air_absorption is None:
-        air = np.asarray((result or {}).get("air_absorption_area", 0.0))
-        include_air_absorption = bool(np.any(air > 0.0))
-    return {
-        "sabine": "Sabine",
-        "eyring": "Eyring-Knudsen" if include_air_absorption else "Eyring",
-        "millington": "Millington",
-        "air": include_air_absorption,
-    }
+def statistical_labels(result=None):
+    """統計残響式の表示名 {キー: 名前}。`result` は互換のため受けるだけ。"""
+    return dict(STATISTICAL_LABELS)
 
 
 def statistical_reverberation_from_model(model, **kwargs):
@@ -268,15 +260,15 @@ def statistical_reverberation_from_model(model, **kwargs):
 
 
 def write_statistical_reverberation(filename, result):
-    """統計残響式の結果を CSV に保存する。"""
-    header = ["frequency_hz", "mean_absorption", "equivalent_area_m2",
-              "sabine_s", "eyring_s", "millington_s"]
-    rows = np.column_stack([result["frequencies"], result["mean_absorption"],
-                            result["equivalent_area"], result["sabine"],
-                            result["eyring"], result["millington"]])
-    np.savetxt(filename, rows, delimiter=",", header=",".join(header),
-               comments="", fmt="%.12g")
-    return filename
+    """統計残響式の結果を CSV に保存する。**周波数は横**（table.py の共通ルール）。"""
+    return tb.write_frequency_table(filename, result["frequencies"], {
+        "mean_absorption": result["mean_absorption"],
+        "equivalent_area_m2": result["equivalent_area"],
+        "air_absorption_area_m2": result["air_absorption_area"],
+        "sabine_s": result["sabine"],
+        "eyring_s": result["eyring"],
+        "eyring_knudsen_s": result["eyring_knudsen"],
+    })
 
 
 def schroeder_integral(x):
@@ -537,25 +529,18 @@ def clarity_measures(time, ir, frequencies=None, method="butter",
 
 
 def write_clarity_measures(filename, result):
-    """明瞭度系の指標を CSV に保存する。"""
-    header = ["frequency_hz", "C50_db", "C80_db", "D50", "Ts_s"]
-    rows = np.column_stack([result["frequencies"], result["C50"], result["C80"],
-                            result["D50"], result["Ts"]])
-    np.savetxt(filename, rows, delimiter=",", header=",".join(header),
-               comments="", fmt="%.12g")
-    return filename
+    """明瞭度系の指標を CSV に保存する。**周波数は横**（table.py の共通ルール）。"""
+    return tb.write_frequency_table(filename, result["frequencies"], {
+        "C50_db": result["C50"], "C80_db": result["C80"],
+        "D50": result["D50"], "Ts_s": result["Ts"],
+    })
 
 
 def write_decay_measures(filename, result):
-    """EDT / T20 / T30 を CSV に保存する。"""
-    names = list(result["measures"])
-    header = ["frequency_hz"] + [f"{n}_s" for n in names] + ["curvature_percent"]
-    rows = np.column_stack([result["frequencies"]]
-                           + [result["measures"][n] for n in names]
-                           + [result["curvature"]])
-    np.savetxt(filename, rows, delimiter=",", header=",".join(header),
-               comments="", fmt="%.12g")
-    return filename
+    """EDT / T20 / T30 を CSV に保存する。**周波数は横**（table.py の共通ルール）。"""
+    rows = {f"{name}_s": values for name, values in result["measures"].items()}
+    rows["curvature_percent"] = result["curvature"]
+    return tb.write_frequency_table(filename, result["frequencies"], rows)
 
 
 def write_reverberation_time(filename, result):
@@ -566,13 +551,10 @@ def write_reverberation_time(filename, result):
     """
     if "measures" in result:
         return write_decay_measures(filename, result)
-    np.savetxt(filename,
-               np.column_stack([result["frequencies"], result["reverberation_time"],
-                                result["curvature"]]),
-               delimiter=",",
-               header="frequency_hz,reverberation_time_s,curvature_percent",
-               comments="", fmt="%.12g")
-    return filename
+    return tb.write_frequency_table(filename, result["frequencies"], {
+        "reverberation_time_s": result["reverberation_time"],
+        "curvature_percent": result["curvature"],
+    })
 
 
 # 減衰曲線を CSV に書き出すときの時間刻み [s]。1 ms（= 1 kHz 相当）。
@@ -600,7 +582,9 @@ def write_decay_curve(filename, result, interval=DECAY_CSV_INTERVAL):
         dt = float(time[1] - time[0])
         step = max(1, int(round(interval / dt)))
         time, decay = time[::step], decay[:, ::step]
-    header = ["time_s"] + [f"decay_{f:.0f}Hz_db" for f in result["frequencies"]]
+    # 1 行が時刻なので、周波数は**列**（table.py の共通ルール）
+    header = ["time_s"] + [tb.band_column("decay", f, "db")
+                           for f in result["frequencies"]]
     rows = np.column_stack([time, decay.T])
     np.savetxt(filename, rows, delimiter=",", header=",".join(header),
                comments="", fmt="%.12g")

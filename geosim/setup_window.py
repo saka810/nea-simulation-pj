@@ -188,7 +188,7 @@ class SetupWindow:
                         variable=self.vars["two_sided"]).grid(row=3, column=1,
                                                               sticky="w", padx=8, pady=3)
         self.vars["statistical"] = tk.BooleanVar()
-        ttk.Checkbutton(frame, text="統計残響式（Sabine / Eyring-Knudsen / Millington）も計算する",
+        ttk.Checkbutton(frame, text="統計残響式（Sabine / Eyring / Eyring-Knudsen）も計算する",
                         variable=self.vars["statistical"]).grid(row=4, column=1,
                                                                 sticky="w", padx=8)
 
