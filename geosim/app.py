@@ -99,12 +99,12 @@ def _report_saved(project):
         names = [n for n in rt.dtype.names if n != "frequency_hz"]
         print("  " + "周波数".rjust(8)
               + "".join(f"{short.get(n, n):>9}" for n in names)
-              + ("" if stat is None else f"{'Sabine':>9}{'Eyring':>9}"))
+              + ("" if stat is None else f"{'Sabine':>9}{'Eyring-Knudsen':>16}"))
         stat = None if stat is None else np.atleast_1d(stat)
         for i, fc in enumerate(rt["frequency_hz"]):
             cells = "".join(f"{rt[n][i]:9.3f}" for n in names)
             extra = ("" if stat is None
-                     else f"{stat['sabine_s'][i]:9.3f}{stat['eyring_s'][i]:9.3f}")
+                     else f"{stat['sabine_s'][i]:9.3f}{stat['eyring_s'][i]:16.3f}")
             print(f"  {fc:7.0f}Hz{cells}{extra}")
 
     clarity = saved.get("clarity")
@@ -125,16 +125,16 @@ def _report(project, results):
     if rt is not None:
         names = list(rt["measures"])
         print("  " + "周波数".rjust(8) + "".join(f"{n:>9}" for n in names)
-              + f"{'Sabine':>9}{'Eyring':>9}")
+              + f"{'Sabine':>9}{'Eyring-Knudsen':>16}")
         for i, fc in enumerate(rt["frequencies"]):
             cells = "".join(f"{rt['measures'][n][i]:9.3f}" for n in names)
             extra = ""
             if stat is not None:
-                extra = f"{stat['sabine'][i]:9.3f}{stat['eyring'][i]:9.3f}"
+                extra = f"{stat['sabine'][i]:9.3f}{stat['eyring'][i]:16.3f}"
             print(f"  {fc:7.0f}Hz{cells}{extra}")
 
     if stat is None and project.statistical:
-        print("\n  ※ 統計残響式（Sabine / Eyring）は計算できませんでした。")
+        print("\n  ※ 統計残響式（Sabine / Eyring-Knudsen）は計算できませんでした。")
         print("     このモデルは閉じていないので容積が自動で決まりません。")
         print("     条件入力の「室容積」に値を入れると比較できます"
               "（床面積 × 天井高で構いません）。")

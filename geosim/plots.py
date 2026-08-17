@@ -233,7 +233,9 @@ def reverberation(path, frequencies, measures, statistical=None, curvature=None)
 
     if statistical:
         dashes = {"sabine": (2, 2), "eyring": (5, 2), "millington": (1, 1)}
-        labels = {"sabine": "Sabine", "eyring": "Eyring", "millington": "Millington"}
+        import reverberation as rv
+        # 空気吸収を入れていれば「アイリング・ヌードセン」（rv.statistical_labels 参照）
+        labels = rv.statistical_labels(statistical)
         for key, dash in dashes.items():
             if key in statistical:
                 ax.plot(x, statistical[key], color="#8b929e", linewidth=1.2,

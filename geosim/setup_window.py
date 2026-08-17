@@ -188,7 +188,7 @@ class SetupWindow:
                         variable=self.vars["two_sided"]).grid(row=3, column=1,
                                                               sticky="w", padx=8, pady=3)
         self.vars["statistical"] = tk.BooleanVar()
-        ttk.Checkbutton(frame, text="統計残響式（Sabine / Eyring / Millington）も計算する",
+        ttk.Checkbutton(frame, text="統計残響式（Sabine / Eyring-Knudsen / Millington）も計算する",
                         variable=self.vars["statistical"]).grid(row=4, column=1,
                                                                 sticky="w", padx=8)
 
@@ -355,7 +355,7 @@ class SetupWindow:
         self.vars["volume"].set(f"{volume:.2f}")
         messagebox.showinfo("室容積",
                             f"{volume:.2f} m³ を入れました\n（{note}）\n\n"
-                            f"統計残響式（Sabine / Eyring）はこの値を使います。")
+                            f"統計残響式（Sabine / Eyring-Knudsen）はこの値を使います。")
 
     def _on_save(self):
         error = self._collect()

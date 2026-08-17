@@ -59,7 +59,7 @@ FIR_NUMTAPS = 4096
 
 
 # ------------------------------------------------------------------------------
-# 統計的残響式（Sabine / Eyring / Millington）
+# 統計的残響式（Sabine / Eyring-Knudsen / Millington）
 #
 # 音線を飛ばさず、**室容積 V と各面の面積・吸音率だけ**から残響時間を見積もる。
 # 拡散音場（音がどの方向からも等確率に来る）を前提にした古典的な式で、
@@ -138,10 +138,23 @@ def statistical_reverberation(mesh, volume, frequencies=None, atmosphere=None,
     | 式 | 等価吸音面積 A | 性質 |
     |---|---|---|
     | Sabine | `S·ᾱ + 4mV` | 最も古典的。**吸音率が小さいとき（〜0.2）に妥当**。ᾱ→1 でも T が 0 にならない欠点 |
-    | Eyring | `-S·ln(1-ᾱ) + 4mV` | 反射のたびに (1-ᾱ) 倍になると考える。**吸音率が大きいときはこちら** |
-    | Millington | `-Σ Sᵢ·ln(1-αᵢ) + 4mV` | 面ごとに個別に対数を取る。**面によって吸音率が大きく違うときに向く**。αᵢ→1 の面があると発散する |
+    | Eyring-Knudsen | `-S·ln(1-ᾱ) + 4mV` | 反射のたびに (1-ᾱ) 倍になると考える。**吸音率が大きいときはこちら** |
+    | Millington | `-Σ Sᵢ·ln(1-αᵢ) + 4mV` | 面ごとに個別に対数を取る。αᵢ→1 の面があると発散する |
 
     ᾱ は面積で重み付けした平均吸音率 `Σ Sᵢαᵢ / S`。
+
+    ★**名前について。** アイリングの式そのものは `-S ln(1-ᾱ)` までで、
+      **空気吸収の項 `4mV` を足した形はヌードセンの寄与**なので
+      `アイリング・ヌードセンの式` と呼ぶのが正しい（ユーザー指摘 2026-08-17）。
+      `include_air_absorption=False` にしたときだけ素の `Eyring`。
+      表示名は `statistical_labels()` が切り替える。
+
+    ★**ミリントンの式は参考値**。`ミリントン・セッテの式`（Millington 1932 /
+      Sette 1933）で、平均してから対数を取る Eyring と違い**面ごとに対数を取る**。
+      吸音率が面ごとに大きく違うときの理屈は通っているが、
+      **αᵢ→1 の面が 1 枚でもあると A が発散して T→0 になる**（開口が 1 つあるだけで
+      残響ゼロという結論になってしまう）ため、実務ではまず使われない。
+      研修室（吸音面 α=0.951）では Eyring-Knudsen の半分近い値が出る。
 
     戻り値: dict
         'frequencies' / 'volume' / 'total_area' / 'mean_free_path'
@@ -207,16 +220,38 @@ def statistical_reverberation(mesh, volume, frequencies=None, atmosphere=None,
             entry = surface["materials"][name]
             print(f"[統計残響]   {name:<20} 面積 {entry['area']:8.3f} m2  "
                   f"α {np.array2string(entry['absorption'], precision=3)}")
-        print(f"[統計残響] {'周波数':>10}{'平均α':>9}{'Sabine':>10}"
-              f"{'Eyring':>10}{'Millington':>12}")
+        labels = statistical_labels(result)
+        print(f"[統計残響] {'周波数':>10}{'平均α':>9}{labels['sabine']:>10}"
+              f"{labels['eyring']:>16}{labels['millington']:>12}")
         for i, fc in enumerate(frequencies):
             def cell(key, width):
                 value = result[key][i]
                 return "---".rjust(width) if np.isnan(value) else f"{value:{width}.3f}"
             print(f"[統計残響] {fc:9.0f}Hz{mean_absorption[i]:9.3f}"
-                  f"{cell('sabine', 10)}{cell('eyring', 10)}{cell('millington', 12)}")
+                  f"{cell('sabine', 10)}{cell('eyring', 16)}{cell('millington', 12)}")
 
     return result
+
+
+def statistical_labels(result=None, include_air_absorption=None):
+    """表示に使う式の名前。**空気吸収を入れているかで呼び名が変わる。**
+
+    アイリングの式そのものは `-S ln(1-ᾱ)` までで、**空気吸収の項 `4mV` を
+    足した形はヌードセンの寄与**なので `アイリング・ヌードセンの式` と呼ぶ
+    （ユーザー指摘 2026-08-17。それまで空気吸収込みなのに `Eyring` と出していた）。
+
+    `result` は `statistical_reverberation()` の戻り値。
+    `air_absorption_area` が 0 でなければ空気吸収込みと判断する。
+    """
+    if include_air_absorption is None:
+        air = np.asarray((result or {}).get("air_absorption_area", 0.0))
+        include_air_absorption = bool(np.any(air > 0.0))
+    return {
+        "sabine": "Sabine",
+        "eyring": "Eyring-Knudsen" if include_air_absorption else "Eyring",
+        "millington": "Millington",
+        "air": include_air_absorption,
+    }
 
 
 def statistical_reverberation_from_model(model, **kwargs):
