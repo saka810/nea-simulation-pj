@@ -99,11 +99,13 @@ class DirectionPreview:
 
 
 def show(total=2000, drawn=None, title="音線の飛び方", off_screen=False,
-         screenshot=None, window_size=(1100, 800), panel=None):
+         screenshot=None, window_size=(1100, 800), panel=None,
+         save_dir=None, ascii_fallback=None):
     """音線ベクトルのプレビューを開く。"""
     want_panel = (not off_screen) if panel is None else bool(panel)
     plotter, panel = vg.make_plotter(title, window_size, off_screen,
-                                     panel=want_panel)
+                                     panel=want_panel,
+                                     ascii_fallback=ascii_fallback)
     preview = DirectionPreview(plotter, total, drawn=drawn)
 
     # 音源の位置に球を置く（原点）。大きさは音線の長さ 1 に対する目安
@@ -118,8 +120,12 @@ def show(total=2000, drawn=None, title="音線の飛び方", off_screen=False,
         panel.slider("描く本数", [1, min(total, MAX_DRAWN)], preview.drawn,
                      lambda v: preview.rebuild(int(round(v))), fmt="%.0f")
         panel.heading("操作")
+        if save_dir:
+            vg.add_screenshot_key(plotter, save_dir, "音線の飛び方", key="g")
         panel.text("ドラッグ 回転 / ホイール 拡縮\n"
-                   "z/x/c/v 視点   r リセット\nq 閉じる", color="#7f8794")
+                   "z/x/c/v 視点   r リセット\n"
+                   + ("g いまの画面を画像で保存\n" if save_dir else "")
+                   + "q 閉じる", color="#7f8794")
         panel.relayout()
         preview._refresh_label()
 
@@ -129,6 +135,7 @@ def show(total=2000, drawn=None, title="音線の飛び方", off_screen=False,
             plotter.screenshot(screenshot)
         plotter.close()
         return preview
+    vg.finish_window(plotter)
     plotter.show()
     return preview
 

@@ -31,6 +31,10 @@ PROJECT_FILE = "project.json"
 NORMALS_FILE = "normals.json"
 RESULT_DIR = "結果"
 FIGURE_DIR = "図"
+# 画面から手で撮った画像・動画の置き場。**`図/` の直下ではなく子フォルダにする。**
+# `clear_results()` が `図/` の PNG を消してしまうので、
+# 同じ所に置くと計算し直すたびに撮った画像が巻き添えで消える
+SCREENSHOT_DIR = os.path.join(FIGURE_DIR, "画面")
 
 # 結果ファイルの名前。**キーはコード側の呼び名**で、値が実ファイル名
 RESULT_FILES = {
@@ -99,6 +103,25 @@ class Project:
 
     def figure_path(self, name):
         return self.path(FIGURE_DIR, name)
+
+    def screenshot_dir(self):
+        """画面から手で撮った画像・動画の置き場（`図/画面/`）。"""
+        folder = self.path(SCREENSHOT_DIR)
+        os.makedirs(folder, exist_ok=True)
+        return folder
+
+    def ascii_tag(self):
+        """ウィンドウのタイトルの予備に使う短い名前（ASCII で書けるときだけ）。
+
+        VTK のウィンドウは日本語のタイトルが化けることがあり、その場合に
+        英字の題へ差し替える（`view_model_gui.set_window_title`）。
+        プロジェクト名は日本語のことが多いので**フォルダ名のほうを先に見る**。
+        """
+        for candidate in (os.path.basename(self.folder), self.name):
+            candidate = (candidate or "").strip()
+            if candidate and all(ord(c) < 128 for c in candidate):
+                return candidate
+        return ""
 
     def resolve(self, value):
         """project.json に入っている相対パスを実際のパスに直す。"""

@@ -39,6 +39,10 @@
               `o` 不透明度の対象を切り替え / `m` モデル表示の ON/OFF
     音粒子    `スペース` 再生・一時停止 / `←` `→` 1 コマ送り / `Home` 先頭へ /
               下の横スライダ 時刻を指定
+    保存      **`g` いまの画面をそのまま画像で保存**（角度も設定もそのまま）
+              **`b` いまの視点で音粒子の動画（GIF）を保存**
+              置き場はプロジェクトの `図/画面/`。撮るたびに連番が増える
+              （`save_dir` を渡したときだけ。渡さなければキーも出ない）
 
 起動時の本数は `--max-rays`（既定 60）と `--max-particles`（既定は候補すべて）。
 候補そのものの上限は `--pool`（既定 2000）＝スライダの上限になる。
@@ -670,6 +674,7 @@ def run_animation(plotter, animation, interval=30):
     except Exception:
         pass
 
+    vg.finish_window(plotter)
     plotter.show(interactive_update=True, auto_close=False)
     while not closed["flag"]:
         if getattr(plotter, "_closed", False) or plotter.render_window is None:
@@ -683,6 +688,69 @@ def run_animation(plotter, animation, interval=30):
             break
     plotter.close()
     return animation
+
+
+def add_movie_key(plotter, animation, folder, stem="音粒子", key="b",
+                  max_width=720, max_frames=400, duration=40, colors=128):
+    """`b` で、**いまの視点・いまの設定のまま**音粒子の動画（GIF）を保存する。
+
+    `save_movie()` が別に off-screen で作り直すのと違い、こちらは
+    **画面に出ているウィンドウをそのまま録る**。回して見つけた角度や、
+    絞った粒子数・離散化時間がそのまま動画になる。
+
+    GIF にしているのは追加の依存を増やさないため（Pillow は matplotlib の依存で
+    既に入っている。mp4 には ffmpeg が要る）。
+
+    そのぶんの制約:
+      ・`max_width` に縮めて、コマごとに 128 色へ落とす（GIF の色数上限は 256）
+      ・コマ数は `max_frames` で頭打ちにして等間隔に間引く
+        （離散化時間を 0.2 ms にすると 3 秒で 15000 コマになり、
+          そのまま溜めるとメモリが持たない）
+    """
+    def save():
+        from PIL import Image
+
+        path = vg.next_free_path(folder, stem, ".gif")
+        # `frames` と `times` は `set_time_step()` が揃えているが、
+        # 食い違っていても落ちないように短いほうに合わせる
+        total = min(int(animation.frames), len(animation.times))
+        steps = np.arange(total)
+        if total > max_frames:
+            steps = np.unique(np.linspace(0, total - 1,
+                                          max_frames).round().astype(int))
+            print(f"[view_rays] コマが多いので {total} → {len(steps)} に"
+                  f"間引きます（動画の長さは変わりません）")
+
+        playing, keep = animation.playing, animation.step
+        animation.playing = False
+        print(f"[view_rays] 動画を作っています（{len(steps)} コマ）…")
+
+        images = []
+        try:
+            for step in steps:
+                animation.update(int(step))
+                image = Image.fromarray(plotter.screenshot(return_img=True))
+                if image.width > max_width:
+                    height = round(image.height * max_width / image.width)
+                    image = image.resize((max_width, height), Image.LANCZOS)
+                images.append(image.convert("P", palette=Image.ADAPTIVE,
+                                            colors=colors))
+            images[0].save(path, save_all=True, append_images=images[1:],
+                           duration=duration, loop=0, optimize=True)
+        except Exception as e:
+            print(f"[view_rays] 動画を保存できませんでした: {type(e).__name__}: {e}")
+            return None
+        finally:
+            animation.update(keep)
+            animation.playing = playing
+
+        size = os.path.getsize(path) / 1e6
+        print(f"[view_rays] 動画を保存しました: {path}"
+              f"（{len(images)} コマ / {size:.1f} MB）")
+        return path
+
+    plotter.add_key_event(key, save)
+    return save
 
 
 def save_movie(raylog, model, filename, index=None, frames=240, band=None,
@@ -722,7 +790,7 @@ def view(dxf_path, raylog_path, mode="both", absorption=None, unit=None,
          max_particles=None, pool_size=2000,
          max_reflection=None, colour="energy", band=None, frames=240,
          opacity=0.12, layer_opacity=None, movie=None, point_size=9.0,
-         screenshot=None, interval=30):
+         screenshot=None, interval=30, save_dir=None, ascii_fallback=None):
     """モデルの上に音線と音粒子を重ねて表示する。
 
     max_rays / max_particles
@@ -767,7 +835,7 @@ def view(dxf_path, raylog_path, mode="both", absorption=None, unit=None,
     plotter = vg.build_plotter(model, title=title, off_screen=off_screen,
                                show_normals=False, opacity=opacity,
                                layer_opacity=layer_opacity, show_summary=False,
-                               panel=True)
+                               panel=True, ascii_fallback=ascii_fallback)
     panel = vg.control_panel(plotter)
     font = vg.japanese_font()
 
@@ -817,11 +885,29 @@ def view(dxf_path, raylog_path, mode="both", absorption=None, unit=None,
                                      mode="rays", panel=panel)
             plotter.add_key_event("Tab", switch.toggle)
 
+        # ---- いまの画面をそのまま保存する（G-12）----
+        help_lines = ["e 値を数字で入力",
+                      "z/x/c/v 視点   r リセット   q 終了"]
+        if save_dir:
+            # ファイル名は**いま何を見ているか**で変える。音粒子は時刻も入れる
+            # （止めた場面を何枚も撮ったとき、あとで見分けられるように）
+            def stem():
+                showing = switch.mode if switch is not None else \
+                    ("particles" if animation is not None else "rays")
+                if showing == "particles" and animation is not None:
+                    return f"音粒子_{animation.times[animation.step] * 1000:.0f}ms"
+                return "音線"
+
+            vg.add_screenshot_key(plotter, save_dir, stem, key="g")
+            help_lines.insert(0, "g いまの画面を画像で保存")
+            if animation is not None:
+                add_movie_key(plotter, animation, save_dir, key="b")
+                help_lines.insert(1, "b いまの視点で動画（GIF）を保存")
+
         panel.heading("音線の情報")
         panel.text(raylog.summary().replace(" / ", "\n"))
         panel.heading("操作")
-        panel.text("e 値を数字で入力\nz/x/c/v 視点   r リセット   q 終了",
-                   color="#7f8794")
+        panel.text("\n".join(help_lines), color="#7f8794")
         panel.enable_value_input("e")
         panel.relayout()
 
@@ -833,6 +919,7 @@ def view(dxf_path, raylog_path, mode="both", absorption=None, unit=None,
     elif animation is not None:
         run_animation(plotter, animation, interval=interval)
     else:
+        vg.finish_window(plotter)
         plotter.show()
     return raylog
 

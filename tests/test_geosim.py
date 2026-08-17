@@ -1100,6 +1100,68 @@ def test_redraw():
     shutil.rmtree(empty.folder, ignore_errors=True)
 
 
+# ---------------------------------------------------------------- 画面の保存
+def test_capture():
+    print("\n[22] 画面の保存とウィンドウのタイトル（G-12）")
+    import shutil
+    import tempfile
+
+    import project as pj
+    import view_model_gui as vg
+
+    # ---- タイトルの予備（ASCII 判定）----
+    check("ASCII ならそのまま通す", vg.ascii_tag("JR") == "JR")
+    check("日本語は通さない（化けるので）", vg.ascii_tag("研修室") == "")
+    check("空や空白は通さない",
+          vg.ascii_tag("") == "" and vg.ascii_tag("   ") == "")
+    check("予備の題を組み立てる",
+          vg.ascii_title("normals", "JR") == "geosim - normals [JR]",
+          vg.ascii_title("normals", "JR"))
+    check("名前が使えなければ題だけ",
+          vg.ascii_title("normals", "研修室") == "geosim - normals")
+
+    # ---- 連番（撮るたびに増える。上書きしない）----
+    folder = tempfile.mkdtemp(prefix="geosim_shot_")
+    first = vg.next_free_path(folder, "法線")
+    check("1 枚目は _01", os.path.basename(first) == "法線_01.png",
+          os.path.basename(first))
+    check("撮る前は同じ名前を返す", vg.next_free_path(folder, "法線") == first)
+    open(first, "w").close()
+    second = vg.next_free_path(folder, "法線")
+    check("2 枚目は _02（上書きしない）",
+          os.path.basename(second) == "法線_02.png", os.path.basename(second))
+    check("種類が違えば別の連番",
+          os.path.basename(vg.next_free_path(folder, "音線")) == "音線_01.png")
+
+    # ---- プロジェクト側 ----
+    project = pj.Project(tempfile.mkdtemp(prefix="geosim_proj_"), name="研修室")
+    project.ensure_dirs()
+    shots = project.screenshot_dir()
+    check("画面の置き場が 図/画面/", os.path.isdir(shots)
+          and os.path.basename(shots) == "画面"
+          and os.path.basename(os.path.dirname(shots)) == "図", shots)
+    check("フォルダ名が ASCII ならタイトルの予備に使える",
+          project.ascii_tag() == os.path.basename(project.folder),
+          project.ascii_tag())
+    check("プロジェクト名が日本語でも落ちない",
+          isinstance(pj.Project(os.path.join(project.folder, "研修室"),
+                                name="研修室").ascii_tag(), str))
+
+    # ★ここが肝。**計算し直しても手で撮った画像は消えない**こと。
+    #   `clear_results()` は 図/ の PNG を消すので、同じ場所に置くと巻き添えになる
+    manual = os.path.join(shots, "法線_01.png")
+    open(manual, "w").close()
+    auto = project.figure_path("modes.png")
+    open(auto, "w").close()
+    project.clear_results(verbose=False)
+    check("計算し直すと自動生成の図は消える", not os.path.exists(auto))
+    check("★手で撮った画像は消えない（図/画面/ に分けてあるから）",
+          os.path.exists(manual))
+
+    shutil.rmtree(folder, ignore_errors=True)
+    shutil.rmtree(project.folder, ignore_errors=True)
+
+
 def main():
     print("geosim 数値検証")
     print(f"  Python {sys.version.split()[0]} / numpy {np.__version__}")
@@ -1112,7 +1174,7 @@ def main():
                test_statistical_reverberation, test_ray_log,
                test_normals, test_check_model, test_clarity,
                test_project, test_resample, test_direction, test_modes,
-               test_mode_buildup, test_redraw):
+               test_mode_buildup, test_redraw, test_capture):
         fn()
 
     failed = [name for name, ok in _results if not ok]

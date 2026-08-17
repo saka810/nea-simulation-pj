@@ -26,7 +26,10 @@ CAD で面を 1 枚ずつ描くと巻き順と押し出し方向で向きが決�
     `1`〜`9`  そのレイヤをまとめて反転
     `a` 自動判定どおりに揃える   `d` CAD の巻き順に戻す   `i` 全反転
     `n` 法線の矢印 ON/OFF        `o` 不透明度の対象を切り替え
+    `g` **いまの画面を画像で保存**（`図/画面/法線_01.png` … 連番）
     `s` **保存して閉じる**       `q` 保存せずに閉じる
+
+`p` は VTK のピック（面の枠選択）に取られているので、撮影は `g`（grab）にしてある。
 """
 
 import numpy as np
@@ -61,7 +64,8 @@ class NormalEditor:
     （自動判定の結果もここに畳み込んでおくので、保存したものを読めば再現できる）。
     """
 
-    def __init__(self, model, flipped=None, title="法線の確認", head_azimuth=None):
+    def __init__(self, model, flipped=None, title="法線の確認", head_azimuth=None,
+                 save_dir=None, ascii_fallback=None):
         # 受音点に置く「人」の正面方向 [度]（真上から見て +X から反時計回り）。
         # G-5 の伝搬方向の図で「前・後ろ・左・右」を決めるのに使う。
         # CAD で表すのは難しいという判断で、ここ（3D が見えている画面）で決める
@@ -81,6 +85,9 @@ class NormalEditor:
         self.flipped = set(model.flipped_faces if flipped is None else flipped)
         self.saved = False
         self.title = title
+        # `g` で撮った画像の置き場（`図/画面/`）。指定が無ければ撮影キーを出さない
+        self.save_dir = save_dir
+        self.ascii_fallback = ascii_fallback
 
         # 自動判定（レイの偶奇）。ここでは**反転するか否かの判定にしか使わない**
         self.layers = sorted({f.material for f in self.mesh})
@@ -218,7 +225,8 @@ class NormalEditor:
         """
         want_panel = (not off_screen) if panel is None else bool(panel)
         self.plotter, panel = vg.make_plotter(self.title, window_size, off_screen,
-                                              panel=want_panel)
+                                              panel=want_panel,
+                                              ascii_fallback=self.ascii_fallback)
         self.panel = panel
         font = vg.japanese_font()
 
@@ -287,7 +295,8 @@ class NormalEditor:
                        "d CAD の巻き順に戻す\n"
                        "i 全反転   n 法線矢印\n"
                        "z/x/c/v 視点   o 不透明度の対象\n"
-                       "s 保存して閉じる\n"
+                       + ("g いまの画面を画像で保存\n" if self.save_dir else "")
+                       + "s 保存して閉じる\n"
                        "q 保存せず閉じる", color="#7f8794")
         else:
             self.label = self.plotter.add_text(" ", position=(14, window_size[1] - 110),
@@ -303,6 +312,9 @@ class NormalEditor:
         self.plotter.add_key_event("i", self.flip_all)     # invert
         self.plotter.add_key_event("n", self._toggle_normals)
         self.plotter.add_key_event("s", self._save_and_close)
+        # `p` は面の枠選択（VTK のピック）に取られているので、撮影は `g`（grab）
+        if self.save_dir:
+            vg.add_screenshot_key(self.plotter, self.save_dir, "法線", key="g")
         for k in range(9):
             self.plotter.add_key_event(str(k + 1),
                                        lambda k=k: self.toggle_layer(k))
@@ -323,6 +335,7 @@ class NormalEditor:
                 self.plotter.screenshot(screenshot)
             self.plotter.close()
             return self.saved
+        vg.finish_window(self.plotter)
         self.plotter.show()
         return self.saved
 
@@ -382,7 +395,10 @@ def edit(project, model=None, off_screen=False, screenshot=None):
     if model is None:
         model = load_model_for(project)
     editor = NormalEditor(model, title=f"{project.name} — 法線の確認",
-                          head_azimuth=getattr(project, "head_azimuth", 0.0))
+                          head_azimuth=getattr(project, "head_azimuth", 0.0),
+                          save_dir=project.screenshot_dir(),
+                          ascii_fallback=vg.ascii_title("normals",
+                                                        project.ascii_tag()))
     saved = editor.show(off_screen=off_screen, screenshot=screenshot)
     if saved:
         path = project.save_flipped_faces(editor.flipped, editor.count,

@@ -326,8 +326,19 @@ class SetupWindow:
             messagebox.showerror("音線数を確認してください", "1 以上にしてください")
             return
         import view_directions
+        import view_model_gui as vg
+
+        # 保存先はプロジェクトフォルダが決まっているときだけ（`図/画面/`）
+        folder = self.vars["folder"].get().strip()
+        save_dir = tag = None
+        if folder and os.path.isdir(folder):
+            import project as pj
+            save_dir = os.path.join(folder, pj.SCREENSHOT_DIR)
+            tag = pj.Project(folder).ascii_tag()
         try:
-            view_directions.show(total=total)
+            view_directions.show(total=total, save_dir=save_dir,
+                                 ascii_fallback=vg.ascii_title("ray directions",
+                                                               tag or ""))
         except Exception as e:
             messagebox.showerror("表示できませんでした", f"{type(e).__name__}: {e}")
 

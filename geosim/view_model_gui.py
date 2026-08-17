@@ -21,8 +21,12 @@
   中ドラッグ      平行移動
   z / x / c / v   上 / 正面 / 横 / 等角 の視点
   n               法線矢印の表示切り替え
+  g               いまの画面をそのまま画像で保存（`add_screenshot_key` を付けた画面のみ）
   w / s           ワイヤフレーム / 面（VTK の既定キー）
   r               視点リセット、q でウィンドウを閉じる
+
+★**ウィンドウのタイトルに日本語を出すと化ける**（Windows）。
+  `set_window_title()` が検証して、駄目なら英字の題に落とす。事情はその関数に書いてある。
 
 使い方:
     cd geosim
@@ -32,7 +36,9 @@
 """
 
 import argparse
+import ctypes
 import os
+import sys
 
 import numpy as np
 import pyvista as pv
@@ -403,26 +409,195 @@ class ControlPanel:
         return widget
 
 
-def make_plotter(title, window_size, off_screen, panel=True):
+# ------------------------------------------------------------------------------
+# ウィンドウのタイトル（日本語が化ける件の対処）
+# ------------------------------------------------------------------------------
+
+def ascii_tag(text):
+    """ASCII だけで書かれていればそのまま返す。そうでなければ空。
+
+    ウィンドウのタイトルに使えるかどうかの判定に使う（下の事情による）。
+    """
+    text = (text or "").strip()
+    return text if text and all(ord(c) < 128 for c in text) else ""
+
+
+def ascii_title(what, name=""):
+    """タイトルの予備（ASCII 版）を組み立てる。`geosim - normals [JR]` の形。"""
+    name = ascii_tag(name)
+    return f"geosim - {what}" + (f" [{name}]" if name else "")
+
+
+def _window_handle(plotter):
+    """Plotter から Windows のウィンドウハンドルを取り出す（無ければ None）。
+
+    VTK は `_00000000001f026e_p_void` のような SWIG 形式の文字列で返してくる。
+    """
+    try:
+        raw = str(plotter.ren_win.GetGenericWindowId())
+    except Exception:
+        return None
+    try:
+        return int(raw.split("_")[1], 16) if raw.startswith("_") else int(raw, 0)
+    except (ValueError, IndexError):
+        return None
+
+
+def _shown_window_title(plotter):
+    """いま実際にタイトルバーに出ている文字列を読む（Windows のみ）。"""
+    handle = _window_handle(plotter)
+    if handle is None:
+        return None
+    buffer = ctypes.create_unicode_buffer(512)
+    ctypes.windll.user32.GetWindowTextW(ctypes.c_void_p(handle), buffer, 512)
+    return buffer.value
+
+
+def set_window_title(plotter, title, fallback=None):
+    """ウィンドウのタイトルを設定する。**化けたら ASCII の題に落とす**。
+
+    【なぜこんなことをするか】2026-08-16
+    VTK が Windows に作るウィンドウは **ANSI ウィンドウ**（`IsWindowUnicode` が偽）で、
+    日本語のタイトルが**文字によって**化ける。`研修室 — 法線の確認` が
+    `研修室 ?E法線?E確?E` になった（研・修・室・法・線・確は通るのに
+    —・の・認 が化ける）。ユーザーからの指摘で発覚。
+
+    手は一通り試して、どれも駄目だった:
+
+      ・`SetWindowTextW`（ワイド文字版）→ **かえって全部 `?` になる**
+        （ANSI ウィンドウなので書き込み時に ANSI へ変換されてしまう）
+      ・`SendMessageW` で `WM_SETTEXT` → 同上
+      ・`SetWindowTextA` に CP932 のバイト列 → やはり全部 `?`
+        （このウィンドウの ANSI↔Unicode 変換は CP932 ではない）
+
+    そこで**設定したあと読み戻して検証**し、一致しなければ ASCII の題に差し替える。
+    化けた文字列を出したままにするよりは、読める英字のほうがましという判断。
+    **画面の中の見出しは日本語のまま**（フォントを指定して描いているので化けない）。
+
+    Windows 以外では検証を飛ばす（化ける現象自体が Windows のもの）。
+    """
+    try:
+        plotter.ren_win.SetWindowName(title)
+    except Exception:
+        return title
+    if sys.platform != "win32":
+        return title
+
+    shown = _shown_window_title(plotter)
+    if shown is None or shown == title:
+        return title
+
+    safe = fallback or ascii_title("viewer")
+    try:
+        plotter.ren_win.SetWindowName(safe)
+    except Exception:
+        pass
+    return safe
+
+
+def prepare_window(plotter, title, fallback=None):
+    """**`show()` の直前に呼ぶ。** ウィンドウを先に作らせてタイトルを確定させる。
+
+    OS のウィンドウは最初の描画で作られるので、それより前にタイトルを
+    検証することはできない。かといって `show()` はブロックするので後からも呼べない。
+    そこで**ここで 1 回だけ描いてウィンドウを作らせ**、そのうえで設定する。
+
+    ★**描画イベントの中で設定してはいけない。** 最初はそうしていたが、
+      `SetWindowName` は `WM_SETTEXT` を同期で送るため、描画の途中で
+      ウィンドウプロシージャが再入し、**OpenGL のコンテキストごと落ちた**
+      （segfault と、以後のプロセスで `wglChoosePixelFormatARB` に失敗する状態）。
+      描画の外から呼べばこの問題は起きない。
+    """
+    try:
+        plotter.ren_win.Render()
+    except Exception:
+        return title
+    return set_window_title(plotter, title, fallback)
+
+
+# ------------------------------------------------------------------------------
+# 画面の保存
+# ------------------------------------------------------------------------------
+
+def next_free_path(folder, stem, suffix=".png", digits=2):
+    """`stem_01.png` … まだ空いている連番のパスを返す。
+
+    **撮るたびに増える**（上書きしない）。角度を変えて何枚も撮るための配慮。
+    """
+    os.makedirs(folder, exist_ok=True)
+    number = 1
+    while True:
+        path = os.path.join(folder, f"{stem}_{number:0{digits}d}{suffix}")
+        if not os.path.exists(path):
+            return path
+        number += 1
+
+
+def add_screenshot_key(plotter, folder, stem, key="p"):
+    """`p` で「いま画面に出ているとおり」を PNG に保存する。
+
+    **左のパネルごと写す。** どのレイヤを出していたか・不透明度がいくつだったかも
+    一緒に残るほうが、あとで見返したときに条件が分かるため。
+
+    `stem` は文字列でも、呼ぶたびにファイル名の芯を返す関数でもよい
+    （音粒子は時刻をファイル名に入れたいので関数を渡す）。
+    """
+    def save():
+        name = stem() if callable(stem) else stem
+        path = next_free_path(folder, name)
+        try:
+            plotter.screenshot(path)
+        except Exception as e:
+            print(f"[view] 画像を保存できませんでした: {type(e).__name__}: {e}")
+            return None
+        print(f"[view] 画像を保存しました: {path}")
+        return path
+
+    plotter.add_key_event(key, save)
+    return save
+
+
+def make_plotter(title, window_size, off_screen, panel=True, ascii_fallback=None):
     """左に操作パネル、右に 3D を持つ Plotter を作る。
 
     `panel=False` なら従来どおり 1 画面（画像の書き出しなど、操作しないとき用）。
+    `ascii_fallback` … タイトルが化けたときに使う ASCII の題（`set_window_title` 参照）。
     """
     if not panel:
         plotter = pv.Plotter(window_size=window_size, title=title,
                              off_screen=off_screen)
         plotter.set_background(BG_BOTTOM, top=BG_TOP)
-        return plotter, None
+    else:
+        plotter = pv.Plotter(shape=(1, 2),
+                             col_weights=[PANEL_RATIO, 1.0 - PANEL_RATIO],
+                             window_size=window_size, title=title,
+                             off_screen=off_screen, border=False)
+        plotter.subplot(0, 0)
+        plotter.set_background(BG_BOTTOM)
+        plotter.subplot(0, 1)
+        plotter.set_background(BG_BOTTOM, top=BG_TOP)
 
-    plotter = pv.Plotter(shape=(1, 2), col_weights=[PANEL_RATIO, 1.0 - PANEL_RATIO],
-                         window_size=window_size, title=title,
-                         off_screen=off_screen, border=False)
-    plotter.subplot(0, 0)
-    plotter.set_background(BG_BOTTOM)
-    plotter.subplot(0, 1)
-    plotter.set_background(BG_BOTTOM, top=BG_TOP)
+    # タイトルの確定は `show()` の直前（`prepare_window`）。ここではまだ
+    # OS のウィンドウが無いので検証できない
+    _attach(plotter, "geosim_title", (title, ascii_fallback) if not off_screen
+            else None)
+    if not panel:
+        return plotter, None
     return plotter, ControlPanel(plotter, font=japanese_font(),
                                  width_ratio=PANEL_RATIO)
+
+
+def finish_window(plotter):
+    """`make_plotter` に渡した題で、`show()` の直前にタイトルを確定させる。
+
+    各ビューアが `plotter.show()` を呼ぶ直前にこれを挟むだけで済むよう、
+    題は `make_plotter` の時点で Plotter に持たせてある。
+    """
+    stored = (getattr(plotter, "geosim_title", None)
+              or getattr(plotter, "_geosim_title", None))
+    if not stored:
+        return None
+    return prepare_window(plotter, stored[0], stored[1])
 
 
 def triangles_to_polydata(triangles):
@@ -469,7 +644,7 @@ def normal_arrows(poly, length):
 def build_plotter(model, title="モデルビューア", off_screen=False,
                   show_normals=True, normal_ratio=0.06, window_size=(1280, 860),
                   opacity=1.0, show_bounds=True, show_summary=True,
-                  layer_opacity=None, panel=True):
+                  layer_opacity=None, panel=True, ascii_fallback=None):
     """DxfModel から Plotter を組み立てて返す（show() はしない）。
 
     opacity … 面の不透明度。音線を重ねるときは 0.15 くらいにすると中が見える
@@ -495,7 +670,8 @@ def build_plotter(model, title="モデルビューア", off_screen=False,
     diag = float(np.linalg.norm(np.asarray(hi) - np.asarray(lo))) or 1.0
     arrow_len = diag * normal_ratio
 
-    plotter, panel = make_plotter(title, window_size, off_screen, panel=panel)
+    plotter, panel = make_plotter(title, window_size, off_screen, panel=panel,
+                                  ascii_fallback=ascii_fallback)
 
     face_actors = {}
     arrow_actors = {}
@@ -742,6 +918,7 @@ def view(dxf_path, absorption=None, unit=None, orient_normals="cad",
         plotter.close()
         print(f"\n[view_model_gui] 画像を書き出しました: {screenshot}")
     else:
+        finish_window(plotter)
         plotter.show()
     return model
 

@@ -31,6 +31,7 @@ import traceback
 def _visualise(project, results=None):
     """計算結果の可視化ウィンドウを開く（音線 ↔ 音粒子を Tab で切替）。"""
     import project as pj
+    import view_model_gui as vg
     import view_rays as vr
 
     raylog = project.result_path("raylog")
@@ -49,7 +50,10 @@ def _visualise(project, results=None):
                 unit=project.unit, band_number=project.band_number,
                 orient_normals=project.orient_normals,
                 received_only=True, max_rays=60, max_reflection=4,
-                colour="time", opacity=0.10, frames=300, point_size=7)
+                colour="time", opacity=0.10, frames=300, point_size=7,
+                save_dir=project.screenshot_dir(),
+                ascii_fallback=vg.ascii_title("rays and particles",
+                                              project.ascii_tag()))
     except Exception:
         print("[app] 可視化ウィンドウでエラーが起きました:")
         traceback.print_exc()
