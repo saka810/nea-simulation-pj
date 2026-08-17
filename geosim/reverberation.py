@@ -69,6 +69,20 @@ FIR_NUMTAPS = 4096
 # ★閉じた室が前提★ 開いた形状（一面だけの壁など）では容積が定義できないので使えない。
 # ------------------------------------------------------------------------------
 
+def print_frequency_table(frequencies, rows, prefix="[reverberation]", width=10,
+                          label_width=14):
+    """**周波数を横に並べて**画面に出す（table.py の共通ルール）。
+
+    CSV・図・画面で向きが揃っていないと、どこかで読み替えが要る。
+    """
+    print(f"{prefix} {'':>{label_width}}"
+          + "".join(f"{f:>{width}.0f}" for f in frequencies))
+    for name, values in rows:
+        cells = "".join("       ---" if np.isnan(v) else f"{v:{width}.3f}"
+                        for v in np.asarray(values, dtype=float))
+        print(f"{prefix} {name:>{label_width}}{cells}")
+
+
 def triangle_areas(mesh):
     """各三角形の面積 [m^2]。外積の大きさの半分。"""
     v = np.array([np.asarray(m.vertexes, dtype=float) for m in mesh])
@@ -433,21 +447,18 @@ def decay_measures(time, ir, frequencies=None, measures=None, method="butter",
                                  for d in base["decay"]])
 
     if verbose:
-        names = list(values)
-        print("[reverberation] " + "周波数".rjust(8)
-              + "".join(f"{n:>10}" for n in names) + f"{'曲率':>10}")
-        for i, fc in enumerate(base["frequencies"]):
-            cells = "".join(
-                ("       ---" if np.isnan(values[n][i]) else f"{values[n][i]:10.3f}")
-                for n in names)
-            c = base["curvature"][i]
-            mark = "" if np.isnan(c) else (" ★" if abs(c) > 10.0 else "")
-            curvature = "      ---" if np.isnan(c) else f"{c:+9.0f}%"
-            print(f"[reverberation] {fc:7.0f}Hz{cells}{curvature}{mark}")
-        finite = base["curvature"][~np.isnan(base["curvature"])]
-        if len(finite) and np.any(np.abs(finite) > 10.0):
-            print("[reverberation] ★ 曲率が 10% を超えたバンドは減衰が直線でないので"
-                  "そのまま信用しないこと。よくある原因:")
+        # **周波数は横**（table.py の共通ルール）
+        print_frequency_table(base["frequencies"],
+                              list(values.items()) + [("曲率%", base["curvature"])])
+        # 横向きの表にすると行末に ★ を付けられないので、
+        # どのバンドが該当するかを注意書きの側に書く
+        marked = [f"{f:.0f}Hz" for f, c in zip(base["frequencies"],
+                                               base["curvature"])
+                  if not np.isnan(c) and abs(c) > 10.0]
+        if marked:
+            print(f"[reverberation] ★ 曲率が 10% を超えたバンド"
+                  f"（{' / '.join(marked)}）は減衰が直線でないので"
+                  f"そのまま信用しないこと。よくある原因:")
             print("[reverberation]   ・最大反射回数 nref の不足で後部残響が切れている"
                   "（procedure.py が別途エネルギーで判定して警告する）")
             print("[reverberation]   ・音場が拡散していない。小さい室・平行面・"
@@ -519,12 +530,10 @@ def clarity_measures(time, ir, frequencies=None, method="butter",
 
     result["frequencies"] = frequencies
     if verbose:
-        print("[reverberation] " + "周波数".rjust(8)
-              + f"{'C50[dB]':>10}{'C80[dB]':>10}{'D50':>10}{'Ts[ms]':>10}")
-        for i, fc in enumerate(frequencies):
-            print(f"[reverberation] {fc:7.0f}Hz{result['C50'][i]:10.2f}"
-                  f"{result['C80'][i]:10.2f}{result['D50'][i]:10.3f}"
-                  f"{result['Ts'][i] * 1000.0:10.1f}")
+        # **周波数は横**（table.py の共通ルール）
+        print_frequency_table(frequencies, [
+            ("C50[dB]", result["C50"]), ("C80[dB]", result["C80"]),
+            ("D50", result["D50"]), ("Ts[ms]", result["Ts"] * 1000.0)])
     return result
 
 
