@@ -26,10 +26,12 @@ CAD で面を 1 枚ずつ描くと巻き順と押し出し方向で向きが決�
     `1`〜`9`  そのレイヤをまとめて反転
     `a` 自動判定どおりに揃える   `d` CAD の巻き順に戻す   `i` 全反転
     `n` 法線の矢印 ON/OFF        `o` 不透明度の対象を切り替え
+    `t` 値を数字で入力（不透明度・正面の方位）
     `g` **いまの画面を画像で保存**（`図/画面/法線_01.png` … 連番）
     `s` **保存して閉じる**       `q` 保存せずに閉じる
 
 `p` は VTK のピック（面の枠選択）に取られているので、撮影は `g`（grab）にしてある。
+**`e` は使えない**（VTK の終了キー。`view_model_gui.VTK_RESERVED_KEYS` 参照）。
 """
 
 import numpy as np
@@ -293,6 +295,7 @@ class NormalEditor:
                        "d CAD の巻き順に戻す\n"
                        "i 全反転   n 法線矢印\n"
                        "z/x/c/v 視点   o 不透明度の対象\n"
+                       f"{vg.VALUE_INPUT_KEY} 値を数字で入力\n"
                        + ("g いまの画面を画像で保存\n" if self.save_dir else "")
                        + "s 保存して閉じる\n"
                        "q 保存せず閉じる", color="#7f8794")
@@ -325,7 +328,7 @@ class NormalEditor:
             self.set_head_azimuth(self.head_azimuth, render=False)
         self.refresh(render=False)
         if panel is not None:
-            panel.enable_value_input("e")
+            panel.enable_value_input()
             panel.relayout()
         self.plotter.view_isometric()
         if off_screen:

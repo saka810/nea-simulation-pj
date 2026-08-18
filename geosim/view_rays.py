@@ -39,6 +39,7 @@
               `o` 不透明度の対象を切り替え / `m` モデル表示の ON/OFF
     音粒子    `スペース` 再生・一時停止 / `←` `→` 1 コマ送り / `Home` 先頭へ /
               下の横スライダ 時刻を指定
+    入力      **`t` スライダの値を数字で入力**（`e` は VTK の終了キーなので使えない）
     保存      **`g` いまの画面をそのまま画像で保存**（角度も設定もそのまま）
               **`b` いまの視点で音粒子の動画（GIF）を保存**
               置き場はプロジェクトの `図/画面/`。撮るたびに連番が増える
@@ -886,7 +887,7 @@ def view(dxf_path, raylog_path, mode="both", absorption=None, unit=None,
             plotter.add_key_event("Tab", switch.toggle)
 
         # ---- いまの画面をそのまま保存する（G-12）----
-        help_lines = ["e 値を数字で入力",
+        help_lines = [f"{vg.VALUE_INPUT_KEY} 値を数字で入力",
                       "z/x/c/v 視点   r リセット   q 終了"]
         if save_dir:
             # ファイル名は**いま何を見ているか**で変える。音粒子は時刻も入れる
@@ -908,7 +909,7 @@ def view(dxf_path, raylog_path, mode="both", absorption=None, unit=None,
         panel.text(raylog.summary().replace(" / ", "\n"))
         panel.heading("操作")
         panel.text("\n".join(help_lines), color="#7f8794")
-        panel.enable_value_input("e")
+        panel.enable_value_input()
         panel.relayout()
 
     plotter.view_isometric()

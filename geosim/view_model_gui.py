@@ -22,8 +22,13 @@
   z / x / c / v   上 / 正面 / 横 / 等角 の視点
   n               法線矢印の表示切り替え
   g               いまの画面をそのまま画像で保存（`add_screenshot_key` を付けた画面のみ）
+  t               スライダの値を数字で入力（`enable_value_input` を付けた画面のみ）
   w / s           ワイヤフレーム / 面（VTK の既定キー）
   r               視点リセット、q でウィンドウを閉じる
+
+★**キーを割り当てる前に `VTK_RESERVED_KEYS` を見ること。**
+  `e` と `q` は VTK の終了キー。`e` に数値入力を割り当てていたため、
+  値を入れた瞬間にウィンドウが閉じていた（2026-08-17 に `t` へ変更）。
 
 ★**ウィンドウのタイトルに日本語を出すと化ける**（Windows）。
   `set_window_title()` が検証して、駄目なら英字の題に落とす。事情はその関数に書いてある。
@@ -79,6 +84,27 @@ def japanese_font():
 # 左の操作パネルが占める幅の割合。残りが 3D 表示になる
 PANEL_RATIO = 0.25
 
+# ★**VTK が既定で握っているキー。ここに機能を割り当ててはいけない。**
+#
+# `e` に数値入力を割り当てていたせいで、押すと入力ダイアログが出ると同時に
+# **VTK の終了処理（ExitEvent）も走り**、値を入れて OK を押した瞬間に
+# ウィンドウが閉じていた（ユーザー報告 2026-08-17）。`q` と同じ扱いだと気づいていなかった。
+# 実測で確かめた結果が下記（`InvokeEvent('CharEvent')` で再現できる）。
+VTK_RESERVED_KEYS = {
+    "e": "終了（ExitEvent。q と同じ）",
+    "q": "終了（ExitEvent）",
+    "w": "ワイヤフレーム表示",
+    "s": "面表示",
+    "r": "視点リセット",
+    "f": "注視点へ寄る",
+    "p": "ピック（面の選択）",
+    "u": "ユーザーイベント",
+    "3": "ステレオ表示",
+}
+
+# 数値入力を開くキー。**予約キーを避けること**（上記）
+VALUE_INPUT_KEY = "t"
+
 
 class PanelItem:
     """パネルに積んだ要素 1 つ。**高さと、置き直し方**だけを持つ。
@@ -131,7 +157,7 @@ class ControlPanel:
 
     # ---- 数値を直接入力する ---------------------------------------------
 
-    def enable_value_input(self, key="e"):
+    def enable_value_input(self, key=VALUE_INPUT_KEY):
         """`key` を押すと、スライダの値を**数字で打ち込める**ダイアログを出す。
 
         VTK のスライダはつまみを動かすことしかできず、
@@ -143,6 +169,10 @@ class ControlPanel:
         """
         if not self.controls:
             return
+        if key in VTK_RESERVED_KEYS:
+            # 黙って壊れるより、気づけるようにしておく
+            print(f"[view] 警告: キー {key!r} は VTK が使っています"
+                  f"（{VTK_RESERVED_KEYS[key]}）。別のキーにしてください")
         self.plotter.add_key_event(key, self.open_value_input)
 
     def open_value_input(self):

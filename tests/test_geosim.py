@@ -1143,6 +1143,23 @@ def test_capture():
     check("知らない画面でも英字ならそれを予備に",
           vg.window_titles("なにか", "viewer") == ("viewer", "viewer"))
 
+    # ---- キーの割り当て（★ここを間違えると画面が落ちる）----
+    # `e` に数値入力を割り当てていたせいで、押すと入力ダイアログと同時に
+    # **VTK の終了処理（ExitEvent）も走り**、値を入れた瞬間に画面が閉じていた
+    # （ユーザー報告 2026-08-17）。同じ間違いを繰り返さないための番人。
+    check("VTK の予約キーに e と q が入っている",
+          "e" in vg.VTK_RESERVED_KEYS and "q" in vg.VTK_RESERVED_KEYS,
+          str(sorted(vg.VTK_RESERVED_KEYS)))
+    check("★数値入力のキーが VTK の予約キーでない",
+          vg.VALUE_INPUT_KEY not in vg.VTK_RESERVED_KEYS,
+          f"いまは {vg.VALUE_INPUT_KEY!r}")
+    for key, what in (("g", "画像の保存"), ("b", "動画の保存"),
+                      ("z", "視点(上)"), ("x", "視点(正面)"), ("c", "視点(横)"),
+                      ("v", "視点(等角)"), ("n", "法線矢印"), ("o", "不透明度の対象"),
+                      ("m", "モデル表示"), ("a", "自動判定"), ("d", "CAD の巻き順"),
+                      ("i", "全反転")):
+        check(f"{what}の {key!r} が予約キーでない", key not in vg.VTK_RESERVED_KEYS)
+
     # ---- 連番（撮るたびに増える。上書きしない）----
     folder = tempfile.mkdtemp(prefix="geosim_shot_")
     first = vg.next_free_path(folder, "法線")
