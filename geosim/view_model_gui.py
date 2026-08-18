@@ -49,7 +49,7 @@ import numpy as np
 import pyvista as pv
 
 import read_dxffile as rd
-from view_model import LAYER_PALETTE, _hex_to_rgb
+from view_model import LAYER_PALETTE
 
 # 法線の裏側の色。HTML 版と同じ赤にしてある
 BACK_COLOR = "#C24540"

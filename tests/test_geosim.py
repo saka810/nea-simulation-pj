@@ -1195,6 +1195,44 @@ def test_capture():
     shutil.rmtree(project.folder, ignore_errors=True)
 
 
+# ------------------------------------------------------------ 反射（scalar 一致）
+def test_reflection_vectorised():
+    print("\n[24] ベクトル化した反射（scalar 版との一致）")
+
+    # 音線追跡は速度のため反射を束ごと展開して書いている（loop_reflectionmesh 191行）。
+    # scalar 版は `sound_ray.reflection_generator()`。**両者が一致することを押さえる**
+    # （交差判定と同じ方針。CLAUDE.md「scalar 版は消さない」）。
+    rng = np.random.default_rng(3)
+    directions = rng.normal(size=(200, 3))
+    directions /= np.linalg.norm(directions, axis=1)[:, None]
+    normals = rng.normal(size=(200, 3))
+    normals /= np.linalg.norm(normals, axis=1)[:, None]
+
+    # ベクトル化版（loop_reflectionmesh と同じ式）
+    reflected = directions - 2.0 * np.einsum(
+        "ij,ij->i", directions, normals)[:, None] * normals
+    reflected /= np.linalg.norm(reflected, axis=1)[:, None]
+
+    scalar = np.array([sr.reflection_generator(d, n)
+                       for d, n in zip(directions, normals)])
+    check("反射ベクトルが scalar 版と一致",
+          np.allclose(reflected, scalar, atol=1e-12),
+          f"最大差 {np.abs(reflected - scalar).max():.3e}")
+
+    # 反射の性質そのものも確かめる（式を写し間違えていないか）
+    cos_in = np.abs(np.einsum("ij,ij->i", directions, normals))
+    cos_out = np.abs(np.einsum("ij,ij->i", reflected, normals))
+    check("入射角と反射角が等しい", np.allclose(cos_in, cos_out, atol=1e-12),
+          f"最大差 {np.abs(cos_in - cos_out).max():.3e}")
+    check("長さが 1 に保たれる",
+          np.allclose(np.linalg.norm(reflected, axis=1), 1.0, atol=1e-12))
+    # 法線方向の成分だけが符号反転し、面に沿う成分は変わらない
+    tangential_in = directions - np.einsum("ij,ij->i", directions, normals)[:, None] * normals
+    tangential_out = reflected - np.einsum("ij,ij->i", reflected, normals)[:, None] * normals
+    check("面に沿う成分は変わらない",
+          np.allclose(tangential_in, tangential_out, atol=1e-12))
+
+
 # ---------------------------------------------------------------- 表の向き
 def test_table():
     print("\n[23] 表の並べ方（周波数は横）")
@@ -1279,7 +1317,8 @@ def main():
                test_statistical_reverberation, test_ray_log,
                test_normals, test_check_model, test_clarity,
                test_project, test_resample, test_direction, test_modes,
-               test_mode_buildup, test_redraw, test_capture, test_table):
+               test_mode_buildup, test_redraw, test_capture, test_table,
+               test_reflection_vectorised):
         fn()
 
     failed = [name for name, ok in _results if not ok]

@@ -1,3 +1,24 @@
+"""受音判定。**受音点に半径 `sphere_radius` の球を置き、音線が通ったかを見る。**
+
+元コード `backtrace.f90` 649〜663 行。
+
+音線は線なので、点である受音点にはまず当たらない。そこで球を「経路を見つけるための網」
+として置く。**半径は精度のつまみ**で、小さすぎると後期の経路を取りこぼし、
+残響時間が短く出る（`t_max = r√N / (2c)` が拾える時刻の目安）。
+半径を変えて値が動かないことを確認してから数値を使うこと。
+
+| 引数 | 意味 | 元コードの変数 |
+|---|---|---|
+| `sphere_radius` | 受音球の半径 | `rcvr` |
+| `sound_ray` / `soundray_comesfrom` | 音線の方向 / 基点 | `vray` / `vini` |
+| `receiver_point` | 受音点の座標 | `rcv` |
+| `min_distance` | その音線が壁に当たるまでの距離 | `disttmp` |
+
+`inside_sphere`（1 本ずつ）と `inside_sphere_batch`（束をまとめて）は同じ式・同じ比較で、
+結果は一致する。本番は後者を使う。
+"""
+
+
 import numpy as np
 
 
@@ -10,6 +31,13 @@ import numpy as np
 # 受音球の中を音線が通過したかを判定する
 # OK
 def inside_sphere(sphere_radius, sound_ray, soundray_comesfrom, receiver_point, min_distance):
+    """音線 1 本が受音球を通過したか。**参照実装**（本番は `inside_sphere_batch`）。
+
+    3 つとも満たしたら受音：
+      ・受音点から音線への**垂線距離**が半径以内
+      ・垂線の足までの**射影距離**が壁に当たるまでの距離以内（＝壁の手前）
+      ・射影距離が 0 以上（＝前方。後ろの受音点を拾わない）
+    """
     inside = False
 
     # 元コード649〜663

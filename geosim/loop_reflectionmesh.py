@@ -1,6 +1,19 @@
+"""音線追跡ループ（パイプライン③）。**音線を飛ばし、受音に至った経路の反射面 ID 列を残す。**
+
+元コード `backtrace.f90` 524〜717 行。
+
+音源から全方向へ出した音線を 1 本ずつ（実際は束で）追い、反射のたびに
+「どの面に当たったか」を積む。受音球を通過した時点の履歴が 1 つの経路になる。
+
+出力は `history_2dim`（経路ごとの反射面 ID 列。元コード `traceff`）。
+可視化用の軌跡は本線と目的が違うので、`ray_recorder.RayRecorder` に**別チャンネル**で記録する。
+
+`traceff` の読み解き（受音判定と履歴追加の順序など）は下のコメントに詳しく書いてある。
+"""
+
+
 import numpy as np
 
-import sound_ray as sr
 import mesh_method as mm
 import receiver_sphere as rs
 
@@ -172,7 +185,10 @@ def _trace_chunk(soundsource_point, reciever_point, soundray_list, ray_ids,
         origins[alive_next] = node
 
         # 反射音線のベクトル（元コード 697〜706行）
-        # v' = v - 2(v·n)n を計算して正規化する
+        # v' = v - 2(v·n)n を計算して正規化する。
+        # **scalar 版は `sound_ray.reflection_generator()`**（音線 1 本ぶん）。
+        # ここは束ごと処理するので式を展開して書いてあるが、中身は同じ。
+        # 両者が一致することは tests の「音線追跡」で確認している
         normal_hit = faces.normal[hit_id]
         reflected = direction_hit - 2.0 * np.einsum(
             "ij,ij->i", direction_hit, normal_hit)[:, None] * normal_hit

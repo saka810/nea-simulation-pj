@@ -10,6 +10,34 @@ NEA（日本環境アメニティ株式会社）のシミュレーション PJ�
 - 出力・可視化の方針 … [docs/出力・可視化方針.md](docs/出力・可視化方針.md)
 - CAD 側の作図ルール … [docs/DXFデータの作り方.md](docs/DXFデータの作り方.md)
 
+## フォルダ構成
+
+    geosim/                 Python 移植版のパッケージ（本体。27 ファイル）
+    tests/test_geosim.py    数値検証。pytest 不要、素の Python で走る
+    docs/                   数式・フロー・CAD の作図ルールの解説
+    data/                   吸音率テーブルのサンプル
+    Claude履歴/             セッション履歴（端末をまたいで作業を引き継ぐため）
+    参考文献/               論文・書籍（PDF 本体はローカルのみ）
+    fortran/                移植元の Fortran 3 ファイル（**Git 管理外**）
+
+`geosim/` の中身は**パイプラインの順**に読むのが早い。
+
+| 段階 | モジュール | 元コード |
+|---|---|---|
+| 土台 | `mesh.py`（面 1 枚）/ `mesh_method.py`（交差判定）/ `sound_ray.py`（音線）/ `receiver_sphere.py`（受音判定） | `backtrace.f90` 各所 |
+| ① DXF 読込 | `read_dxffile.py` | 132〜283 行 |
+| ②③ 音線生成・追跡 | `loop_reflectionmesh.py`（＋`ray_recorder.py` が可視化用の軌跡を別チャンネルで記録） | 318〜326 / 524〜717 行 |
+| ④ 重複経路の削除 | `loop_deleteredundancy.py` | 721〜841 行 |
+| ⑤ バックトレース | `loop_noredundancy.py` | 876〜1134 行 |
+| ⑥ インパルス応答 | `impulse.py` | `make_ipls_freq_monaural_fortran.f90` |
+| ⑦ 残響時間・音響指標 | `reverberation.py` | `ipls2rt_fortran.f90` |
+| 材料・大気 | `absorption.py`（吸音率の種類の変換）/ `atmosphere.py`（音速・空気吸収） | — |
+| 通し実行 | `procedure.py` | — |
+| 出力 | `plots.py`（図）/ `table.py`（表の並べ方の共通ルール）/ `project.py`（保存・読込） | — |
+| 画面 | `app.py`（入口）/ `setup_window.py`（条件入力）/ `progress_window.py`（進捗）/ `normal_editor.py`（法線確認）/ `view_rays.py`（音線・音粒子）/ `view_directions.py`（音線の飛び方）/ `view_model_gui.py`・`view_model.py`（モデルビューア） | — |
+
+各モジュールの詳細は [PROGRAM_STRUCTURE.md](PROGRAM_STRUCTURE.md)。
+
 ## 環境構築
 
 **Python 3.10.11**（チーム方針。[.python-version](.python-version) を参照）。
@@ -171,8 +199,12 @@ python procedure.py ..\test.dxf --absorption ..\absorption.csv --absorption-kind
 .\.venv\Scripts\python tests\test_geosim.py
 ```
 
-解析的に答えが分かる問題（直方体の虚音源距離、減衰率が既知の応答など）で
-数式レベルの正しさを確かめる。**数式に関わるコードを変更したら必ず走らせること。**
+**208 項目**（2026-08-17 時点）。解析的に答えが分かる問題（直方体の虚音源距離、
+減衰率が既知の応答など）で数式レベルの正しさを確かめる。
+**数式に関わるコードを変更したら必ず走らせること。**
+
+高速化した処理は**必ず scalar 版（参照実装）との一致を見る**方針にしてある
+（交差判定・受音判定・反射）。scalar 版は消さないこと。
 
 ## 動作確認用の DXF
 

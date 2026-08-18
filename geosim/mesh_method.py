@@ -1,3 +1,26 @@
+"""音線と三角形の交差判定。**`Mesh` が値だけを持つので、計算はこちらに置く。**
+
+元コード `backtrace.f90` 579〜636 行（音線ループの中の面との判定）。
+
+同じ判定が **2 通り**入っている。**どちらも消さないこと。**
+
+| 実装 | 何を扱うか | 用途 |
+|---|---|---|
+| `FaceArrays` | 音線の束 × 全面をまとめて配列演算 | **本番**（F-1 高速化。180〜250 倍） |
+| `collision_distance` ほか | 音線 1 本 × 面 1 枚 | **参照実装**。元コードの二重ループをそのまま写したもの |
+
+scalar 版は読みやすさと「ベクトル化版が正しいことの基準」のために残してある。
+両者が一致することを `tests/test_geosim.py` の
+「ベクトル化した交差判定（scalar 版との一致）」で確認している。
+
+| 記号 | 意味 | 元コードの変数 |
+|---|---|---|
+| `t` | 交点パラメータ。基点から交点までの距離 | `t` |
+| `d` | 平面の方程式 `ax+by+cz+d=0` の定数項 | `d` |
+| `node` | 音線と面の交点 | `vnode` |
+"""
+
+
 import numpy as np
 
 
@@ -200,6 +223,11 @@ def _inside_triangle_batch(node, v0, v1, edge0a, edge0b, edge1a, edge1b):
 # 衝突判定collisionとその時の距離distanceを返す
 # OK
 def collision_distance(sound_ray, soundray_comesfrom, normal, vertexes):
+    """音線 1 本と面 1 枚の交差判定。**参照実装**（本番は `FaceArrays`）。
+
+    戻り値 `(当たったか, 基点から交点までの距離)`。当たらなければ `(False, 0.0)`。
+    `v・n < 0`（法線に向かって進む）ときだけ当たりとするので、**面は片側だけ反射する**。
+    """
     collision = False
     distance = 0.0
 
@@ -243,6 +271,10 @@ def collision_distance(sound_ray, soundray_comesfrom, normal, vertexes):
 # 内積を２つ計算し音線と壁が衝突しているかを判定する
 # OK
 def collision_detection(node, vertexes):
+    """交点が三角形の内側にあるか（書籍 式2.50）。**参照実装**。
+
+    2 頂点を基準に外積の内積を取り、**どちらも負なら内側**。
+    """
     collision = False
     inner_product_0 = innerproduct_from3vertexes(node, vertexes[0], vertexes[1], vertexes[2])
     inner_product_1 = innerproduct_from3vertexes(node, vertexes[1], vertexes[2], vertexes[0])
@@ -258,6 +290,10 @@ def collision_detection(node, vertexes):
 # 外積を2つ計算し、その外積の内積を計算する
 # OK
 def innerproduct_from3vertexes(node, vertex_origin, vertex_1, vertex_2):
+    """`vertex_origin` を基準に、面を張る 2 辺と交点までのベクトルの外積どうしの内積。
+
+    内側判定の材料。負なら交点がその 2 辺の間にある。
+    """
     # 頂点 vertex_originを基準とした面を張るベクトルとと交点までのベクトルの外積の内積を算出
     # 三角形で　頂点　origin 1 2があり　vertex_originを引き算の後ろと仮定して書いた場合
 
@@ -288,6 +324,7 @@ def innerproduct_from3vertexes(node, vertex_origin, vertex_1, vertex_2):
 # 頂点一つと法線の掛け算であっている。 頂点は任意で良い。
 # OK
 def parameter_d(normal, vertex):
+    """平面の方程式 `ax+by+cz+d=0` の定数項 `d = -n・x`。頂点はどれでもよい。"""
     # d = -np.dot(normal, vertexes[0])
     d = -np.dot(normal, vertex)
     return d
@@ -296,6 +333,10 @@ def parameter_d(normal, vertex):
 # 直線と壁面が交わるときのパラメータtを算出
 # OK
 def parameter_t(sound_ray, soundray_comesfrom, normal, vertexes):
+    """音線と平面の交点パラメータ `t = -(n・p0 + d) / (n・v)`。
+
+    `t > 0` なら基点から見て**前方**にある。距離そのもの（音線は単位ベクトル）。
+    """
     # 平面の方程式ax + by + cz + d = 0のdを算出
     # 頂点一つと法線の掛け算であっている。 頂点は任意で良い。
     # d = -np.dot(normal, vertexes[0])
@@ -309,6 +350,7 @@ def parameter_t(sound_ray, soundray_comesfrom, normal, vertexes):
 # 元コード 388行目
 # OK
 def node_renew(sound_ray, soundray_comesfrom, t):
+    """交点の座標 `q = p0 + t v`。次の区間の基点になる。"""
     # new_node = np.array(np.zeros(3))
     new_node = soundray_comesfrom + t * sound_ray
     return new_node

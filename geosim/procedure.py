@@ -1,5 +1,25 @@
+"""パイプライン全体の通し実行。**DXF を読んで残響時間まで一気に出す。**
+
+`geosim` の各モジュールを順に呼ぶだけの層で、計算そのものは各モジュールにある。
+GUI（`app.py` → `run_project.py`）もコマンドラインもここを通る。
+
+    ① DXF 読込          read_dxffile.read_model()      元 backtrace.f90 132〜283 行
+    ② 音線生成          sound_ray.soundray_generator() 元 318〜326 行
+    ③ 音線追跡          loop_reflectionmesh.loop()     元 524〜717 行
+    ④ 重複経路の削除    loop_deleteredundancy.loop()   元 721〜841 行
+    ⑤ バックトレース    loop_noredundancy.loop()       元 876〜1134 行
+    ⑥ インパルス応答    impulse.impulse_responce()     元 make_ipls_freq_monaural_fortran.f90
+    ⑦ 残響時間          reverberation.reverberation_time()  元 ipls2rt_fortran.f90
+
+統計残響式（Sabine / Eyring / Eyring-Knudsen）は音線を飛ばす前に出せるので、
+②より前に計算して結果と並べて表示する。**どちらが正しいという話ではなく**、
+食い違いが大きいときに設定を疑う手がかりにする。
+
+出力先を渡さない引数（`*_filename=None`）はその段階を飛ばす。
+"""
+
+
 import numpy as np
-from mesh import Mesh
 import read_dxffile as rd
 import sound_ray as sr
 import loop_reflectionmesh as lr
