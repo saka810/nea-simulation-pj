@@ -105,7 +105,7 @@ def _run_one(project, receiver, verbose=True, make_figures=True,
 
     results = procedure.process(
         soundsource_point=project.source,
-        reciever_point=receiver,
+        receiver_point=receiver,
         dxf_filename=dxf,
         sphere_radius=project.radius,
         nref=project.nref,
@@ -146,7 +146,7 @@ def _run_one(project, receiver, verbose=True, make_figures=True,
     # 実際に使った音源・受音点を project.json に残す（DXF から取った場合も分かるように）
     project.source = results["soundsource_point"].tolist()
     if write_back:
-        project.receiver = results["reciever_point"].tolist()
+        project.receiver = results["receiver_point"].tolist()
     project.save()
     return results
 

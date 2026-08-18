@@ -120,5 +120,11 @@
 - **吸音率は「垂直入射」か「残響室法」かを必ず区別する**。取り違えると吸音を大きく誤る。
   CSV に `# kind: normal|random` を書くか `--absorption-kind` で指定する。
   残響室法なら Paris の式で自動変換される（`geosim/absorption.py`）。
+- **識別子の綴りは統一してある**（2026-08-17）。同じ概念が 2 通りに割れていたのを直した。
+  `reciever_point` → `receiver_point` / `noramlized_soundray` → `normalized_soundray` /
+  `impulse_responce` → `impulse_response_from_pulses`（純計算の `impulse_response` と
+  区別するため名前も分けた）/ `write_impulseresponce` → `write_impulse_response`。
+  **命名の流儀そのものは渡された時のまま**（英語の説明的 snake_case ＋ 日本語コメント ＋
+  元コードの変数との対応注記）。
 - Fortran の行番号で議論することが多い（例：「backtrace.f90 524行〜」）。
   コミットメッセージや履歴にも、対応する元コードの行番号を書き添えると後から追いやすい。

@@ -8,7 +8,7 @@ GUI（`app.py` → `run_project.py`）もコマンドラインもここを通る
     ③ 音線追跡          loop_reflectionmesh.loop()     元 524〜717 行
     ④ 重複経路の削除    loop_deleteredundancy.loop()   元 721〜841 行
     ⑤ バックトレース    loop_noredundancy.loop()       元 876〜1134 行
-    ⑥ インパルス応答    impulse.impulse_responce()     元 make_ipls_freq_monaural_fortran.f90
+    ⑥ インパルス応答    impulse.impulse_response_from_pulses()     元 make_ipls_freq_monaural_fortran.f90
     ⑦ 残響時間          reverberation.reverberation_time()  元 ipls2rt_fortran.f90
 
 統計残響式（Sabine / Eyring / Eyring-Knudsen）は音線を飛ばす前に出せるので、
@@ -39,7 +39,7 @@ from ray_recorder import RayRecorder
 ### 音源位置、受音点、室形状、音線法に使う受音球の半径、反射回数、音線の数
 ### を元に（def process()内の順に記載）
 ### パルス列、または、インパルス応答（wavファイル）を保存する
-def process(soundsource_point, reciever_point, dxf_filename, sphere_radius, nref, soundray_number,
+def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref, soundray_number,
             absorption_csv=None, absorption_kind=None, layer_assignment=None,
             band_number=rd.DEFAULT_BAND_NUMBER, material_library=None,
             unit=None, orient_normals="cad", two_sided=False, volume=None,
@@ -54,7 +54,7 @@ def process(soundsource_point, reciever_point, dxf_filename, sphere_radius, nref
     閉じた室でも、一面だけの壁のような**開いた形状**でも計算できる
     （当たる壁がなくなった音線はそこで打ち切られる）。
 
-    soundsource_point / reciever_point : (3,) | None
+    soundsource_point / receiver_point : (3,) | None
         None を渡すと DXF の src / rec レイヤの POINT から取る。
         CAD 側で音源・受音点まで作図しておけば、ここでの指定は不要。
     absorption_csv : str | None
@@ -177,10 +177,10 @@ def process(soundsource_point, reciever_point, dxf_filename, sphere_radius, nref
         if not model.source_points:
             raise ValueError("音源が指定されておらず、DXF に src レイヤの POINT もありません")
         soundsource_point = model.source_points[0]
-    if reciever_point is None:
+    if receiver_point is None:
         if not model.receiver_points:
             raise ValueError("受音点が指定されておらず、DXF に rec レイヤの POINT もありません")
-        reciever_point = model.receiver_points[0]
+        receiver_point = model.receiver_points[0]
 
     # 統計残響式（Sabine / Eyring / Eyring-Knudsen）。音線を飛ばす前に出せる。
     # 面積と吸音率だけから決まるので、あとの計算結果と突き合わせる物差しになる
@@ -218,7 +218,7 @@ def process(soundsource_point, reciever_point, dxf_filename, sphere_radius, nref
     # 音線ループで反射面のIDを履歴として記録します
     # 元コード524行目に対応
     report("音線追跡", 0.0)
-    reflection_history = lr.loop(soundsource_point, reciever_point, soundray_list, nref, mesh,
+    reflection_history = lr.loop(soundsource_point, receiver_point, soundray_list, nref, mesh,
                                  sphere_radius, recorder=recorder, two_sided=two_sided,
                                  progress=lambda f: report("音線追跡", f))
 
@@ -234,7 +234,7 @@ def process(soundsource_point, reciever_point, dxf_filename, sphere_radius, nref
     # 非重複経路　バックトレース（虚音源法）
     # 元コード876行目に対応。
     # 吸音率は Mesh が面ごとに持っているので、ここで別途渡す必要はない。
-    pulses = ln.loop(soundsource_point, reciever_point, reflection_history, mesh,
+    pulses = ln.loop(soundsource_point, receiver_point, reflection_history, mesh,
                      sound_velocity=sound_velocity, band_number=len(frequencies),
                      filename=pulse_filename, two_sided=two_sided,
                      progress=lambda f: report("バックトレース", f))
@@ -270,7 +270,7 @@ def process(soundsource_point, reciever_point, dxf_filename, sphere_radius, nref
             print("[procedure] 受音した経路が無いのでインパルス応答は作れません")
         else:
             report("インパルス応答の合成")
-            impulse = ir.impulse_responce(
+            impulse = ir.impulse_response_from_pulses(
                 impulse_filename, pulses, octave_frequencies=frequencies,
                 atmosphere=atmosphere, sampling_frequency=sampling_frequency,
                 max_time=max_time)
@@ -323,7 +323,7 @@ def process(soundsource_point, reciever_point, dxf_filename, sphere_radius, nref
             "clarity": clarity_result, "frequencies": frequencies,
             "atmosphere": atmosphere,
             "soundsource_point": np.asarray(soundsource_point, dtype=float),
-            "reciever_point": np.asarray(reciever_point, dtype=float)}
+            "receiver_point": np.asarray(receiver_point, dtype=float)}
 
 
 def main():
@@ -386,7 +386,7 @@ def main():
                                     ("pressure", a.pressure)) if v is not None}
     assignment = (ab.LayerAssignment.load(a.assignment) if a.assignment else None)
 
-    process(soundsource_point=a.source, reciever_point=a.receiver,
+    process(soundsource_point=a.source, receiver_point=a.receiver,
             dxf_filename=a.dxf, sphere_radius=a.radius, nref=a.nref,
             soundray_number=a.rays, absorption_csv=a.absorption,
             absorption_kind=a.absorption_kind, layer_assignment=assignment,

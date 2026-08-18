@@ -263,14 +263,14 @@ def impulse_response(time, energy, octave_frequencies=None, atmosphere=None,
     return t, ir
 
 
-def write_impulseresponce(filename, t, ir):
+def write_impulse_response(filename, t, ir):
     """インパルス応答を CSV に保存する。元コード 232〜235 行。"""
     np.savetxt(filename, np.column_stack([t, ir]), delimiter=",",
                header="time_s,ir", comments="", fmt="%.12g")
     return filename
 
 
-def impulse_responce(filename, pulses, octave_frequencies=None, atmosphere=None,
+def impulse_response_from_pulses(filename, pulses, octave_frequencies=None, atmosphere=None,
                      sampling_frequency=SAMPLING_FREQUENCY, max_time=MAX_TIME,
                      numtaps=NUMTAPS, verbose=True):
     """パルス列 → インパルス応答 → CSV 保存までの一括処理。
@@ -282,7 +282,7 @@ def impulse_responce(filename, pulses, octave_frequencies=None, atmosphere=None,
                              atmosphere=atmosphere,
                              sampling_frequency=sampling_frequency,
                              max_time=max_time, numtaps=numtaps, verbose=verbose)
-    write_impulseresponce(filename, t, ir)
+    write_impulse_response(filename, t, ir)
     if verbose:
         print(f"[impulse] インパルス応答を書き出しました: {filename}")
     return t, ir

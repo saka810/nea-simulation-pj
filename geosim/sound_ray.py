@@ -48,7 +48,7 @@ def soundray_generator(ray_number):
 
 # 音線の正規化
 # OK
-def noramlized_soundray(sound_ray):
+def normalized_soundray(sound_ray):
     # normalized_ray = np.array(np.zeros(3))
     distance = np.linalg.norm(sound_ray, ord=2)
     normalized_ray = sound_ray / distance
@@ -61,7 +61,7 @@ def reflection_generator(sound_ray, normal):
     # r reflection = np.array(np.zeros(3))
     t = np.dot(sound_ray, normal)
     reflection = sound_ray - 2.0 * t * normal
-    reflection = noramlized_soundray(reflection)
+    reflection = normalized_soundray(reflection)
     return reflection
 
 

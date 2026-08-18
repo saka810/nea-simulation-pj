@@ -23,7 +23,7 @@ procedure.process()
  ├─ 4. loop_deleteredundancy.delete() … 反射履歴の重複経路を削除（元コード 721行〜）
  ├─ 5. loop_noredundancy.loop()       … 虚音源法バックトレース。到来時刻・到来方向・
  │                                       バンド別エネルギーのパルス列（元コード 876行〜）
- ├─ 6. impulse.impulse_responce()     … パルス列 → バンド合成でインパルス応答CSV
+ ├─ 6. impulse.impulse_response_from_pulses()     … パルス列 → バンド合成でインパルス応答CSV
  │                                       （元コード make_ipls_freq_monaural_fortran.f90）
  └─ 7. reverberation.reverberation_time() … 減衰曲線と残響時間 T30
                                          （元コード ipls2rt_fortran.f90）
@@ -105,7 +105,7 @@ procedure.process()
 全体フローの記述。エントリポイント。**1〜7 が全部つながっている**（2026-08-14）。
 
 ```python
-process(soundsource_point, reciever_point, dxf_filename, sphere_radius, nref, soundray_number,
+process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref, soundray_number,
         absorption_csv=None, unit=None, orient_normals="cad",
         raylog_filename=None, raylog_max_rays=2000, sound_velocity=340.0,
         pulse_filename=None, impulse_filename=None,
@@ -117,7 +117,7 @@ process(soundsource_point, reciever_point, dxf_filename, sphere_radius, nref, so
 | 引数 | 型 | 意味 |
 |---|---|---|
 | `soundsource_point` | (3,) \| None | 音源座標 [m]。None なら DXF の src レイヤから |
-| `reciever_point` | (3,) \| None | 受音点座標 [m]。None なら DXF の rec レイヤから |
+| `receiver_point` | (3,) \| None | 受音点座標 [m]。None なら DXF の rec レイヤから |
 | `dxf_filename` | str | 形状 DXF ファイルパス |
 | `sphere_radius` | float | 受音球半径 [m] |
 | `nref` | int | 最大反射回数 |
@@ -350,7 +350,7 @@ Fibonacci スパイラルで球面上に均等分布する単位音線ベクト�
 検証: nray=1000 で NaN なし・全ベクトルのノルム 1.0・重心が原点。
 
 ```python
-noramlized_soundray(sound_ray) -> ndarray (3,)          # L2ノルムで正規化（関数名は normalized の綴りミス）
+normalized_soundray(sound_ray) -> ndarray (3,)          # L2ノルムで正規化（関数名は normalized の綴りミス）
 reflection_generator(sound_ray, normal) -> ndarray (3,) # 鏡面反射ベクトル r = v - 2(v・n)n → 正規化
 soundraycomesfrom_renew(node) -> ndarray (3,)           # 基点を交点に置換（恒等関数）
 soundray_renew(imaginarysound_point, soundray_comesfrom) -> ndarray (3,)
@@ -696,7 +696,7 @@ python view_rays.py ..\test.dxf ..\結果\test_raylog.npz --mode particles --mov
 ### loop_reflectionmesh.py
 
 ```python
-loop(soundsource_point, reciever_point, soundray_list, nref, mesh, sphere_radius,
+loop(soundsource_point, receiver_point, soundray_list, nref, mesh, sphere_radius,
      recorder=None) -> list[list[int]]   # 受音した経路ごとの反射面ID履歴（先頭要素は -1）
 ```
 音線追跡の本体（元コード 524〜717 行）。3 重ループ構造:
@@ -778,9 +778,9 @@ delete(reflectionhistory_redundancy: list[list[int]]) -> list[list[int]]
 虚音源法バックトレース（元コード 876〜1134 行）。**2026-08-14 に全面書き直し**。
 
 ```python
-loop(soundsource_point, reciever_point, reflectionmeshid_history, mesh,
+loop(soundsource_point, receiver_point, reflectionmeshid_history, mesh,
      sound_velocity=340.0, band_number=None, filename=None, verbose=True) -> PulseList
-backtrace_path(soundsource_point, reciever_point, wall_ids, mesh,
+backtrace_path(soundsource_point, receiver_point, wall_ids, mesh,
                band_number, sound_velocity) -> dict | None
 image_sources(soundsource_point, wall_ids, mesh) -> ndarray (n+1, 3)
 ```
@@ -840,7 +840,7 @@ p が面の**表側**（n・p + d > 0）にあるときだけで、裏側の虚�
 **2026-08-14 に全面書き直し**。
 
 ```python
-impulse_responce(filename, pulses, sound_velocity=340.0, sampling_frequency=44100.0,
+impulse_response_from_pulses(filename, pulses, sound_velocity=340.0, sampling_frequency=44100.0,
                  max_time=1.0, compensate_filter_delay=False, verbose=True) -> (t, ir)
 impulse_response(time, energy6, ...) -> (t, ir)      # ファイル出力なし
 ```
@@ -855,7 +855,7 @@ impulse_response(time, energy6, ...) -> (t, ir)      # ファイル出力なし
 | `bandpass_edges(mf, fmax)` | 152〜154 行 | 各バンドの遮断周波数 `mf * 2^(±1/6)` |
 | `filter_bandpass(numtaps, wmin, wmax)` | fir1_bandpass | ハミング窓付き FIR バンドパス |
 | `extend_to_negative(hfp, nn)` | 173〜180 行 | 伝達関数を負の周波数へエルミート拡張 |
-| `write_impulseresponce(...)` | 232〜235 行 | 時間ベクトルを付けて CSV 出力 |
+| `write_impulse_response(...)` | 232〜235 行 | 時間ベクトルを付けて CSV 出力 |
 
 **周波数バンドは可変。既定 8 バンド（63〜8k Hz）**
 

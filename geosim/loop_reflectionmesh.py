@@ -45,13 +45,13 @@ import receiver_sphere as rs
 #   [疑問4] inside かつ collision を条件にしてよいか
 #       → よくない。両者は独立。上記のとおり追記条件が別。
 # ------------------------------------------------------------------------------
-def loop(soundsource_point, reciever_point, soundray_list, nref, mesh, sphere_radius,
+def loop(soundsource_point, receiver_point, soundray_list, nref, mesh, sphere_radius,
          recorder=None, ray_chunk=20000, two_sided=False, progress=None):
     """音線追跡。
 
     引数:
         soundsource_point : (3,)     音源座標
-        reciever_point    : (3,)     受音点座標
+        receiver_point    : (3,)     受音点座標
         soundray_list     : (nray,3) 音源から出る音線の単位ベクトル群
         nref              : int      最大反射回数
         mesh              : list[Mesh] 室形状
@@ -90,7 +90,7 @@ def loop(soundsource_point, reciever_point, soundray_list, nref, mesh, sphere_ra
     total = len(soundray_list)
     for start in range(0, total, step):
         stop = min(start + step, total)
-        _trace_chunk(soundsource_point, reciever_point,
+        _trace_chunk(soundsource_point, receiver_point,
                      soundray_list[start:stop], np.arange(start, stop),
                      nref, mesh, faces, sphere_radius, results, recorder)
         if progress is not None:
@@ -99,7 +99,7 @@ def loop(soundsource_point, reciever_point, soundray_list, nref, mesh, sphere_ra
     return results
 
 
-def _trace_chunk(soundsource_point, reciever_point, soundray_list, ray_ids,
+def _trace_chunk(soundsource_point, receiver_point, soundray_list, ray_ids,
                  nref, mesh, faces, sphere_radius, results, recorder):
     """音線の塊 1 つぶんを追跡する。処理の順序は元コードと同じ。"""
     n_ray = len(soundray_list)
@@ -147,7 +147,7 @@ def _trace_chunk(soundsource_point, reciever_point, soundray_list, ray_ids,
         # 受音判定（元コード 649〜663行）
         # ★ 壁 ID の追記より前に行う。この時点の履歴が「そこまでに済んだ反射」になる
         inside = rs.inside_sphere_batch(sphere_radius, direction_alive, origin_alive,
-                                        reciever_point, min_distance)
+                                        receiver_point, min_distance)
         for local in np.nonzero(inside)[0]:
             ray = alive[local]
             # 受音経路として保存（元コード 666〜669行 traceff への書き込み）

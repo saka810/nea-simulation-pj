@@ -353,7 +353,7 @@ model.source_points    # [array([1.0, 0.5, 0.5])]
 model.receiver_points  # [array([0.7, 2.0, 0.5])]
 ```
 
-`procedure.process()` に `soundsource_point=None, reciever_point=None` を渡すと
+`procedure.process()` に `soundsource_point=None, receiver_point=None` を渡すと
 DXF 側の値が使われるので、**座標をコードに書かなくて済む**。
 
 - レイヤ名は大文字小文字を区別しない。`source` / `receiver` / `音源` / `受音点` も可

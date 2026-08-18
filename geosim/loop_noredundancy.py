@@ -157,7 +157,7 @@ def image_sources(soundsource_point, wall_ids, mesh):
     return images
 
 
-def backtrace_path(soundsource_point, reciever_point, wall_ids, mesh,
+def backtrace_path(soundsource_point, receiver_point, wall_ids, mesh,
                    band_number, sound_velocity=SOUND_VELOCITY, faces=None):
     """経路 1 本分のバックトレース。元コード 948〜1132 行。
 
@@ -177,8 +177,8 @@ def backtrace_path(soundsource_point, reciever_point, wall_ids, mesh,
 
     # 最初の区間は「受音点から最後の虚音源を見込む向き」（元コード 951〜969 行）。
     # 音は逆向きに進むが、経路の折れ線をたどるだけなので向きはこれでよい。
-    vini = np.asarray(reciever_point, dtype=float)
-    vray = sr.noramlized_soundray(images[ktmp] - vini)
+    vini = np.asarray(receiver_point, dtype=float)
+    vray = sr.normalized_soundray(images[ktmp] - vini)
 
     # 直前に当たった面。両面判定のとき同じ面に当たり直すのを防ぐ（音線追跡側と同じ理由）
     last_face = -1
@@ -220,7 +220,7 @@ def backtrace_path(soundsource_point, reciever_point, wall_ids, mesh,
             # 次の区間へ（元コード 1096〜1110 行）
             last_face = hit_id
             vini = sr.soundraycomesfrom_renew(node)
-            vray = sr.noramlized_soundray(sr.soundray_renew(images[k - 1], vini))
+            vray = sr.normalized_soundray(sr.soundray_renew(images[k - 1], vini))
 
         else:
             # ---- 壁面に当たらない場合（元コード 1115 行）----
@@ -231,7 +231,7 @@ def backtrace_path(soundsource_point, reciever_point, wall_ids, mesh,
             break
 
     # ■受音リストへの書き込み■ 元コード 1074〜1080 行
-    vtgt = np.asarray(reciever_point, dtype=float) - images[ktmp]
+    vtgt = np.asarray(receiver_point, dtype=float) - images[ktmp]
     distance = float(np.linalg.norm(vtgt))
     if distance == 0.0:
         # 虚音源が受音点に一致（音源＝受音点）。時刻 0 で割れないので捨てる
@@ -248,14 +248,14 @@ def backtrace_path(soundsource_point, reciever_point, wall_ids, mesh,
     }
 
 
-def loop(soundsource_point, reciever_point, reflectionmeshid_history, mesh,
+def loop(soundsource_point, receiver_point, reflectionmeshid_history, mesh,
          sound_velocity=SOUND_VELOCITY, band_number=None, filename=None,
          verbose=True, two_sided=False, progress=None):
     """非重複経路ループ。元コード 878 行 `do i = 1, countred`。
 
     引数:
         soundsource_point       : (3,)   音源座標
-        reciever_point          : (3,)   受音点座標
+        receiver_point          : (3,)   受音点座標
         reflectionmeshid_history: list[list[int]]
             重複削除後の反射面 ID 履歴。`loop_deleteredundancy.delete()` の出力。
         mesh                    : list[Mesh] 室形状
@@ -289,7 +289,7 @@ def loop(soundsource_point, reciever_point, reflectionmeshid_history, mesh,
     # 進捗を知らせる間隔。経路 1 本ごとに呼ぶと通知のほうが重くなる
     notify_every = max(1, total // 100)
     for i, wall_ids in enumerate(reflectionmeshid_history):
-        record = backtrace_path(soundsource_point, reciever_point, wall_ids, mesh,
+        record = backtrace_path(soundsource_point, receiver_point, wall_ids, mesh,
                                 band_number, sound_velocity, faces=faces)
         if record is None:
             rejected += 1
