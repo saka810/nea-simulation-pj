@@ -6,14 +6,15 @@ CSV にしてあるのは Excel でそのまま開けるようにするため。
 
     プロジェクトフォルダ/
       project.json          条件（DXF・吸音率・音線数・受音球・温度湿度…）
-      normals.json          法線の反転指定（面ごと。normal_editor.py が書く）
+      normals.json          法線の反転指定（面ごと。face_editor.py が書く）
+      materials.json        面ごとの吸音材の割り当て（同上。レイヤで分けられないモデル用）
       結果/
         pulses.csv          パルス列（反射回数・到来時刻・到来方向・バンド別エネルギー）
         ir.csv              インパルス応答
         rt.csv              残響指標 EDT / T20 / T30
         rt_statistical.csv  統計残響式 Sabine / Eyring / Eyring-Knudsen
         decay.csv           減衰曲線
-        surface.csv         レイヤ別の面積と吸音率
+        surface.csv         材料別の面積と吸音率（面ごとの割り当てが無ければレイヤ別）
         raylog.npz          音線軌跡（可視化用。可変長なので npz）
       図/
         *.png               正規化したインパルス応答・減衰曲線・残響時間 ほか
@@ -29,6 +30,7 @@ import numpy as np
 
 PROJECT_FILE = "project.json"
 NORMALS_FILE = "normals.json"
+MATERIALS_FILE = "materials.json"
 RESULT_DIR = "結果"
 FIGURE_DIR = "図"
 # 画面から手で撮った画像・動画の置き場。**`図/` の直下ではなく子フォルダにする。**
@@ -249,6 +251,58 @@ class Project:
             return set()
         return flipped
 
+    # ---- 面ごとの吸音材（materials.json） --------------------------------
+    #
+    # レイヤで吸音材を分けられないモデル（1 つの 3DSOLID で出来ていて面ごとの
+    # レイヤが無いなど）のための逃げ道。**normals.json と同じ作り**にしてある
+    # ＝ 面の番号で持ち、DXF と面数を控えて食い違いを検出する。
+    #
+    # 中身は「材料名 → 面番号の配列」。逆向き（面番号 → 材料名）より圧倒的に短く、
+    # 人が開いたときも「どの材料をどこに貼ったか」が読み取れる。
+
+    def load_face_materials(self):
+        """`materials.json` から {面インデックス: 材料名} を読む。"""
+        path = self.path(MATERIALS_FILE)
+        if not os.path.exists(path):
+            return {}, {}
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        assignment = {}
+        for name, faces in (data.get("materials") or {}).items():
+            for index in faces:
+                assignment[int(index)] = name
+        return assignment, data
+
+    def save_face_materials(self, face_materials, face_count):
+        """{面インデックス: 材料名} を `materials.json` に保存する。"""
+        self.ensure_dirs()
+        grouped = {}
+        for index, name in sorted(face_materials.items()):
+            if name:
+                grouped.setdefault(name, []).append(int(index))
+        data = {
+            "dxf": self._relative(self.dxf_path),
+            "face_count": int(face_count),
+            "absorption_csv": self._relative(self.absorption_path),
+            "materials": grouped,
+        }
+        with open(self.path(MATERIALS_FILE), "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        return self.path(MATERIALS_FILE)
+
+    def face_materials_for(self, face_count):
+        """面数が合っている場合だけ割り当てを返す。合わなければ空＋警告。"""
+        assignment, data = self.load_face_materials()
+        if not data:
+            return {}
+        saved = int(data.get("face_count", -1))
+        if saved != face_count:
+            print(f"[project] 警告: {MATERIALS_FILE} は面 {saved} 枚のときの割り当てですが、"
+                  f"いま読んだ DXF は {face_count} 枚です。"
+                  f"面の番号が対応しないので**使いません**。吸音材の割り当てをやり直してください")
+            return {}
+        return assignment
+
     # ---- 表示 ----------------------------------------------------------
 
     def summary(self):
@@ -267,7 +321,11 @@ class Project:
 # ------------------------------------------------------------------------------
 
 def write_surface_csv(filename, surface, frequencies):
-    """レイヤ別の面積と吸音率を CSV にする（`reverberation.surface_summary` の結果）。"""
+    """材料別の面積と吸音率を CSV にする（`reverberation.surface_summary` の結果）。
+
+    区分は `Mesh.material`。面ごとの吸音材を割り当てていなければ DXF のレイヤ名、
+    割り当てていればその材料名になる（`read_dxffile.read_model(face_materials=...)`）。
+    """
     os.makedirs(os.path.dirname(filename), exist_ok=True)
     import table as tb
     # 1 行が材料なので、周波数は**列**（table.py の共通ルール）

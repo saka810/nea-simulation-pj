@@ -34,7 +34,7 @@ NEA（日本環境アメニティ株式会社）のシミュレーション PJ�
 | 材料・大気 | `absorption.py`（吸音率の種類の変換）/ `atmosphere.py`（音速・空気吸収） | — |
 | 通し実行 | `procedure.py` | — |
 | 出力 | `plots.py`（図）/ `table.py`（表の並べ方の共通ルール）/ `project.py`（保存・読込） | — |
-| 画面 | `app.py`（入口）/ `setup_window.py`（条件入力）/ `progress_window.py`（進捗）/ `normal_editor.py`（法線確認）/ `view_rays.py`（音線・音粒子）/ `view_directions.py`（音線の飛び方）/ `view_model_gui.py`・`view_model.py`（モデルビューア） | — |
+| 画面 | `app.py`（入口）/ `setup_window.py`（条件入力）/ `progress_window.py`（進捗）/ `face_editor.py`（面の確認：法線・吸音材）/ `view_rays.py`（音線・音粒子）/ `view_directions.py`（音線の飛び方）/ `view_model_gui.py`・`view_model.py`（モデルビューア） | — |
 
 各モジュールの詳細は [PROGRAM_STRUCTURE.md](PROGRAM_STRUCTURE.md)。
 
@@ -95,14 +95,18 @@ python app.py "C:\...\プロジェクト"        そのプロジェクトを開�
 python app.py "C:\...\プロジェクト" --run  入力ウィンドウを出さずにすぐ計算
 ```
 
-流れは **条件入力 → 法線の確認 → 計算 → 可視化**。
+流れは **条件入力 → 面の確認 → 計算 → 可視化**。
 
 1. **条件入力**（`setup_window.py`）… モデル DXF・吸音率 CSV・保存先フォルダ・
    音線数・受音球の半径・温度湿度などを入力する。
    既存フォルダを選べば前回の条件を読み込む
-2. **法線の確認**（`normal_editor.py`、「法線を確認…」ボタン）…
-   緑=内向き（OK）／赤=外向き（要反転）／灰=判定できない、で色分けして表示。
-   枠で囲んだ面を反転、数字キーでレイヤごと反転、`s` で保存
+2. **面の確認**（`face_editor.py`、「面を確認…（法線・吸音材）」ボタン）…
+   **法線**は 緑=内向き（OK）／赤=外向き（要反転）／灰=判定できない で色分け。
+   **吸音材**は `m` で切り替えて材料ごとの色で表示する。
+   `r` で枠選択して面を選び（**同一平面の三角形はまとめて 1 枚として選ばれる**）、
+   `i` で法線を反転、左パネルの材料をクリックで吸音材を貼る。`s` で保存。
+   レイヤで吸音材を分けられないモデル（1 つの 3DSOLID で出来ているなど）は、
+   ここで面ごとに貼る
 3. **計算**（「計算する ▶」）… 結果 CSV と図 PNG がプロジェクトフォルダに保存される
 4. **可視化**（`view_rays.py`）… 音線と音粒子を `Tab` で切り替えて見る
 
@@ -111,6 +115,7 @@ python app.py "C:\...\プロジェクト" --run  入力ウィンドウを出さ�
 ```
 project.json          条件（次に開いたときそのまま復元される）
 normals.json          法線の反転指定
+materials.json        面ごとの吸音材の割り当て（レイヤで分けられないモデル用）
 結果/  pulses.csv  ir.csv  rt.csv  rt_statistical.csv  clarity.csv
        decay.csv  surface.csv  raylog.npz
 図/    impulse_response.png  decay.png  reverberation.png
@@ -129,8 +134,8 @@ cd geosim
 # プロジェクトの条件で計算する（GUI を使わずに回す）
 python run_project.py "C:\...\プロジェクト"
 
-# 法線の確認だけ開く
-python normal_editor.py "C:\...\プロジェクト"
+# 面の確認だけ開く（法線・吸音材）
+python face_editor.py "C:\...\プロジェクト"
 
 # モデルビューア（ネイティブウィンドウ / PyVista）
 python view_model_gui.py ..\test.dxf --absorption ..\absorption.csv

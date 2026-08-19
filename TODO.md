@@ -24,12 +24,17 @@ Fortran → Python 移植の残作業リスト。着手・完了したら本フ�
 
 - [ ] **E-15 減衰が直線にならない件の確認** — 研修室モデルで低域の二段減衰を確認済み。実測と突き合わせたい
 - [ ] **B-12 ブロック参照（INSERT）の展開** — 現状は読み飛ばす
+- [ ] **B-20 DWG（3DSOLID）の取り込み手順をリポジトリに入れるか** — 2026-08-19 に
+      `ModelTest.dwg` で検証済み。AutoCAD の `accoreconsole` で STLOUT → 面 DXF に
+      変換すれば読める。変換スクリプトはまだ scratchpad にあるだけ。**要判断**
+- [ ] **B-21 吸音材リストの持ち方** — テンプレートを用意しつつ、プロジェクト作成時に
+      フォルダへコピーする案を提示済み（過去案件の再現性のため）。**ユーザー判断待ち**
 
 ## GUI（G-7）— 1 ウィンドウ完結が最終形。いまは必要なウィンドウを順に開く形
 
 - [x] G-7a 条件入力ウィンドウ（`setup_window.py`）
 - [x] G-7b プロジェクトの保存・読み込み（`project.py`）
-- [x] G-8 法線の確認・修正ウィンドウ（`normal_editor.py`）
+- [x] G-8 法線の確認・修正ウィンドウ（`face_editor.py`。2026-08-19 に `normal_editor.py` から改名）
 - [x] G-3 インパルス応答のグラフ（`plots.py`。**正規化して PNG 保存**）
 - [x] G-4 明瞭度の指標 C50 / C80 / D50 / Ts（`reverberation.clarity_measures()`）
 - [x] G-5 伝搬方向の図（`plots.propagation_direction`。頭の向きは GUI で入力）
@@ -41,7 +46,10 @@ Fortran → Python 移植の残作業リスト。着手・完了したら本フ�
 - [x] G-15 数値入力のキーを `e` → `t` に（`e` は VTK の終了キーだった）
 - [x] G-14 **表は周波数を横に統一**（`table.py`。共通ルール。CLAUDE.md にも記載）
 - [x] E-17 統計残響式を Sabine / Eyring / Eyring-Knudsen の 3 つに（ミリントンは削除）
-- [ ] **G-9 材料の編集 UI** — 土台（`MaterialLibrary` / `LayerAssignment`）はある。表とグラフが要る
+- [x] G-9a **面ごとの吸音材の割り当て**（`face_editor.py` ＋ `materials.json`）。
+      面グループ（同一平面パッチ）単位で選んで、左パネルの材料をクリックで貼る（2026-08-19）
+- [ ] **G-9b 材料の編集 UI**（追加・変更・吸音率グラフ） — 土台（`MaterialLibrary` /
+      `LayerAssignment`）はある。**吸音材リストの持ち方の判断待ち**（下記 B-20）
 - [ ] **G-10 温度・湿度のスライダ** — いまは入力欄。動かしながら見たいなら要実装
 - [ ] **G-7c 1 ウィンドウに統合** — どんな情報が要るかが固まってから。`pyvistaqt` + `PySide6` の導入判断も
 

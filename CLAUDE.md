@@ -41,6 +41,8 @@
     `mesh.py`・`mesh_method.py`（メッシュと交差判定）／`receiver_sphere.py`（受音判定）／
     `loop_reflectionmesh.py`（音線追跡）／`loop_deleteredundancy.py`（重複経路削除）／
     `loop_noredundancy.py`（バックトレース）／`impulse.py`（インパルス応答合成）
+  - 面の確認・修正は `face_editor.py`（**2026-08-19 に `normal_editor.py` から改名**）。
+    法線の向きと**面ごとの吸音材**の両方をここで直す
   - ビューアは 2 本並存：`view_model.py`（HTML+WebGL を書き出す。依存なし・共有向き）と
     `view_model_gui.py`（PyVista のネイティブウィンドウ。Python から操作しやすい）。
     **どちらか片方に寄せない**（用途が違う）。
@@ -111,6 +113,21 @@
   - 読むときは `table.read_frequency_table()`（**古い縦向きも読める**）
   - **新しい出力を書くときもこの向きにすること。**
     どうしても縦にしたい事情が出たら、勝手に決めずにユーザーに確認する
+- **吸音材はレイヤで分けるのが原則。ただし面ごとの割り当ても持てる**（2026-08-19）。
+  1 つの 3DSOLID で出来ていて面ごとのレイヤが無いモデル（他ソフトの都合でその形式が
+  要るとき）のための逃げ道。`materials.json` に「材料名 → 面番号」で保存し、
+  `read_model(face_materials=...)` に渡す。**normals.json と同じ約束**
+  （DXF と面数を控え、食い違ったら使わずに知らせる）。
+  割り当てた面は `Mesh.material` が材料名になるので `surface.csv` が材料別になる。
+  DXF の実際のレイヤ名は `DxfModel.face_layers` に別に持っている
+- **面の選択・操作の単位は「面グループ」（同一平面パッチ）**（2026-08-19 ユーザー判断）。
+  `read_dxffile.coplanar_groups()` が、同一平面で辺を共有する三角形をまとめる。
+  STL 経由で取り込むと 1 枚の壁が三角形に割られるので、元の面に戻すため。
+  **法線の比較は絶対値**にして、反転してもグループが組み替わらないようにしてある。
+  `face_editor` の `y` で三角形単位にも切り替えられる
+- **`face_editor` は「選ぶ → 適用する」の二段階**（2026-08-19 ユーザー指摘）。
+  以前は枠で囲んだ瞬間に反転していて、何を選んだか分からなかった。
+  選択は残り、橙で塗られ外周が線で描かれる。**この流儀を崩さないこと**
 - **残響指標は EDT / T20 / T30 を出す**（`reverberation.decay_measures`）。
   60 dB 減を厳密に見る運用ではない。
 - **統計残響式は Sabine / Eyring / Eyring-Knudsen の 3 つ**（`reverberation.STATISTICAL_LABELS`）。

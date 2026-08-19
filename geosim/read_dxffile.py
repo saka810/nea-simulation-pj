@@ -126,7 +126,11 @@ class DxfModel:
         receiver_points list[(3,)]  rec レイヤの POINT（m）
         unit_scale      float       1 CAD 単位 = 何 m か
         unit_source     str         単位をどこから決めたか（'$INSUNITS' / '指定'）
-        layer_counts    dict        レイヤ名 → 三角形の枚数
+        layer_counts    dict        レイヤ名 → 三角形の枚数（**DXF の実際のレイヤ**）
+        face_layers     list[str]   面ごとの **DXF のレイヤ名**。`Mesh.material` は
+                                    面ごとの割り当てで材料名に化けるので、
+                                    レイヤで区別したい画面はこちらを見る
+        face_material_counts dict   材料名 → 枚数（`face_materials` で面ごとに割り当てた分）
         skipped         dict        読み飛ばした要素の内訳
         extents         (2,3)       バウンディングボックス（m）
         is_closed       bool        全体が閉じているか（開いた辺が 0 本か）
@@ -143,6 +147,8 @@ class DxfModel:
         self.unit_scale = 1.0
         self.unit_source = ""
         self.layer_counts = {}
+        self.face_layers = []       # 面ごとの DXF レイヤ名（Mesh.material とは別物）
+        self.face_material_counts = {}  # 材料名 → 枚数（面ごとの割り当て分だけ）
         self.layer_materials = {}   # レイヤ名 → 実際に引けた吸音率表のキー
         self.orient_mode = "cad"    # 実際に適用された法線モード（'auto' の結果もここに入る）
         self.flipped_faces = set()  # CAD の巻き順から反転した面のインデックス
@@ -168,6 +174,8 @@ class DxfModel:
             f"単位: 1 CAD単位 = {self.unit_scale} m（{self.unit_source}）",
             f"レイヤ別の枚数: {self.layer_counts}",
         ]
+        if self.face_material_counts:
+            lines.append(f"面ごとに割り当てた吸音材: {self.face_material_counts}")
         if self.layer_materials:
             lines.append("レイヤ→材料: " + ", ".join(
                 f"{layer}→{self.layer_materials[layer]}"
@@ -192,7 +200,7 @@ class DxfModel:
                 want = "inward" if s["is_outer"] else "outward"
                 mark = "OK" if s["normals"] == want else f"★要確認（{want} が空気側）"
                 lines.append(f"  シェル{k} [{tag}] 面{len(s['faces'])}枚 閉 "
-                             f"体積{s['volume']:.4f}m³ 法線={s['normals']} {mark} 寸法{size}")
+                             f"体積{s['volume']:.4f}m3 法線={s['normals']} {mark} 寸法{size}")
             else:
                 lines.append(f"  シェル{k} [{tag}] 面{len(s['faces'])}枚 開"
                              f"（開いた辺{s['open_edges']}本）法線=CAD のまま 寸法{size}")
@@ -843,6 +851,82 @@ def mesh_shells(triangles, tol=1.0e-9):
     return shells
 
 
+# 面グループ（同一平面パッチ）のしきい値。
+#   角度 1° … CAD で「同じ 1 枚の面」として描かれたものを拾うのに十分で、
+#             意図的に折れている面（普通は数度以上）は分かれる
+#   距離 1 mm … 平面からのずれ。CAD の丸め誤差を吸収する幅
+COPLANAR_ANGLE_DEGREES = 1.0
+COPLANAR_DISTANCE = 1.0e-3
+
+
+def coplanar_groups(triangles, normals, angle_degrees=COPLANAR_ANGLE_DEGREES,
+                    distance=COPLANAR_DISTANCE, tol=1.0e-9):
+    """同一平面で辺を共有している三角形をまとめ、面ごとのグループ番号 (M,) を返す。
+
+    **何のためにあるか。** 3DSOLID（ACIS ソリッド）を STL 経由で取り込むと、
+    設計者が描いた 1 枚の壁が三角形に割られてしまう。人は「壁」「床」の単位で
+    法線を直したり吸音材を割り当てたりしたいので、幾何から元の面を復元する。
+    実例：ModelTest は三角形 68 枚 → **16 グループ**（床・天井・壁 14 枚）で、
+    元のソリッドが持っていた面と一致した。
+
+    まとめる条件は 2 つとも満たすこと:
+
+      1. **辺を共有している**（`mesh_shells` と同じ隣接）。
+         離れた場所にある平行な壁が 1 つにならないようにするため
+      2. **同一平面**。法線の向きが `angle_degrees` 以内で、かつ相手の重心が
+         自分の平面から `distance` 以内にある
+
+    法線の比較に**絶対値**を使うのは、**グループ分けを法線の向きから独立させる**ため。
+    向きは `flip_faces` で後から変わるが、グループは幾何の性質なので変わってはいけない
+    （変わると、法線を反転した瞬間に選択の単位が崩れる）。
+
+    引数:
+        triangles  list[(v1, v2, v3)]
+        normals    (M,3) 面の法線。単位ベクトルでなくてよい
+    戻り値:
+        (M,) の int 配列。値はグループ番号（0 から連番。面 0 のグループが 0）
+    """
+    count = len(triangles)
+    if count == 0:
+        return np.zeros(0, dtype=np.int64)
+
+    unit = np.asarray(normals, dtype=float)
+    length = np.linalg.norm(unit, axis=1, keepdims=True)
+    unit = unit / np.where(length == 0.0, 1.0, length)
+    centre = np.array([np.mean(np.asarray(t, dtype=float), axis=0) for t in triangles])
+    cosine = np.cos(np.deg2rad(angle_degrees))
+
+    undirected, _ = _edge_map(triangles, tol)
+    neighbours = {j: set() for j in range(count)}
+    for faces in undirected.values():
+        for a in faces:
+            for b in faces:
+                if a != b:
+                    neighbours[a].add(b)
+
+    def same_plane(a, b):
+        # 向きに依らず「同じ平面か」を見たいので絶対値で比べる（上の説明を参照）
+        if abs(float(np.dot(unit[a], unit[b]))) < cosine:
+            return False
+        return abs(float(np.dot(unit[a], centre[b] - centre[a]))) <= distance
+
+    group = np.full(count, -1, dtype=np.int64)
+    next_group = 0
+    for start in range(count):
+        if group[start] >= 0:
+            continue
+        group[start] = next_group
+        stack = [start]
+        while stack:
+            j = stack.pop()
+            for k in neighbours[j]:
+                if group[k] < 0 and same_plane(j, k):
+                    group[k] = next_group
+                    stack.append(k)
+        next_group += 1
+    return group
+
+
 def _count_crossings(origins, directions, triangles, eps=1.0e-9):
     """各レイが三角形群と何回交わるかを数える（両面。裏からの交差も数える）。
 
@@ -1011,7 +1095,7 @@ def read_model(file_name, unit=None, absorption_table=None, default_absorption=N
                orient_normals="cad", reference_point=None, band_number=DEFAULT_BAND_NUMBER,
                source_layers=DEFAULT_SOURCE_LAYERS,
                receiver_layers=DEFAULT_RECEIVER_LAYERS,
-               flip_faces=None, verbose=True):
+               flip_faces=None, face_materials=None, verbose=True):
     """DXF を読んで DxfModel を返す。
 
     **閉じた室でも、一面だけの壁のような開いた形状でも読める**（音線追跡側も
@@ -1040,10 +1124,16 @@ def read_model(file_name, unit=None, absorption_table=None, default_absorption=N
                          巻き順が一貫していない場合は補正を中止して 'cad' と同じ挙動になる
           'inward'     … 面ごとにレイの偶奇で室内側へ揃える。面のつながりを要求しない
         flip_faces        **CAD の巻き順から反転する面インデックスの絶対集合**。
-                          `normal_editor.py` が作り、`project.py` が normals.json に保存する。
+                          `face_editor.py` が作り、`project.py` が normals.json に保存する。
                           渡すと `orient_normals` の判定を**丸ごと置き換える**（差分ではない）。
                           人が確認し終えた最終状態そのものなので、
                           保存したものを読めば必ず同じ法線になる
+        face_materials    **面ごとの吸音材の割り当て** {面インデックス: 材料名}。
+                          レイヤで吸音材を分けられないモデル（1 つの 3DSOLID で
+                          出来ていて面ごとのレイヤが無いなど）のための逃げ道。
+                          指定した面はレイヤではなく**この材料名**で吸音率を引き、
+                          `Mesh.material` にも材料名が入る（surface.csv が材料別になる）。
+                          `face_editor.py` が作り、`project.py` が materials.json に保存する
         reference_point   使わない（旧 'toward' 用。渡すと警告する）
         source_layers     音源として扱う POINT のレイヤ名
         receiver_layers   受音点として扱う POINT のレイヤ名
@@ -1269,11 +1359,11 @@ def read_model(file_name, unit=None, absorption_table=None, default_absorption=N
               "法線を音源方向に向ける方式は凸凹の壁や宙に浮いた家具で破綻するため廃止しました。"
               "CAD 側で法線が空気側を向くようにモデルを作ってください。")
 
-    # 自動判定のあとに、**人が目で見て直した指定**を重ねる（normal_editor.py / project.py）。
+    # 自動判定のあとに、**人が目で見て直した指定**を重ねる（face_editor.py / project.py）。
     # ★`flip_faces` は「**CAD の巻き順から反転する面**」の絶対集合であって、
     #   自動判定への差分ではない。**渡されたら自動判定を丸ごと置き換える。**
     #
-    #   normal_editor が保存するのは「人が確認し終えた最終状態」で、
+    #   face_editor が保存するのは「人が確認し終えた最終状態」で、
     #   自動判定の結果もそこに畳み込まれている。差分として上に重ねると、
     #   自動が反転した面を手動指定がもう一度反転して**元に戻ってしまう**
     #   （実際にそれで残響時間が半分近く変わった）。
@@ -1283,6 +1373,9 @@ def read_model(file_name, unit=None, absorption_table=None, default_absorption=N
         note += (f" → 保存済みの指定で置き換え（{len(manual)} / {len(kept)} 枚を反転）")
     model.flipped_faces = set()
 
+    # 面ごとの割り当ては「レイヤの代わり」なので、キーは面インデックスに揃えておく
+    assigned = {} if face_materials is None else {int(k): v for k, v in face_materials.items() if v}
+
     for j, (layer, x1, x2, x3, n) in enumerate(kept):
         if manual is not None:
             flipped = j in manual
@@ -1291,10 +1384,18 @@ def read_model(file_name, unit=None, absorption_table=None, default_absorption=N
         if flipped:
             n = -n
             model.flipped_faces.add(j)
-        absorption = _resolve_absorption(layer, absorption_table, default_absorption,
+        # 面ごとの割り当てがあればレイヤより優先する。
+        # `Mesh.material` にも材料名を入れるので、surface.csv が材料別に集計される
+        name = assigned.get(j, layer)
+        absorption = _resolve_absorption(name, absorption_table, default_absorption,
                                          band_number, unresolved, model.layer_materials)
-        model.mesh.append(Mesh(x1, x2, x3, n, layer, absorption))
+        model.mesh.append(Mesh(x1, x2, x3, n, name, absorption))
+        # レイヤ別の枚数・面ごとのレイヤ名は**DXF の実際のレイヤ**で持つ
+        # （面ごとの割り当てで書き換えない。画面のレイヤ表示が化けるため）
+        model.face_layers.append(layer)
         model.layer_counts[layer] = model.layer_counts.get(layer, 0) + 1
+        if j in assigned:
+            model.face_material_counts[name] = model.face_material_counts.get(name, 0) + 1
 
     if model.mesh:
         allpts = np.concatenate([m.vertexes for m in model.mesh])

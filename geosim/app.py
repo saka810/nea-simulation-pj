@@ -12,7 +12,7 @@
     └──┬──────────────────┬────────────────┘
        │「法線を確認…」        │「計算する ▶」
        ▼                      ▼
-    法線の確認（normal_editor）  計算（run_project）
+    面の確認（face_editor）      計算（run_project）
        │ 保存すると normals.json  │  結果 CSV ＋ 図 PNG をプロジェクトフォルダへ
        └──→ 条件入力に戻る       ▼
                               可視化（view_rays: 音線 ↔ 音粒子を Tab で切替）
@@ -158,7 +158,7 @@ def main():
     p.add_argument("--no-view", action="store_true", help="計算後に可視化を開かない")
     a = p.parse_args()
 
-    import normal_editor
+    import face_editor
     import project as pj
     import run_project
     import setup_window
@@ -183,9 +183,9 @@ def main():
             return
         if action == "normals":
             try:
-                normal_editor.edit(project)
+                face_editor.edit(project)
             except Exception:
-                print("[app] 法線の確認ウィンドウでエラーが起きました:")
+                print("[app] 面の確認ウィンドウでエラーが起きました:")
                 traceback.print_exc()
             continue
         if action == "view":

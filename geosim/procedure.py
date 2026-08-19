@@ -49,7 +49,7 @@ def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref
             reverberation_filename=None, decay_filename=None,
             statistical_filename=None, statistical=True,
             clarity=True, clarity_filename=None, surface_filename=None,
-            flip_faces=None, progress=None):
+            flip_faces=None, face_materials=None, progress=None):
     """
     閉じた室でも、一面だけの壁のような**開いた形状**でも計算できる
     （当たる壁がなくなった音線はそこで打ち切られる）。
@@ -123,10 +123,14 @@ def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref
         残響時間が「どれだけ長く響くか」なのに対し、こちらは
         「初期の音が後から来る音に対してどれだけ強いか」を見る。会議室・教室で効く。
     clarity_filename / surface_filename : str | None
-        明瞭度の指標／レイヤ別の面積と吸音率の CSV 出力先。
+        明瞭度の指標／材料別の面積と吸音率の CSV 出力先。
     flip_faces : iterable[int] | None
-        法線を反転する面インデックス（`normal_editor.py` で目で見て直したぶん）。
+        法線を反転する面インデックス（`face_editor.py` で目で見て直したぶん）。
         自動判定のあとに重ねて適用される。
+    face_materials : dict[int, str] | None
+        **面ごとの吸音材の割り当て** {面インデックス: 材料名}（同じく `face_editor.py`）。
+        レイヤで吸音材を分けられないモデル（1 つの 3DSOLID で出来ていて
+        面ごとのレイヤが無いなど）で使う。指定した面はレイヤより優先される。
     progress : callable(段階名: str, 割合: float|None) | None
         **進み具合の通知先**（GUI の進捗表示用）。割合は 0〜1、分からない段階は None。
         重い段階（音線追跡・バックトレース）は途中でも何度か呼ばれる。
@@ -165,7 +169,7 @@ def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref
     report("モデルを読み込み中")
     model = rd.read_model(dxf_filename, unit=unit, absorption_table=absorption_table,
                           orient_normals=orient_normals, band_number=band_number,
-                          flip_faces=flip_faces)
+                          flip_faces=flip_faces, face_materials=face_materials)
     mesh = model.mesh
 
     # 作図ミスの洗い出し（TODO B-10）。計算に入る前に指摘するほうが早い
@@ -188,7 +192,7 @@ def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref
     statistical_result = None
     if statistical:
         if volume is not None:
-            print(f"[統計残響] 容積は指定値 {volume:.2f} m³ を使います"
+            print(f"[統計残響] 容積は指定値 {volume:.2f} m3 を使います"
                   f"（DXF からの自動算出はしません）")
             statistical_result = rv.statistical_reverberation(
                 mesh, volume, frequencies=frequencies, atmosphere=atmosphere)
@@ -202,7 +206,7 @@ def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref
             import project as pj
             pj.write_surface_csv(surface_filename, statistical_result["surface"],
                                  frequencies)
-            print(f"[統計残響] レイヤ別の面積・吸音率: {surface_filename}")
+            print(f"[統計残響] 材料別の面積・吸音率: {surface_filename}")
 
     # 音線ベクトルを作成
     report("音線を生成中")

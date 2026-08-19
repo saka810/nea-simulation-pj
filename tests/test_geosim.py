@@ -820,6 +820,77 @@ def test_project():
         check("面数が違えば反転指定を使わない",
               pj.Project.load(folder).flipped_faces_for(99) == set())
 
+        # 面ごとの吸音材（materials.json）。normals.json と同じ約束にしてある
+        p.save_face_materials({0: "カーペット", 3: "ガラス", 5: "カーペット"},
+                              face_count=12)
+        loaded = pj.Project.load(folder).face_materials_for(12)
+        check("面ごとの吸音材が往復する",
+              loaded == {0: "カーペット", 3: "ガラス", 5: "カーペット"}, str(loaded))
+        check("面数が違えば吸音材の割り当ても使わない",
+              pj.Project.load(folder).face_materials_for(99) == {})
+        import json
+        with open(os.path.join(folder, pj.MATERIALS_FILE), encoding="utf-8") as f:
+            raw = json.load(f)
+        check("materials.json は「材料 → 面番号」で持つ（人が読める）",
+              raw["materials"]["カーペット"] == [0, 5], str(raw["materials"]))
+
+
+# ------------------------------------------------------- 面グループと面ごとの吸音材
+def test_face_groups():
+    print("\n[25] 面グループ（同一平面パッチ）と面ごとの吸音材")
+
+    # 単位立方体を三角形 12 枚で作る。同一平面で連結しているので **6 グループ**に
+    # まとまるはず（3DSOLID を STL 経由で取り込んだときに、割られた壁を
+    # 元の 1 枚に戻せるかどうかがこの機能の要）
+    corner = np.array(list(itertools.product([0.0, 1.0], repeat=3)))
+    # 立方体の 6 面。頂点番号は itertools.product の順（i → x=i>>2, y=(i>>1)&1, z=i&1）
+    quads = [[0, 2, 6, 4], [1, 5, 7, 3],     # z=0 / z=1
+             [0, 1, 3, 2], [4, 6, 7, 5],     # x=0 / x=1
+             [0, 4, 5, 1], [2, 3, 7, 6]]     # y=0 / y=1
+    triangles = []
+    for indices in quads:
+        a, b, c, d = (corner[i] for i in indices)
+        triangles += [(a, b, c), (a, c, d)]
+    # 法線は面から計算する（手で書くと取り違えるため）
+    normals = np.array([rd.face_normal(*t) for t in triangles], dtype=float)
+    group = rd.coplanar_groups(triangles, normals)
+    check("立方体の三角形 12 枚 → 面 6 枚にまとまる",
+          len(set(group.tolist())) == 6, f"{len(set(group.tolist()))} グループ")
+    check("同じ面の 2 枚は同じグループ",
+          all(group[2 * k] == group[2 * k + 1] for k in range(6)))
+    check("向かい合う面は別グループ（平行でも連結していないので分かれる）",
+          group[0] != group[2])
+
+    # **法線を反転してもグループは変わらない**（幾何の性質。反転で選択単位が
+    # 崩れてはいけない）
+    flipped = rd.coplanar_groups(triangles, -normals)
+    check("法線を反転してもグループ分けは同じ", np.array_equal(group, flipped))
+
+    # 面ごとの吸音材がレイヤより優先されること
+    table = {"レイヤ材": np.full(8, 0.10), "貼った材": np.full(8, 0.80)}
+    plain = rd.read_model(TEST_DXF, absorption_table=table,
+                          default_absorption=0.10, verbose=False)
+    picked = {0: "貼った材", 2: "貼った材"}
+    model = rd.read_model(TEST_DXF, absorption_table=table, default_absorption=0.10,
+                          face_materials=picked, verbose=False)
+    check("割り当てた面の吸音率が材料のものになる",
+          np.allclose(model.mesh[0].absorption_coefficient, 0.80),
+          str(np.round(model.mesh[0].absorption_coefficient[:3], 3).tolist()))
+    check("割り当てた面の material が材料名になる（surface.csv が材料別になる）",
+          model.mesh[0].material == "貼った材")
+    check("割り当てていない面は元のまま",
+          np.allclose(model.mesh[1].absorption_coefficient,
+                      plain.mesh[1].absorption_coefficient))
+    check("面ごとの割り当ての内訳を持っている",
+          model.face_material_counts == {"貼った材": 2}, str(model.face_material_counts))
+    check("レイヤ別の枚数は DXF のレイヤのまま（割り当てで書き換わらない）",
+          model.layer_counts == plain.layer_counts)
+    check("面ごとの DXF レイヤ名を別に持っている",
+          model.face_layers == plain.face_layers
+          and len(model.face_layers) == len(model.mesh))
+    check("形状は変わらない（吸音率だけの差し替え）",
+          np.allclose(model.mesh[0].vertexes, plain.mesh[0].vertexes))
+
 
 # ---------------------------------------------------------------- バンド数変換
 def test_resample():
@@ -1318,7 +1389,7 @@ def main():
                test_normals, test_check_model, test_clarity,
                test_project, test_resample, test_direction, test_modes,
                test_mode_buildup, test_redraw, test_capture, test_table,
-               test_reflection_vectorised):
+               test_reflection_vectorised, test_face_groups):
         fn()
 
     failed = [name for name, ok in _results if not ok]

@@ -97,8 +97,9 @@ def _run_one(project, receiver, verbose=True, make_figures=True,
     project.clear_results(verbose=verbose)
     dxf = project.dxf_path
 
-    # 法線の手動指定。面数が合わないときは project 側が警告して空を返す
+    # 法線・吸音材の手動指定。面数が合わないときは project 側が警告して空を返す
     flip_faces = _flip_faces_for(project)
+    face_materials = _face_materials_for(project)
 
     if verbose:
         print(f"[run] {project.summary()}")
@@ -119,6 +120,7 @@ def _run_one(project, receiver, verbose=True, make_figures=True,
         two_sided=project.two_sided,
         volume=project.volume,
         flip_faces=flip_faces,
+        face_materials=face_materials,
         atmosphere=Atmosphere(temperature=project.temperature,
                               humidity=project.humidity,
                               pressure=project.pressure),
@@ -205,7 +207,8 @@ def redraw(project, verbose=True):
     model = rd.read_model(project.dxf_path, band_number=project.band_number,
                           absorption_table=absorption_table, unit=project.unit,
                           orient_normals=project.orient_normals,
-                          flip_faces=_flip_faces_for(project), verbose=False)
+                          flip_faces=_flip_faces_for(project),
+                          face_materials=_face_materials_for(project), verbose=False)
 
     results = {"model": model, "pulses": pulses, "frequencies": frequencies,
                "atmosphere": atmosphere, "impulse": None,
@@ -221,7 +224,7 @@ def redraw(project, verbose=True):
         results["clarity"] = rv.clarity_measures(
             results["impulse"][0], results["impulse"][1], frequencies=frequencies)
 
-    # ---- 統計残響式（レイヤ別の面積・吸音率の図に要る）----
+    # ---- 統計残響式（材料別の面積・吸音率の図に要る）----
     if project.statistical:
         volume = project.volume
         if volume is not None:
@@ -244,17 +247,35 @@ def _flip_faces_for(project):
     受音点ごとの子フォルダには normals.json を置かないので、
     **親フォルダのものを探しに行く**（法線はモデルの性質で、受音点には依らない）。
     """
+    owner = _owner_of(project, lambda p: p.load_flipped_faces()[1])
+    if owner is None:
+        return None
+    return owner.flipped_faces_for(_face_count(owner)) or None
+
+
+def _face_materials_for(project):
+    """面ごとの吸音材の割り当てを読む。`_flip_faces_for` と同じ探し方をする
+    （どちらもモデルの性質で、受音点には依らない）。"""
+    owner = _owner_of(project, lambda p: p.load_face_materials()[1])
+    if owner is None:
+        return None
+    return owner.face_materials_for(_face_count(owner)) or None
+
+
+def _owner_of(project, load):
+    """その指定を持っているプロジェクトを返す。自分に無ければ親フォルダを見る。"""
+    if load(project):
+        return project
+    parent = pj.Project.load(os.path.dirname(project.folder))
+    return parent if load(parent) else None
+
+
+def _face_count(project):
+    """面数の照合用に DXF を軽く 1 回読む。"""
     import read_dxffile as rd
-    flipped, data = project.load_flipped_faces()
-    if not data:
-        parent = pj.Project.load(os.path.dirname(project.folder))
-        flipped, data = parent.load_flipped_faces()
-        if not data:
-            return None
-        project = parent
     probe = rd.read_model(project.dxf_path, unit=project.unit,
                           band_number=project.band_number, verbose=False)
-    return project.flipped_faces_for(len(probe.mesh)) or None
+    return len(probe.mesh)
 
 
 def main():

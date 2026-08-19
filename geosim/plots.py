@@ -298,7 +298,7 @@ def absorption(path, surface, frequencies):
     axes[0].set_xticklabels([f"{f:.0f}" for f in frequencies])
     axes[0].legend(loc="upper left", fontsize=8)
 
-    _style(axes[1], "レイヤ別の面積", "面積 [m²]", None)
+    _style(axes[1], "材料別の面積", "面積 [m²]", None)
     y = np.arange(len(names))
     axes[1].barh(y, surface["areas"], color=ACCENT, alpha=0.9)
     axes[1].set_yticks(y)

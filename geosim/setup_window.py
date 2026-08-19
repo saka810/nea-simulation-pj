@@ -86,7 +86,7 @@ def estimate_volume(dxf_path, unit=None):
 class SetupWindow:
     """条件入力のウィンドウ。`run()` が (Project, 押されたボタン) を返す。
 
-    ボタンは 'run'（計算する）/ 'normals'（法線を確認する）/
+    ボタンは 'run'（計算する）/ 'normals'（面を確認する。法線と吸音材）/
     'view'（前回の結果を見る）/ None（閉じた）。
     """
 
@@ -205,7 +205,7 @@ class SetupWindow:
         self.view_button = ttk.Button(frame, text="前回の結果を見る",
                                       command=self._on_view)
         self.view_button.pack(side="right", padx=4)
-        ttk.Button(frame, text="法線を確認…", command=self._on_normals).pack(side="right",
+        ttk.Button(frame, text="面を確認…（法線・吸音材）", command=self._on_normals).pack(side="right",
                                                                            padx=4)
         ttk.Button(frame, text="条件だけ保存", command=self._on_save).pack(side="right",
                                                                         padx=4)
@@ -400,7 +400,11 @@ class SetupWindow:
 
 
 def ask(project=None, folder=None):
-    """条件入力ウィンドウを開く。(Project, 'run'|'normals'|None) を返す。"""
+    """条件入力ウィンドウを開く。(Project, 'run'|'normals'|None) を返す。
+
+    'normals' は**面の確認ウィンドウ**（`face_editor.py`。法線と吸音材）。
+    キーの名前は project.json 側との互換のためそのままにしてある。
+    """
     return SetupWindow(project=project, folder=folder).run()
 
 
