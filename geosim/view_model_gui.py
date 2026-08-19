@@ -616,6 +616,59 @@ def add_screenshot_key(plotter, folder, stem, key="p"):
     return save
 
 
+def release_window(plotter, *holders):
+    """ウィンドウを閉じ、**VTK の持ち物を明示的に手放す**。
+
+    【なぜ要るか】2026-08-19
+    ウィンドウを閉じたあと、プロセス終了時に **segfault** した
+    （`Could not set shader program` / `Error binding ndCoords to VAO` が
+    大量に出たあとに落ちる）。VTK の OpenGL の資源は「文脈（コンテキスト）」が
+    生きているうちに解放しないといけないが、Python の後片付けは順序が決まっていない。
+    こちら（`RayDisplay.actors` / `ParticleAnimation.actor` / パネルのウィジェット）が
+    参照を握ったままだと、**文脈が消えたあとに解放されて落ちる**。
+
+    そこで閉じる前に、握っている参照をこちらから外してから閉じる。
+    `holders` には actor を抱えているオブジェクトを渡す（属性を空にする）。
+
+    ★**再現はできていない。** 実際に落ちたのは 5 分ほど操作したあとの終了時で、
+      手元では同じ手順（対話ループ・スライダ操作・絞り込み）を繰り返しても
+      再現しなかった。GL ドライバの状態にも依るらしい。
+      これは「落ちる余地を減らす」ための処置で、根治の確認は取れていない。
+    """
+    for holder in holders:
+        if holder is None:
+            continue
+        for name in ("actors", "actor", "marker", "label", "arrows", "_widgets",
+                     "items", "controls"):
+            if hasattr(holder, name):
+                try:
+                    setattr(holder, name, [] if name in ("actors", "_widgets",
+                                                         "items", "controls")
+                            else None)
+                except Exception:
+                    pass
+    try:
+        plotter.clear()
+    except Exception:
+        pass
+    try:
+        plotter.close()
+    except Exception:
+        pass
+    try:
+        plotter.deep_clean()
+    except Exception:
+        pass
+
+
+def close_all():
+    """開いているウィンドウを全部片付ける（アプリを終わる直前に呼ぶ）。"""
+    try:
+        pv.close_all()
+    except Exception:
+        pass
+
+
 def make_plotter(title, window_size, off_screen, panel=True, screen=None):
     """左に操作パネル、右に 3D を持つ Plotter を作る。
 

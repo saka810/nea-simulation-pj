@@ -215,4 +215,14 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        code = main()
+    finally:
+        # **VTK の持ち物を文脈が生きているうちに片付ける。**
+        # 放っておくとプロセス終了時に segfault することがある（2026-08-19）
+        try:
+            import view_model_gui as vg
+            vg.close_all()
+        except Exception:
+            pass
+    sys.exit(code)

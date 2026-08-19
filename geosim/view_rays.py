@@ -932,7 +932,12 @@ def run_animation(plotter, animation, interval=30):
     vg.finish_window(plotter)
     plotter.show(interactive_update=True, auto_close=False)
     while not closed["flag"]:
-        if getattr(plotter, "_closed", False) or plotter.render_window is None:
+        # ★**ウィンドウが無くなったら 1 コマも描かずに抜ける。**
+        #   閉じられたあとに描き続けると、GL の文脈が消えた状態で
+        #   シェーダを組み直そうとして落ちる（2026-08-19 の segfault）。
+        #   interactor まで見るのは、`_closed` が立つのが遅れることがあるため
+        if (getattr(plotter, "_closed", False) or plotter.render_window is None
+                or plotter.iren is None):
             break
         if animation.playing:
             # 描画は plotter.update() に任せる（ここで render すると二重に描くことになる）
@@ -941,7 +946,6 @@ def run_animation(plotter, animation, interval=30):
             plotter.update(interval)
         except (RuntimeError, AttributeError):
             break
-    plotter.close()
     return animation
 
 
@@ -1097,6 +1101,7 @@ def view(dxf_path, raylog_path, mode="both", absorption=None, unit=None,
     want_rays = mode in ("rays", "both")
     want_particles = mode in ("particles", "both")
 
+    focus = None
     rays = None
     if want_rays:
         rays = RayDisplay(plotter, raylog, pool, colour=colour, band=band,
@@ -1177,11 +1182,16 @@ def view(dxf_path, raylog_path, mode="both", absorption=None, unit=None,
         plotter.screenshot(screenshot)
         plotter.close()
         print(f"[view_rays] 画像を書き出しました: {screenshot}")
-    elif animation is not None:
+        return raylog
+
+    if animation is not None:
         run_animation(plotter, animation, interval=interval)
     else:
         vg.finish_window(plotter)
         plotter.show()
+    # **握っている actor をこちらから手放してから閉じる**（`release_window` 参照）。
+    # 放っておくと、GL の文脈が消えたあとに解放されて落ちることがある
+    vg.release_window(plotter, rays, animation, focus, panel)
     return raylog
 
 
