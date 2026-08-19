@@ -143,6 +143,38 @@ def direction_to(raylog, point):
     return vector / norm
 
 
+def direction_from_angles(azimuth, elevation):
+    """方位角・仰角から単位ベクトルを作る。
+
+    **約束は `project.head_azimuth` と同じ**にしてある（バラバラだと混乱するため）。
+
+    - 方位角 … 真上から見た向き。**0° = +X、反時計回り**（90° = +Y）
+    - 仰角 … **0° が水平**、+90° が真上、-90° が真下
+
+    クリックで拾うのが難しいという指摘（2026-08-19）を受けて、
+    **方向はスライダ 2 本（平面方向と縦方向）で指定できる**ようにした。
+    """
+    a = np.deg2rad(float(azimuth))
+    e = np.deg2rad(float(elevation))
+    return np.array([np.cos(e) * np.cos(a), np.cos(e) * np.sin(a), np.sin(e)])
+
+
+def angles_from_direction(direction):
+    """単位ベクトルから (方位角, 仰角) [度]。`direction_from_angles` の逆。
+
+    点を拾ったときにスライダの値を合わせるために使う
+    （拾う操作とスライダのどちらを使っても、状態が食い違わないようにする）。
+    """
+    vector = np.asarray(direction, dtype=float)
+    norm = np.linalg.norm(vector)
+    if norm == 0.0:
+        raise ValueError("方向ベクトルの長さが 0 です")
+    x, y, z = vector / norm
+    azimuth = float(np.rad2deg(np.arctan2(y, x)) % 360.0)
+    elevation = float(np.rad2deg(np.arcsin(np.clip(z, -1.0, 1.0))))
+    return azimuth, elevation
+
+
 def through_face(raylog, face_id, index=None):
     """指定した面で反射した音線の添字。「この壁を経由した経路」を見るのに使う。"""
     pool = _pool(raylog, index)

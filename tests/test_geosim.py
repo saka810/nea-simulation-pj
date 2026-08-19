@@ -1449,6 +1449,33 @@ def test_ray_filter():
     check("音源と同じ位置はエラーにする",
           _raises(ValueError, rfl.direction_to, log, [0.0, 0.0, 0.0]))
 
+    # ---- 方位角・仰角で方向を決める（クリックが難しいという指摘への対応）----
+    # 約束は project.head_azimuth と同じ：0° = +X、反時計回り、仰角 0 が水平
+    for azimuth, elevation, want in ((0, 0, [1, 0, 0]), (90, 0, [0, 1, 0]),
+                                     (180, 0, [-1, 0, 0]), (270, 0, [0, -1, 0]),
+                                     (0, 90, [0, 0, 1]), (0, -90, [0, 0, -1])):
+        got = rfl.direction_from_angles(azimuth, elevation)
+        check(f"方位 {azimuth:3d}° 仰角 {elevation:+3d}° → {want}",
+              np.allclose(got, want, atol=1e-12), str(np.round(got, 3)))
+    check("仰角 45°で水平成分と鉛直成分が等しい",
+          abs(rfl.direction_from_angles(0, 45)[0]
+              - rfl.direction_from_angles(0, 45)[2]) < 1e-12)
+    check("いつでも単位ベクトル",
+          all(abs(np.linalg.norm(rfl.direction_from_angles(a, e)) - 1.0) < 1e-12
+              for a in (0, 37, 190, 359) for e in (-90, -30, 0, 30, 90)))
+    # 逆変換（点を拾ったときにスライダの値を合わせるのに使う）
+    for azimuth, elevation in ((37.0, 22.0), (300.0, -55.0), (0.0, 0.0)):
+        back = rfl.angles_from_direction(
+            rfl.direction_from_angles(azimuth, elevation))
+        check(f"({azimuth}, {elevation}) を往復できる",
+              abs(back[0] - azimuth) < 1e-9 and abs(back[1] - elevation) < 1e-9,
+              f"{back[0]:.6f}, {back[1]:.6f}")
+    check("方位角は 0〜360 に収める",
+          0.0 <= rfl.angles_from_direction([-1.0, -1.0, 0.0])[0] < 360.0,
+          f"{rfl.angles_from_direction([-1.0, -1.0, 0.0])[0]:.1f}°")
+    check("長さ 0 は逆変換もエラーにする",
+          _raises(ValueError, rfl.angles_from_direction, [0.0, 0.0, 0.0]))
+
     # ---- 反射回数で見る範囲を制限できる（絞り込みが効くようにするため）----
     # 1 本目を「途中で折れる」形にして、2 区間目だけが点の近くを通るようにする
     bent = FakeLog()

@@ -32,7 +32,7 @@
     不透明度（スライダ）。`o` で対象を すべて↔各レイヤ に切り替え
     **表示する音線の本数・音粒子の数**（スライダ）
     **注目する音線の絞り込み**（`ray_filter`。下記の「注目」を参照）
-    音線の情報・時刻・操作説明
+    時刻・操作説明（音線の情報は起動時にコンソールへ出す）
 
 操作:
     共通      ドラッグ 回転 / ホイール 拡大縮小 / `z` `x` `c` `v` 視点 / `r` リセット / `q` 終了
@@ -40,10 +40,14 @@
               `o` 不透明度の対象を切り替え / `m` モデル表示の ON/OFF
     音粒子    `スペース` 再生・一時停止 / `←` `→` 1 コマ送り / `Home` 先頭へ /
               下の横スライダ 時刻を指定
-    注目      **`p` 3D 上の点を拾って基準点にする**（VTK 標準のピックキー）
-              **`k` 絞り込みの種類**（なし → 近くを通る → この方向に飛ぶ → 1 本だけ）
+    注目      **`k` 絞り込みの種類**（なし → 近くを通る → この方向に飛ぶ → 1 本だけ）
+              **`j` 基準点**（受音点 → 音源 → 拾った点）。**既定は受音点**
               **`0` 絞り込みを解除**
-              左パネルの「近さ [m]」「方向の半角 [°]」で範囲を決める
+              範囲は左パネルのスライダで決める：
+                「近さ [m]」… 基準点からの半径
+                **「方位角 [°]」「仰角 [°]」… 見たい方向**（平面方向と縦方向）
+                「方向の半角 [°]」… その方向からの許容角
+              `p` で 3D 上の点を拾って基準点にすることもできる（**任意**）
     入力      **`t` スライダの値を数字で入力**（`e` は VTK の終了キーなので使えない）
     保存      **`g` いまの画面をそのまま画像で保存**（角度も設定もそのまま）
               **`b` いまの視点で音粒子の動画（GIF）を保存**
@@ -715,21 +719,37 @@ FOCUS_LABELS = {
     "single": "いちばん近い 1 本だけ",
 }
 
+# 基準点の選び方。`j` で順に切り替える。**既定は受音点**
+ANCHOR_MODES = ("receiver", "source", "picked")
+ANCHOR_LABELS = {"receiver": "受音点", "source": "音源", "picked": "拾った点"}
+
 
 class RayFocus:
     """**注目したい音線だけを残す**（ユーザー要望 2026-08-19）。
 
-    「この経路をもっと見たい」「この辺りの粒子を見たい」「この方向に飛ぶ音線を見たい」を
-    1 つの操作で賄う。入口は共通で、**3D 上の点をクリックで拾う**こと（`p`）。
-    拾った点を基準に、`k` で選んだやり方で絞る。
+    「この経路をもっと見たい」「この辺りの粒子を見たい」「この方向に飛ぶ音線を見たい」に
+    対応する。`k` でやり方を切り替える。
 
-    | 種類 | 何が残るか |
-    |---|---|
-    | 近くを通る | 折れ線が基準点から半径以内を通った音線 |
-    | この方向に飛ぶ | **音源から見て基準点の向き**へ出た音線（円錐の中） |
-    | 1 本だけ | 基準点にいちばん近い音線 1 本（反射面の並びも出す） |
+    | 種類 | 何が残るか | 決め方 |
+    |---|---|---|
+    | 近くを通る | 折れ線が基準点から半径以内を通った音線 | 基準点（`j`）＋「近さ」スライダ |
+    | この方向に飛ぶ | **音源から出たときの向き**が指定の向きに近い音線（円錐） | **方位角・仰角スライダ**＋「半角」 |
+    | 1 本だけ | 基準点にいちばん近い音線 1 本（反射面の並びも出す） | 基準点（`j`） |
 
-    計算は `ray_filter` にある（画面に触らない純粋な関数）。
+    ★**スライダで決められるようにしてある**（2026-08-19 の指摘）。
+      最初はモデル上で `p` を押して点を拾う形だけにしていたが、
+      **その操作が難しい**という指摘を受けた。いまは
+
+      - 基準点 … **既定が受音点**。`j` で 受音点 → 音源 → 拾った点 と巡回
+      - 方向 … **方位角（平面方向）と仰角（縦方向）のスライダ**
+
+      で決められる。`p`（点を拾う）は**任意**で、使えば基準点になり、
+      方向モードならスライダの値もその向きに合わせる（食い違わないように）。
+
+    ★**方向の約束は `project.head_azimuth` と同じ**。
+      方位角 0° = +X で反時計回り、仰角 0° が水平・+90° が真上。
+
+    計算は `ray_filter`（画面に触らない純粋な関数）。
     ここは**その結果を `RayDisplay` と `ParticleAnimation` に渡し直すだけ**。
 
     ★**「近くを通る」は描いている反射回数までで測る**。50 回も反射を追うと
@@ -738,7 +758,10 @@ class RayFocus:
     """
 
     def __init__(self, plotter, raylog, pool, rays=None, animation=None,
-                 panel=None, radius=0.5, half_angle=15.0, marker_scale=0.02):
+                 panel=None, radius=0.5, half_angle=15.0, receiver=None,
+                 marker_scale=0.02):
+        import ray_filter as rfl
+
         self.plotter = plotter
         self.raylog = raylog
         self.pool = np.asarray(pool, dtype=int)
@@ -748,35 +771,87 @@ class RayFocus:
         self.radius = float(radius)
         self.half_angle = float(half_angle)
         self.mode = "off"
-        self.point = None
         self.label = None
         self.marker = None
+        self.arrow = None
         self.matched = len(self.pool)
+
+        self.source = rfl.source_point(raylog)
+        self.receiver = None if receiver is None else np.asarray(receiver, dtype=float)
+        # 受音点が分からないモデルでは音源を基準にする
+        self.anchor = "receiver" if self.receiver is not None else "source"
+        self.picked = None
+
+        # 方向の初期値は「音源から受音点を見る向き」。いちばん見たい向きのはず
+        target = self.receiver if self.receiver is not None else None
+        if target is not None and not np.allclose(target, self.source):
+            self.azimuth, self.elevation = rfl.angles_from_direction(
+                target - self.source)
+        else:
+            self.azimuth, self.elevation = 0.0, 0.0
+
         lo = raylog.pad_nodes.min(axis=(0, 1))
         hi = raylog.pad_nodes.max(axis=(0, 1))
-        self.marker_radius = float(np.linalg.norm(hi - lo)) * marker_scale
+        self.span = float(np.linalg.norm(hi - lo))
+        self.marker_radius = self.span * marker_scale
 
-    # ---- 状態 ----------------------------------------------------------
+    # ---- 基準点と方向 ---------------------------------------------------
+
+    def anchor_point(self):
+        """いまの基準点。`j` で選んだものを返す（拾っていなければ受音点か音源）。"""
+        if self.anchor == "picked" and self.picked is not None:
+            return self.picked
+        if self.anchor == "receiver" and self.receiver is not None:
+            return self.receiver
+        return self.source
+
+    def direction(self):
+        """いまの方向（方位角・仰角から作る単位ベクトル）。"""
+        import ray_filter as rfl
+        return rfl.direction_from_angles(self.azimuth, self.elevation)
+
+    # ---- 操作 ----------------------------------------------------------
 
     def next_mode(self):
         """`k` で種類を順に切り替える。"""
         self.mode = FOCUS_MODES[(FOCUS_MODES.index(self.mode) + 1) % len(FOCUS_MODES)]
         self.apply()
 
-    def set_point(self, point):
-        """クリックで基準点を決める。
-
-        絞り込みが「なし」のままだと拾っても何も起きないので、
-        **拾った時点で「近くを通る」に入る**（そのあと `k` で切り替えられる）。
-        """
-        self.point = np.asarray(point, dtype=float)
+    def next_anchor(self):
+        """`j` で基準点を順に切り替える（受音点 → 音源 → 拾った点）。"""
+        candidates = [m for m in ANCHOR_MODES
+                      if not (m == "receiver" and self.receiver is None)
+                      and not (m == "picked" and self.picked is None)]
+        here = candidates.index(self.anchor) if self.anchor in candidates else -1
+        self.anchor = candidates[(here + 1) % len(candidates)]
         if self.mode == "off":
+            self.mode = "near"
+        self.apply()
+
+    def set_point(self, point):
+        """`p` で点を拾う（**任意**。スライダだけでも使える）。
+
+        方向モードのときは**スライダの値もその向きに合わせる**
+        （拾う操作とスライダで状態が食い違わないように）。
+        """
+        import ray_filter as rfl
+
+        self.picked = np.asarray(point, dtype=float)
+        self.anchor = "picked"
+        if self.mode == "direction":
+            try:
+                self.azimuth, self.elevation = rfl.angles_from_direction(
+                    self.picked - self.source)
+                self._sync_sliders()
+            except ValueError:
+                pass
+        elif self.mode == "off":
             self.mode = "near"
         self.apply()
 
     def set_radius(self, value, render=True):
         self.radius = float(value)
-        if self.mode == "near":
+        if self.mode in ("near", "single"):
             self.apply(render=render)
 
     def set_half_angle(self, value, render=True):
@@ -784,11 +859,39 @@ class RayFocus:
         if self.mode == "direction":
             self.apply(render=render)
 
+    def set_azimuth(self, value, render=True):
+        """平面方向（真上から見た向き）。0° = +X、反時計回り。"""
+        self.azimuth = float(value) % 360.0
+        if self.mode == "off":
+            self.mode = "direction"
+        if self.mode == "direction":
+            self.apply(render=render)
+
+    def set_elevation(self, value, render=True):
+        """縦方向。0° が水平、+90° が真上。"""
+        self.elevation = float(np.clip(value, -90.0, 90.0))
+        if self.mode == "off":
+            self.mode = "direction"
+        if self.mode == "direction":
+            self.apply(render=render)
+
     def reset(self):
         """絞り込みを解除して全部に戻す（`0`）。"""
         self.mode = "off"
-        self.point = None
         self.apply()
+
+    def _sync_sliders(self):
+        """スライダのつまみを内部の値に合わせる（拾って向きが変わったとき）。"""
+        wanted = {"方位角 [°]": self.azimuth, "仰角 [°]": self.elevation}
+        for control in (self.panel.controls if self.panel is not None else []):
+            value = wanted.get(control["label"])
+            if value is None:
+                continue
+            control["widget"].GetRepresentation().SetValue(value)
+            control["value"] = value
+            # 見出しの数字も直す（つまみだけ動くと、どちらが本当か分からない）
+            if "show" in control:
+                control["show"](value)
 
     # ---- 適用 ----------------------------------------------------------
 
@@ -796,23 +899,19 @@ class RayFocus:
         """いまの条件に合う音線の添字と、パネルに出す補足。"""
         import ray_filter as rfl
 
-        if self.mode == "off" or self.point is None:
+        if self.mode == "off":
             return self.pool, ""
         # 描いている範囲に合わせる（このクラスの説明の★を参照）
         limit = self.rays.max_reflection if self.rays is not None else None
         if self.mode == "near":
-            index = rfl.near_point(self.raylog, self.point, self.radius,
+            index = rfl.near_point(self.raylog, self.anchor_point(), self.radius,
                                    index=self.pool, max_reflection=limit)
             return index, f"半径 {self.radius:.2f} m"
         if self.mode == "direction":
-            try:
-                direction = rfl.direction_to(self.raylog, self.point)
-            except ValueError:
-                return self.pool, "音源と同じ位置です"
-            index = rfl.in_direction(self.raylog, direction, self.half_angle,
-                                     index=self.pool)
+            index = rfl.in_direction(self.raylog, self.direction(),
+                                     self.half_angle, index=self.pool)
             return index, f"半角 {self.half_angle:.0f}°"
-        one = rfl.nearest_ray(self.raylog, self.point, index=self.pool,
+        one = rfl.nearest_ray(self.raylog, self.anchor_point(), index=self.pool,
                               max_reflection=limit)
         if one is None:
             return np.array([], dtype=int), ""
@@ -833,7 +932,7 @@ class RayFocus:
         if self.animation is not None:
             self.animation.set_focus(None if self.mode == "off" else index,
                                      render=False)
-        self._marker()
+        self._draw_guides()
         self._refresh_label(note)
         if self.mode == "single" and self.matched == 1:
             text = rfl.describe_ray(self.raylog, int(index[0]))
@@ -841,16 +940,26 @@ class RayFocus:
         if render:
             self.plotter.render()
 
-    def _marker(self):
-        """基準点に球を置く。**どこを拾ったかが見えないと操作できない。**"""
-        if self.marker is not None:
-            self.plotter.remove_actor(self.marker, render=False)
-            self.marker = None
-        if self.point is None or self.mode == "off":
+    def _draw_guides(self):
+        """基準点の球と、方向の矢印を描く。**何を指定しているかが見えないと操作できない。**"""
+        for name in ("marker", "arrow"):
+            actor = getattr(self, name)
+            if actor is not None:
+                self.plotter.remove_actor(actor, render=False)
+                setattr(self, name, None)
+        if self.mode == "off":
             return
-        self.marker = self.plotter.add_mesh(
-            pv.Sphere(radius=self.marker_radius, center=self.point),
-            color="#ffd166", opacity=0.55, lighting=False)
+        if self.mode in ("near", "single"):
+            self.marker = self.plotter.add_mesh(
+                pv.Sphere(radius=self.marker_radius, center=self.anchor_point()),
+                color="#ffd166", opacity=0.55, lighting=False)
+        else:
+            # 方向は音源から伸びる矢印で示す（スライダを動かすと向きが変わる）
+            self.arrow = self.plotter.add_mesh(
+                pv.Arrow(start=self.source, direction=self.direction(),
+                         scale=self.span * 0.35, tip_length=0.18,
+                         tip_radius=0.035, shaft_radius=0.012),
+                color="#ffd166", opacity=0.8, lighting=False)
 
     def _refresh_label(self, note=""):
         if self.label is None:
@@ -858,36 +967,46 @@ class RayFocus:
         lines = [FOCUS_LABELS[self.mode]]
         if self.mode == "off":
             lines.append(f"候補 {len(self.pool)} 本すべて")
-            lines.append("p で基準点を拾う")
+            lines.append("k で種類を選ぶ")
+        elif self.mode == "direction":
+            lines.append(f"方位 {self.azimuth:.0f}° / 仰角 {self.elevation:+.0f}°"
+                         + (f" / {note}" if note else ""))
+            lines.append(f"該当 {self.matched} / {len(self.pool)} 本")
         else:
-            if self.point is None:
-                where = "未設定"
-            else:
-                where = " ".join(f"{v:.1f}" for v in self.point)
-            lines.append(f"基準点 {where}" + (f" / {note}" if note else ""))
+            point = self.anchor_point()
+            lines.append(f"基準 {ANCHOR_LABELS[self.anchor]}"
+                         f"（{' '.join(f'{v:.1f}' for v in point)}）"
+                         + (f" / {note}" if note else ""))
             lines.append(f"該当 {self.matched} / {len(self.pool)} 本")
         vg.set_actor_text(self.label, "\n".join(lines))
 
 
 def add_focus(plotter, raylog, pool, rays=None, animation=None, panel=None,
-              radius=0.5, half_angle=15.0, mode_key="k", reset_key="0"):
-    """絞り込みの部品（クリックで基準点・キーで種類切り替え）を組み立てる。
+              radius=0.5, half_angle=15.0, receiver=None,
+              mode_key="k", anchor_key="j", reset_key="0"):
+    """絞り込みの部品（スライダとキー）を組み立てる。
 
-    拾うのは **`p`**（VTK の標準のピックキー）。壁でも音線でも、
-    3D 上の点が取れればそこが基準になる。
+    **スライダだけで使える**（`p` で点を拾うのは任意）。
     """
     focus = RayFocus(plotter, raylog, pool, rays=rays, animation=animation,
-                     panel=panel, radius=radius, half_angle=half_angle)
+                     panel=panel, radius=radius, half_angle=half_angle,
+                     receiver=receiver)
 
     if panel is not None:
-        panel.heading("注目する音線")
+        panel.heading("注目する音線（k で種類）")
         focus.label = panel.reserve_text(3, size=9)
         panel.slider("近さ [m]", [0.05, 3.0], focus.radius,
                      lambda v: focus.set_radius(v), fmt="%.2f")
+        # **方向は平面方向と縦方向のスライダで指定する**（2026-08-19 の指摘）
+        panel.slider("方位角 [°]", [0.0, 360.0], focus.azimuth,
+                     lambda v: focus.set_azimuth(v), fmt="%.0f")
+        panel.slider("仰角 [°]", [-90.0, 90.0], focus.elevation,
+                     lambda v: focus.set_elevation(v), fmt="%.0f")
         panel.slider("方向の半角 [°]", [1.0, 90.0], focus.half_angle,
                      lambda v: focus.set_half_angle(v), fmt="%.0f")
 
     plotter.add_key_event(mode_key, focus.next_mode)
+    plotter.add_key_event(anchor_key, focus.next_anchor)
     plotter.add_key_event(reset_key, focus.reset)
 
     def picked(point, *_):
@@ -1139,8 +1258,11 @@ def view(dxf_path, raylog_path, mode="both", absorption=None, unit=None,
                          lambda v: animation.set_time_step(v), fmt="%.1f")
 
         # ---- 注目したい音線だけを残す（p で基準点、k で種類）----
+        # 基準点の既定は受音点（クリックしなくても使えるように）
         focus = add_focus(plotter, raylog, pool, rays=rays, animation=animation,
-                          panel=panel)
+                          panel=panel,
+                          receiver=(model.receiver_points[0]
+                                    if model.receiver_points else None))
 
         switch = None
         if mode == "both":
@@ -1150,8 +1272,8 @@ def view(dxf_path, raylog_path, mode="both", absorption=None, unit=None,
             plotter.add_key_event("Tab", switch.toggle)
 
         # ---- いまの画面をそのまま保存する（G-12）----
-        help_lines = ["p 基準点を拾う   k 絞り込みの種類",
-                      "0 絞り込みを解除",
+        help_lines = ["k 絞り込みの種類   j 基準点",
+                      "0 絞り込みを解除   p 点を拾う（任意）",
                       f"{vg.VALUE_INPUT_KEY} 値を数字で入力",
                       "z/x/c/v 視点   r リセット   q 終了"]
         if save_dir:
@@ -1170,12 +1292,19 @@ def view(dxf_path, raylog_path, mode="both", absorption=None, unit=None,
                 add_movie_key(plotter, animation, save_dir, key="b")
                 help_lines.insert(1, "b いまの視点で動画（GIF）を保存")
 
-        panel.heading("音線の情報")
-        panel.text(raylog.summary().replace(" / ", "\n"))
+        # 「音線の情報」は起動時にコンソールへ出しているのでパネルには載せない
+        # （操作が増えて入りきらなくなったため。2026-08-19）
         panel.heading("操作")
         panel.text("\n".join(help_lines), color="#7f8794")
         panel.enable_value_input()
         panel.relayout()
+        if panel.hidden_height() > 0:
+            # 黙って下が切れると操作説明ごと消えるので知らせる。
+            # パネルの高さ＝ウィンドウの高さなので、縦に広げれば入る
+            print(f"[view_rays] 左パネルが {panel.hidden_height():.0f} px ぶん"
+                  f"入りきりません（ウィンドウを縦に広げてください）。操作は以下:")
+            for line in help_lines:
+                print(f"[view_rays]   {line}")
 
     plotter.view_isometric()
     if off_screen:

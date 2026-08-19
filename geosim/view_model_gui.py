@@ -140,7 +140,9 @@ class ControlPanel:
     """
 
     CHECK = 18          # チェックボックスの一辺 [px]
-    SLIDER = 34         # スライダのバーぶんの高さ [px]（見出しは別に 1 行取る）
+    # スライダのバーぶんの高さ [px]（見出しは別に 1 行取る）。
+    # 操作が増えてパネルに入りきらなくなったので 34 → 28 に詰めた（2026-08-19）
+    SLIDER = 28
     LABEL_FONT = 8      # レイヤ名など、横に長くなりがちな文字
     LINE = 18           # font_size 9 のときの 1 行 [px]（外から参照される既定値）
 
@@ -253,6 +255,23 @@ class ControlPanel:
             item.place(y)
         if render:
             self.plotter.render()
+
+    def content_height(self):
+        """並べた要素の高さの合計 [px]。"""
+        return sum(item.height for item in self.items)
+
+    def hidden_height(self):
+        """入りきらずに下へはみ出している高さ [px]（入りきっていれば 0）。
+
+        **ウィンドウを縦に広げれば減る**（パネルの高さはウィンドウの高さそのもの）。
+        はみ出しているときは呼び出し側から知らせること。
+
+        ★スクロールできるようにするのは試したが取り下げた。
+          VTK のウィジェットは置き直しを飛ばすと古い位置に残り、
+          チェックボックスが行ずれして文字に重なった（2026-08-19）。
+          載せる内容を削るほうを選んだ。
+        """
+        return max(0.0, self.content_height() - (self.height - 2 * self.margin))
 
     def _watch_resize(self):
         """ウィンドウの大きさが変わったら並べ直す。
@@ -416,7 +435,10 @@ class ControlPanel:
             self.plotter.render()
 
         control = {"label": title, "range": tuple(value_range), "value": float(value),
-                   "format": fmt, "set": set_value, "widget": widget}
+                   "format": fmt, "set": set_value, "widget": widget,
+                   # 外から値を入れ直したときに**見出しの数字も直せる**ようにしておく
+                   # （つまみだけ動かして数字が古いままだと、どちらが本当か分からない）
+                   "show": show_value}
         self.controls.append(control)
 
         def place(y, widget=widget):
