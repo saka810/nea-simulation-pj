@@ -31,6 +31,7 @@
     レイヤの表示 ON/OFF（チェックボックス）
     不透明度（スライダ）。`o` で対象を すべて↔各レイヤ に切り替え
     **表示する音線の本数・音粒子の数**（スライダ）
+    **注目する音線の絞り込み**（`ray_filter`。下記の「注目」を参照）
     音線の情報・時刻・操作説明
 
 操作:
@@ -39,6 +40,10 @@
               `o` 不透明度の対象を切り替え / `m` モデル表示の ON/OFF
     音粒子    `スペース` 再生・一時停止 / `←` `→` 1 コマ送り / `Home` 先頭へ /
               下の横スライダ 時刻を指定
+    注目      **`p` 3D 上の点を拾って基準点にする**（VTK 標準のピックキー）
+              **`k` 絞り込みの種類**（なし → 近くを通る → この方向に飛ぶ → 1 本だけ）
+              **`0` 絞り込みを解除**
+              左パネルの「近さ [m]」「方向の半角 [°]」で範囲を決める
     入力      **`t` スライダの値を数字で入力**（`e` は VTK の終了キーなので使えない）
     保存      **`g` いまの画面をそのまま画像で保存**（角度も設定もそのまま）
               **`b` いまの視点で音粒子の動画（GIF）を保存**
@@ -345,6 +350,10 @@ class RayDisplay:
         self.max_reflection = max_reflection
         # スライダの上限。これ以上は「打ち切らない」と同じなので None にする
         self.reflection_limit = int(raylog.reflection_counts.max())
+        # ★**スライダで指定された本数（wanted）と、実際に描いた本数（count）を分ける。**
+        #   絞り込みで候補が 8 本に減ると count も 8 に下がるが、
+        #   wanted を持っていないと**緩めたときに戻らない**（実際に戻らなかった）
+        self.wanted = int(count or len(self.pool))
         self.count = int(count or len(self.pool))
         self.actors = []
         self.visible = True
@@ -360,10 +369,12 @@ class RayDisplay:
         """
         value = int(round(value))
         self.max_reflection = None if value >= self.reflection_limit else max(1, value)
-        self.rebuild(self.count, render=render)
+        self.rebuild(self.wanted, render=render)
 
     def rebuild(self, count, render=True):
-        self.count = int(np.clip(count, 1, len(self.pool)))
+        """`count` は**スライダで指定された本数**。候補より多ければ候補を全部描く。"""
+        self.wanted = max(1, int(count))
+        self.count = int(np.clip(self.wanted, 1, len(self.pool)))
         for actor in self.actors:
             self.plotter.remove_actor(actor, render=False)
         self.actors = [a for a in add_rays(
@@ -380,6 +391,15 @@ class RayDisplay:
         self.visible = bool(flag)
         for actor in self.actors:
             actor.SetVisibility(self.visible)
+
+    def set_pool(self, pool, render=True):
+        """**描く候補そのもの**を差し替える（絞り込み。`ray_filter` が作った添字）。
+
+        本数スライダは差し替えたあとの候補に対して効く。
+        絞り込んだ結果が本数より少なければ、そのまま全部描く。
+        """
+        self.pool = np.asarray(pool, dtype=int)
+        self.rebuild(self.wanted, render=render)
 
 
 def add_rays(plotter, raylog, index=None, colour="energy", band=None,
@@ -444,6 +464,9 @@ class ParticleAnimation:
         # 表示する粒子の数。点の数（＝トポロジ）は変えず、**表示しないぶんは
         # エネルギーを NaN にして隠す**（`nan_opacity=0`）。作り直しが起きない
         self._shown = np.ones(len(self.index), dtype=bool)
+        # 絞り込み（`set_focus`）。None なら絞っていない
+        self._focus = None
+        self._count = len(self.index)
 
         self.times = np.linspace(0.0, raylog.max_time, self.frames)
 
@@ -530,11 +553,38 @@ class ParticleAnimation:
             else 0.0
 
     def set_count(self, count, render=True):
-        """表示する粒子の数を変える。**等間隔に抜く**ので分布の偏りは出ない。"""
-        keep = even_subset(np.arange(len(self.index)), count)
+        """表示する粒子の数を変える。**等間隔に抜く**ので分布の偏りは出ない。
+
+        絞り込み（`set_focus`）が効いているときは、**その中から**抜く。
+        """
+        pool = np.nonzero(self._focus)[0] if self._focus is not None             else np.arange(len(self.index))
+        keep = even_subset(pool, count)
         self._shown = np.zeros(len(self.index), dtype=bool)
         self._shown[keep] = True
+        self._count = int(count)
         self.update(self.step, render=render)
+
+    def set_focus(self, index=None, render=True):
+        """**見せる粒子を音線の添字で絞る**（`ray_filter` が作った添字）。
+
+        点の数（＝トポロジ）は変えない。`_shown` を書き換えて
+        エネルギーを NaN にし、`nan_opacity=0` で隠すだけ
+        （フレームごとにジオメトリを組み直さないための約束。このクラスの説明を参照）。
+
+        `index=None` で解除。
+        """
+        if index is None:
+            self._focus = None
+        else:
+            wanted = np.zeros(len(self.index), dtype=bool)
+            # self.index は「描く候補の音線番号」。その中での位置に直す
+            position = {int(v): k for k, v in enumerate(self.index)}
+            for value in np.asarray(index, dtype=int):
+                k = position.get(int(value))
+                if k is not None:
+                    wanted[k] = True
+            self._focus = wanted
+        self.set_count(self._count, render=render)
 
     def advance(self):
         if self.playing:
@@ -650,6 +700,210 @@ class RayParticleView:
     def toggle(self):
         self.mode = "particles" if self.mode == "rays" else "rays"
         self.apply()
+
+
+# ------------------------------------------------------------------------------
+# 注目したい音線だけを残す（絞り込み）
+# ------------------------------------------------------------------------------
+
+# 絞り込みの種類。`k` で順に切り替える
+FOCUS_MODES = ("off", "near", "direction", "single")
+FOCUS_LABELS = {
+    "off": "絞り込みなし",
+    "near": "基準点の近くを通る",
+    "direction": "この方向に飛ぶ",
+    "single": "いちばん近い 1 本だけ",
+}
+
+
+class RayFocus:
+    """**注目したい音線だけを残す**（ユーザー要望 2026-08-19）。
+
+    「この経路をもっと見たい」「この辺りの粒子を見たい」「この方向に飛ぶ音線を見たい」を
+    1 つの操作で賄う。入口は共通で、**3D 上の点をクリックで拾う**こと（`p`）。
+    拾った点を基準に、`k` で選んだやり方で絞る。
+
+    | 種類 | 何が残るか |
+    |---|---|
+    | 近くを通る | 折れ線が基準点から半径以内を通った音線 |
+    | この方向に飛ぶ | **音源から見て基準点の向き**へ出た音線（円錐の中） |
+    | 1 本だけ | 基準点にいちばん近い音線 1 本（反射面の並びも出す） |
+
+    計算は `ray_filter` にある（画面に触らない純粋な関数）。
+    ここは**その結果を `RayDisplay` と `ParticleAnimation` に渡し直すだけ**。
+
+    ★**「近くを通る」は描いている反射回数までで測る**。50 回も反射を追うと
+      どの音線も室内を回って基準点の近くを通ってしまい、絞ったつもりが絞れていない
+      （研修室で半径 0.5 m に 2000 本中 741 本が該当した。4 回までなら 67 本）。
+    """
+
+    def __init__(self, plotter, raylog, pool, rays=None, animation=None,
+                 panel=None, radius=0.5, half_angle=15.0, marker_scale=0.02):
+        self.plotter = plotter
+        self.raylog = raylog
+        self.pool = np.asarray(pool, dtype=int)
+        self.rays = rays
+        self.animation = animation
+        self.panel = panel
+        self.radius = float(radius)
+        self.half_angle = float(half_angle)
+        self.mode = "off"
+        self.point = None
+        self.label = None
+        self.marker = None
+        self.matched = len(self.pool)
+        lo = raylog.pad_nodes.min(axis=(0, 1))
+        hi = raylog.pad_nodes.max(axis=(0, 1))
+        self.marker_radius = float(np.linalg.norm(hi - lo)) * marker_scale
+
+    # ---- 状態 ----------------------------------------------------------
+
+    def next_mode(self):
+        """`k` で種類を順に切り替える。"""
+        self.mode = FOCUS_MODES[(FOCUS_MODES.index(self.mode) + 1) % len(FOCUS_MODES)]
+        self.apply()
+
+    def set_point(self, point):
+        """クリックで基準点を決める。
+
+        絞り込みが「なし」のままだと拾っても何も起きないので、
+        **拾った時点で「近くを通る」に入る**（そのあと `k` で切り替えられる）。
+        """
+        self.point = np.asarray(point, dtype=float)
+        if self.mode == "off":
+            self.mode = "near"
+        self.apply()
+
+    def set_radius(self, value, render=True):
+        self.radius = float(value)
+        if self.mode == "near":
+            self.apply(render=render)
+
+    def set_half_angle(self, value, render=True):
+        self.half_angle = float(value)
+        if self.mode == "direction":
+            self.apply(render=render)
+
+    def reset(self):
+        """絞り込みを解除して全部に戻す（`0`）。"""
+        self.mode = "off"
+        self.point = None
+        self.apply()
+
+    # ---- 適用 ----------------------------------------------------------
+
+    def _selected(self):
+        """いまの条件に合う音線の添字と、パネルに出す補足。"""
+        import ray_filter as rfl
+
+        if self.mode == "off" or self.point is None:
+            return self.pool, ""
+        # 描いている範囲に合わせる（このクラスの説明の★を参照）
+        limit = self.rays.max_reflection if self.rays is not None else None
+        if self.mode == "near":
+            index = rfl.near_point(self.raylog, self.point, self.radius,
+                                   index=self.pool, max_reflection=limit)
+            return index, f"半径 {self.radius:.2f} m"
+        if self.mode == "direction":
+            try:
+                direction = rfl.direction_to(self.raylog, self.point)
+            except ValueError:
+                return self.pool, "音源と同じ位置です"
+            index = rfl.in_direction(self.raylog, direction, self.half_angle,
+                                     index=self.pool)
+            return index, f"半角 {self.half_angle:.0f}°"
+        one = rfl.nearest_ray(self.raylog, self.point, index=self.pool,
+                              max_reflection=limit)
+        if one is None:
+            return np.array([], dtype=int), ""
+        return np.array([one], dtype=int), ""
+
+    def apply(self, render=True):
+        import ray_filter as rfl
+
+        index, note = self._selected()
+        self.matched = len(index)
+
+        if self.matched == 0:
+            # 空にすると折れ線が作れず落ちるので、絞り込みは効かせずに知らせる
+            print("[view_rays] 条件に合う音線がありません（半径や半角を広げてください）")
+            index = self.pool
+        if self.rays is not None:
+            self.rays.set_pool(index, render=False)
+        if self.animation is not None:
+            self.animation.set_focus(None if self.mode == "off" else index,
+                                     render=False)
+        self._marker()
+        self._refresh_label(note)
+        if self.mode == "single" and self.matched == 1:
+            text = rfl.describe_ray(self.raylog, int(index[0]))
+            print("[view_rays] " + text.replace("\n", " / "))
+        if render:
+            self.plotter.render()
+
+    def _marker(self):
+        """基準点に球を置く。**どこを拾ったかが見えないと操作できない。**"""
+        if self.marker is not None:
+            self.plotter.remove_actor(self.marker, render=False)
+            self.marker = None
+        if self.point is None or self.mode == "off":
+            return
+        self.marker = self.plotter.add_mesh(
+            pv.Sphere(radius=self.marker_radius, center=self.point),
+            color="#ffd166", opacity=0.55, lighting=False)
+
+    def _refresh_label(self, note=""):
+        if self.label is None:
+            return
+        lines = [FOCUS_LABELS[self.mode]]
+        if self.mode == "off":
+            lines.append(f"候補 {len(self.pool)} 本すべて")
+            lines.append("p で基準点を拾う")
+        else:
+            if self.point is None:
+                where = "未設定"
+            else:
+                where = " ".join(f"{v:.1f}" for v in self.point)
+            lines.append(f"基準点 {where}" + (f" / {note}" if note else ""))
+            lines.append(f"該当 {self.matched} / {len(self.pool)} 本")
+        vg.set_actor_text(self.label, "\n".join(lines))
+
+
+def add_focus(plotter, raylog, pool, rays=None, animation=None, panel=None,
+              radius=0.5, half_angle=15.0, mode_key="k", reset_key="0"):
+    """絞り込みの部品（クリックで基準点・キーで種類切り替え）を組み立てる。
+
+    拾うのは **`p`**（VTK の標準のピックキー）。壁でも音線でも、
+    3D 上の点が取れればそこが基準になる。
+    """
+    focus = RayFocus(plotter, raylog, pool, rays=rays, animation=animation,
+                     panel=panel, radius=radius, half_angle=half_angle)
+
+    if panel is not None:
+        panel.heading("注目する音線")
+        focus.label = panel.reserve_text(3, size=9)
+        panel.slider("近さ [m]", [0.05, 3.0], focus.radius,
+                     lambda v: focus.set_radius(v), fmt="%.2f")
+        panel.slider("方向の半角 [°]", [1.0, 90.0], focus.half_angle,
+                     lambda v: focus.set_half_angle(v), fmt="%.0f")
+
+    plotter.add_key_event(mode_key, focus.next_mode)
+    plotter.add_key_event(reset_key, focus.reset)
+
+    def picked(point, *_):
+        # pyvista の版によって引数の数が違うので可変長で受ける
+        if point is None:
+            return
+        focus.set_point(np.asarray(point, dtype=float)[:3])
+
+    try:
+        plotter.enable_point_picking(callback=picked, show_message=False,
+                                     show_point=False, tolerance=0.02,
+                                     left_clicking=False)
+    except Exception as e:
+        print(f"[view_rays] 点のピックを有効にできませんでした: {type(e).__name__}: {e}")
+    focus._refresh_label()
+    return focus
 
 
 def run_animation(plotter, animation, interval=30):
@@ -879,6 +1133,10 @@ def view(dxf_path, raylog_path, mode="both", absorption=None, unit=None,
             panel.slider("離散化時間 [ms]", [0.2, 50.0], animation.time_step_ms,
                          lambda v: animation.set_time_step(v), fmt="%.1f")
 
+        # ---- 注目したい音線だけを残す（p で基準点、k で種類）----
+        focus = add_focus(plotter, raylog, pool, rays=rays, animation=animation,
+                          panel=panel)
+
         switch = None
         if mode == "both":
             # 音線と音粒子を同居させて Tab で切り替える
@@ -887,7 +1145,9 @@ def view(dxf_path, raylog_path, mode="both", absorption=None, unit=None,
             plotter.add_key_event("Tab", switch.toggle)
 
         # ---- いまの画面をそのまま保存する（G-12）----
-        help_lines = [f"{vg.VALUE_INPUT_KEY} 値を数字で入力",
+        help_lines = ["p 基準点を拾う   k 絞り込みの種類",
+                      "0 絞り込みを解除",
+                      f"{vg.VALUE_INPUT_KEY} 値を数字で入力",
                       "z/x/c/v 視点   r リセット   q 終了"]
         if save_dir:
             # ファイル名は**いま何を見ているか**で変える。音粒子は時刻も入れる

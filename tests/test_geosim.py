@@ -1376,6 +1376,112 @@ def test_table():
     shutil.rmtree(folder, ignore_errors=True)
 
 
+# ---------------------------------------------------------------- 音線の絞り込み
+def test_ray_filter():
+    print("\n[26] 音線の絞り込み（注目したい音線を残す）")
+    import ray_filter as rfl
+
+    # 解析的に答えが分かる軌跡を手で作る。
+    # 音源 (0,0,0) から 3 本、それぞれ +x / +y / +z へ真っすぐ 10 m
+    class FakeLog:
+        pass
+
+    log = FakeLog()
+    log.ray_count = 3
+    log.node_counts = np.array([2, 2, 2])
+    log.pad_nodes = np.array([
+        [[0.0, 0, 0], [10.0, 0, 0]],
+        [[0.0, 0, 0], [0, 10.0, 0]],
+        [[0.0, 0, 0], [0, 0, 10.0]],
+    ])
+    log.directions = np.array([[1.0, 0, 0], [0, 1.0, 0], [0, 0, 1.0]])
+    log.mesh_ids = np.array([5, 7, 5])
+    log.mesh_offsets = np.array([0, 1, 2, 3])
+    log.ray_indexes = np.array([0, 1, 2])
+    log.total_distance = np.array([10.0, 10.0, 10.0])
+    log.received = np.array([True, False, True])
+    log.terminations = np.array(["受音", "nref", "受音"])
+    log.sound_velocity = 343.0
+
+    check("音源は 1 点目から取れる",
+          np.allclose(rfl.source_point(log), [0, 0, 0]))
+
+    # ---- 線分までの距離（節点までではない）----
+    # (5, 1, 0) は 1 本目の**途中**の横 1 m。節点だけ見ると 5 m 以上に見える
+    d = rfl.ray_distances(log, [5.0, 1.0, 0.0])
+    check("線分までの距離で測る（節点までではない）",
+          abs(d[0] - 1.0) < 1e-12, f"1 本目 {d[0]:.6f} m（期待 1.0）")
+    # +y の音線は最近点が (0,1,0) なので 5.0。
+    # +z の音線は最近点が原点（t が 0 に丸まる）なので hypot(5,1)
+    check("他の音線の距離も解析解と一致",
+          abs(d[1] - 5.0) < 1e-12 and abs(d[2] - np.hypot(5.0, 1.0)) < 1e-12,
+          f"+y {d[1]:.4f}（期待 5.0）/ +z {d[2]:.4f}（期待 {np.hypot(5.0,1.0):.4f}）")
+
+    # 線分の外側に落ちる点は端点までの距離になる（t を 0〜1 に丸めている）
+    beyond = rfl.ray_distances(log, [13.0, 0.0, 0.0])
+    check("線分の先にある点は端点までの距離",
+          abs(beyond[0] - 3.0) < 1e-12, f"{beyond[0]:.6f} m（期待 3.0）")
+
+    # ---- 近くを通る音線 ----
+    near = rfl.near_point(log, [5.0, 1.0, 0.0], 1.5)
+    check("半径 1.5 m で 1 本目だけ残る", list(near) == [0], str(list(near)))
+    near = rfl.near_point(log, [5.0, 1.0, 0.0], 6.0)
+    check("半径 6 m なら 3 本とも残る", list(near) == [0, 1, 2], str(list(near)))
+    check("いちばん近い 1 本を選べる",
+          rfl.nearest_ray(log, [5.0, 1.0, 0.0]) == 0)
+    check("対象を絞ってから探せる（1 本目を除くと 2 本目か 3 本目）",
+          rfl.nearest_ray(log, [5.0, 1.0, 0.0], index=[1, 2]) in (1, 2))
+
+    # ---- 出射方向で絞る ----
+    angles = rfl.launch_angles(log, [1.0, 0.0, 0.0])
+    check("出射方向とのなす角が解析解と一致",
+          np.allclose(angles, [0.0, 90.0, 90.0]), str(np.round(angles, 3)))
+    check("半角 10°なら +x の 1 本だけ",
+          list(rfl.in_direction(log, [1.0, 0, 0], 10.0)) == [0])
+    check("半角 95°なら 3 本とも",
+          list(rfl.in_direction(log, [1.0, 0, 0], 95.0)) == [0, 1, 2])
+    check("長さ 0 の方向はエラーにする",
+          _raises(ValueError, rfl.launch_angles, log, [0.0, 0.0, 0.0]))
+
+    # 音源からクリック点への向き
+    check("音源→点の向きが単位ベクトル",
+          np.allclose(rfl.direction_to(log, [3.0, 0.0, 0.0]), [1, 0, 0]))
+    check("音源と同じ位置はエラーにする",
+          _raises(ValueError, rfl.direction_to, log, [0.0, 0.0, 0.0]))
+
+    # ---- 反射回数で見る範囲を制限できる（絞り込みが効くようにするため）----
+    # 1 本目を「途中で折れる」形にして、2 区間目だけが点の近くを通るようにする
+    bent = FakeLog()
+    bent.ray_count = 1
+    bent.node_counts = np.array([3])
+    bent.pad_nodes = np.array([[[0.0, 0, 0], [10.0, 0, 0], [10.0, 10.0, 0]]])
+    bent.directions = np.array([[1.0, 0, 0]])
+    check("全区間を見れば近い",
+          abs(rfl.ray_distances(bent, [10.0, 5.0, 0.0])[0]) < 1e-12)
+    check("★1 区間目までに限れば遠い（描いている範囲に合わせられる）",
+          abs(rfl.ray_distances(bent, [10.0, 5.0, 0.0], max_reflection=1)[0] - 5.0)
+          < 1e-12,
+          f"{rfl.ray_distances(bent, [10.0, 5.0, 0.0], max_reflection=1)[0]:.3f} m")
+
+    # ---- 面で絞る・説明文 ----
+    check("その面で反射した音線を引ける",
+          list(rfl.through_face(log, 5)) == [0, 2], str(list(rfl.through_face(log, 5))))
+    text = rfl.describe_ray(log, 0)
+    check("1 本の説明に反射回数・経路長・受音の有無が入る",
+          "1 回反射" in text and "10.00 m" in text and "受音 した" in text,
+          text.replace("\n", " / "))
+
+
+def _raises(kind, func, *args):
+    try:
+        func(*args)
+    except kind:
+        return True
+    except Exception:
+        return False
+    return False
+
+
 def main():
     print("geosim 数値検証")
     print(f"  Python {sys.version.split()[0]} / numpy {np.__version__}")
@@ -1389,7 +1495,8 @@ def main():
                test_normals, test_check_model, test_clarity,
                test_project, test_resample, test_direction, test_modes,
                test_mode_buildup, test_redraw, test_capture, test_table,
-               test_reflection_vectorised, test_face_groups):
+               test_reflection_vectorised, test_face_groups,
+               test_ray_filter):
         fn()
 
     failed = [name for name, ok in _results if not ok]

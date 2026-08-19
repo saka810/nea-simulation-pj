@@ -34,6 +34,7 @@ NEA（日本環境アメニティ株式会社）のシミュレーション PJ�
 | 材料・大気 | `absorption.py`（吸音率の種類の変換）/ `atmosphere.py`（音速・空気吸収） | — |
 | 通し実行 | `procedure.py` | — |
 | 出力 | `plots.py`（図）/ `table.py`（表の並べ方の共通ルール）/ `project.py`（保存・読込） | — |
+| 絞り込み | `ray_filter.py`（注目したい音線を残す。近く・方向・1 本） | — |
 | 画面 | `app.py`（入口）/ `setup_window.py`（条件入力）/ `progress_window.py`（進捗）/ `face_editor.py`（面の確認：法線・吸音材）/ `view_rays.py`（音線・音粒子）/ `view_directions.py`（音線の飛び方）/ `view_model_gui.py`・`view_model.py`（モデルビューア） | — |
 
 各モジュールの詳細は [PROGRAM_STRUCTURE.md](PROGRAM_STRUCTURE.md)。

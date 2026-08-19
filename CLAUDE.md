@@ -137,6 +137,12 @@
 - **吸音率は「垂直入射」か「残響室法」かを必ず区別する**。取り違えると吸音を大きく誤る。
   CSV に `# kind: normal|random` を書くか `--absorption-kind` で指定する。
   残響室法なら Paris の式で自動変換される（`geosim/absorption.py`）。
+- **音線の絞り込みは `ray_filter.py`**（2026-08-19）。「この経路を見たい」
+  「この辺りの粒子を見たい」「この方向に飛ぶ音線を見たい」に対応する。
+  `p` で基準点を拾い、`k` で種類を切り替える（なし / 近く / 方向 / 1 本）。
+  **方向は出射方向で見る**（途中の向きだと反射のたびに変わって絞れない）。
+  **「近く」は描いている反射回数までで測る**（全反射まで見るとどの音線も該当する）。
+  計算は純関数、画面側は `view_rays.RayFocus` に分けてある
 - **識別子の綴りは統一してある**（2026-08-17）。同じ概念が 2 通りに割れていたのを直した。
   `reciever_point` → `receiver_point` / `noramlized_soundray` → `normalized_soundray` /
   `impulse_responce` → `impulse_response_from_pulses`（純計算の `impulse_response` と
