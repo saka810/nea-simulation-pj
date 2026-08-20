@@ -136,6 +136,7 @@ class DxfModel:
         is_closed       bool        全体が閉じているか（開いた辺が 0 本か）
         open_edges      int         開いた辺（三角形1枚にしか属さない辺）の本数
         surface_area    float       総表面積 [m²]
+        triangle_quality dict|None  三角形の最小角の統計（median / worst / under_1 / under_5）
         layer_areas     dict        **DXF のレイヤ名** → 面積 [m²]（どの部分を拾ったかの確認用）
         volume          float|None  空気の容積 [m³]（囲まれている場合。家具の体積は引かれる）
         volume_source   str|None    容積の出し方（'法線（発散定理）'）
@@ -164,6 +165,7 @@ class DxfModel:
         self.is_closed = False
         self.open_edges = 0
         self.surface_area = 0.0
+        self.triangle_quality = None    # 最小角の統計（細長い三角形の見張り）
         self.layer_areas = {}       # DXF のレイヤ名 → 面積（Mesh.material ではない）
         self.volume = None
         self.volume_source = None
@@ -199,6 +201,13 @@ class DxfModel:
 
         # 総表面積と容積。**統計残響式に直接使う数字**なので目立つ位置に出す
         lines.append(f"総表面積: {self.surface_area:.3f} m2")
+        # 三角形の細長さ。**枚数は n 角形なら n-2 で最小なので減らせない**が、
+        # 形が悪いとレイとの交差判定が丸めに左右されやすくなる
+        if self.triangle_quality:
+            q = self.triangle_quality
+            lines.append(f"三角形の形（最小角）: 中央値 {q['median']:.1f}° / "
+                         f"最小 {q['worst']:.2f}° / 1°未満 {q['under_1']} 枚 / "
+                         f"5°未満 {q['under_5']} 枚")
         if self.layer_areas:
             lines.append("レイヤ別の面積: " + " / ".join(
                 f"{name} {self.layer_areas[name]:.2f}"
@@ -760,12 +769,22 @@ def triangulate_polygon(points):
     if len(pts) == 4:
         info["warp"] = quad_warp(pts)
         info["warp_distance"] = quad_warp_distance(pts)
-        # 内側を通る対角線を選ぶ。0-2 が使えなければ 1-3 を使う（凹んだ四角形への対処）
-        if _diagonal_is_inside(pts, 0, 2, normal):
-            tris = [(pts[0], pts[1], pts[2]), (pts[0], pts[2], pts[3])]
+        # 内側を通る対角線を選ぶ（凹んだ四角形への対処）。
+        # **両方使えるときは形の良いほう**を選ぶ（細長い三角形を避ける。_ear_clip と同じ考え）
+        by_02 = [(pts[0], pts[1], pts[2]), (pts[0], pts[2], pts[3])]
+        by_13 = [(pts[1], pts[2], pts[3]), (pts[1], pts[3], pts[0])]
+        ok_02 = _diagonal_is_inside(pts, 0, 2, normal)
+        ok_13 = _diagonal_is_inside(pts, 1, 3, normal)
+        if ok_02 and ok_13:
+            quality = lambda ts: min(triangle_min_angle(*t) for t in ts)
+            use_13 = quality(by_13) > quality(by_02)
         else:
+            use_13 = not ok_02
+        if use_13:
             info["diagonal_changed"] = True
-            tris = [(pts[1], pts[2], pts[3]), (pts[1], pts[3], pts[0])]
+            tris = by_13
+        else:
+            tris = by_02
         return tris, info
 
     # 5 角形以上 … 耳刈り法（ear clipping）
@@ -819,13 +838,53 @@ def _point_in_triangle(p, a, b, c, normal, eps=1.0e-12):
            (d1 <= eps and d2 <= eps and d3 <= eps)
 
 
+def triangle_min_angle(vertex_1, vertex_2, vertex_3):
+    """三角形の最小角 [度]。**細長さの目安**で、0 に近いほど悪い。
+
+    面積が同じでも、細長い三角形（スリバー）は数値的に不利：
+    レイとの交差判定で当たり外れが浮動小数の丸めに左右されやすくなる。
+    正三角形なら 60°。実務では 5° を下回るあたりから気にしたい。
+    """
+    v = [np.asarray(x, dtype=float) for x in (vertex_1, vertex_2, vertex_3)]
+    best = 180.0
+    for k in range(3):
+        a = v[(k + 1) % 3] - v[k]
+        b = v[(k + 2) % 3] - v[k]
+        la, lb = np.linalg.norm(a), np.linalg.norm(b)
+        if la < DEGENERATE_EPS or lb < DEGENERATE_EPS:
+            return 0.0
+        cos = float(np.dot(a, b)) / (la * lb)
+        best = min(best, float(np.degrees(np.arccos(np.clip(cos, -1.0, 1.0)))))
+    return best
+
+
+# 耳の質を比べるのをやめて「最初に見つかった耳」で済ませる頂点数。
+# 質で選ぶと 1 枚切るたびに全候補を評価するので O(n^3) になる。
+# CAD から来る面は数十頂点までなので、この上限に当たることはまず無い（保険）
+EAR_QUALITY_LIMIT = 200
+
+
 def _ear_clip(points, normal):
-    """耳刈り法で多角形を三角形に分割する。戻り値: (三角形のリスト, 成功したか)。"""
+    """耳刈り法で多角形を三角形に分割する。戻り値: (三角形のリスト, 成功したか)。
+
+    ★**候補の耳のうち、いちばん形の良いもの（最小角が最大）を切る。**
+
+    「最初に見つかった耳」を切ると、走査が毎回同じ側から始まるので**扇状に
+    分割**され、細長い三角形（スリバー）が並ぶ。実測（階段教室 272 枚）で
+    最小角の中央値 9.2°、1° 未満が 24 枚だった。ユーザー指摘のとおり
+    「1 面なのに細い三角形で 10 分割以上されて無駄に感じる」という見え方になる。
+
+    枚数は n 角形なら必ず n-2 枚で、**これは理論的な最小**なので減らせない。
+    変えられるのは**形**だけ。質で選べば枚数は同じまま、細長さが大きく改善する。
+    細長い三角形はレイとの交差判定が丸めに左右されやすいので、形は実利でもある。
+    """
     ring = list(range(len(points)))
     tris = []
+    pick_best = len(points) <= EAR_QUALITY_LIMIT
     guard = 0
     while len(ring) > 3 and guard < len(points) * len(points) + 10:
         guard += 1
+        best = None
         for m in range(len(ring)):
             i = ring[m - 1]
             j = ring[m]
@@ -836,11 +895,17 @@ def _ear_clip(points, normal):
             if any(_point_in_triangle(points[q], points[i], points[j], points[k], normal)
                    for q in ring if q not in (i, j, k)):
                 continue
-            tris.append((points[i], points[j], points[k]))
-            ring.pop(m)
-            break
-        else:
+            if not pick_best:
+                best = (0.0, m, i, j, k)
+                break
+            quality = triangle_min_angle(points[i], points[j], points[k])
+            if best is None or quality > best[0]:
+                best = (quality, m, i, j, k)
+        if best is None:
             return tris, False      # 耳が見つからない＝自己交差などで分割できない
+        _, m, i, j, k = best
+        tris.append((points[i], points[j], points[k]))
+        ring.pop(m)
     if len(ring) == 3:
         tris.append((points[ring[0]], points[ring[1]], points[ring[2]]))
         return tris, True
@@ -1492,6 +1557,12 @@ def read_model(file_name, unit=None, absorption_table=None, default_absorption=N
     # 法線を使う理由は volume_from_normals() の説明のとおり
     # （巻き順が一貫していなくても正しく、家具や反射板の体積も自動で引かれる）。
     model.surface_area = surface_area(triangles)
+    if triangles:
+        angles = np.array([triangle_min_angle(*t) for t in triangles])
+        model.triangle_quality = {"median": float(np.median(angles)),
+                                  "worst": float(angles.min()),
+                                  "under_1": int((angles < 1.0).sum()),
+                                  "under_5": int((angles < 5.0).sum())}
     areas = triangle_areas(triangles)
     for layer, a in zip(model.face_layers, areas):
         model.layer_areas[layer] = model.layer_areas.get(layer, 0.0) + float(a)

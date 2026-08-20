@@ -957,6 +957,32 @@ def test_area_and_volume():
           len(segments) == rd.open_edge_count(lid) and len(segments) == 4,
           f"{len(segments)} 本")
 
+    # 三角形の「形」の質。枚数は n 角形なら n-2 枚で最小なので減らせないが、
+    # **細長い三角形（スリバー）はレイとの交差判定が丸めに左右されやすい**ので、
+    # 耳刈り法は「最初に見つかった耳」ではなく**いちばん形の良い耳**を切る
+    check("正三角形の最小角は 60 度",
+          np.isclose(rd.triangle_min_angle([0, 0, 0], [1, 0, 0],
+                                           [0.5, np.sqrt(3) / 2, 0]), 60.0))
+    check("細長い三角形の最小角は小さい",
+          rd.triangle_min_angle([0, 0, 0], [10, 0, 0], [10, 0.1, 0]) < 1.0,
+          f"{rd.triangle_min_angle([0, 0, 0], [10, 0, 0], [10, 0.1, 0]):.3f}°")
+
+    # **細長い面**で差が出る。10:1 の楕円上に 12 頂点を並べた輪。
+    # 扇状に割ると端の三角形が潰れるが、質で選べばそうならない。
+    # （正多角形ではどの耳も合同なので差が出ない。差が出るのは細長い形）
+    ring = [np.array([10.0 * np.cos(a), 1.0 * np.sin(a), 0.0])
+            for a in np.linspace(0.0, 2.0 * np.pi, 13)[:-1]]
+    tris, info = rd.triangulate_polygon(ring)
+    check("12 角形は 10 枚に分かれる（n-2 が最小で、これは減らせない）",
+          len(tris) == 10, f"{len(tris)} 枚")
+    worst = min(rd.triangle_min_angle(*t) for t in tris)
+    fan = min(rd.triangle_min_angle(ring[0], ring[k], ring[k + 1])
+              for k in range(1, len(ring) - 1))
+    check("★扇状分割より形が良い（最小角が大きい）",
+          worst > 5.0 * fan, f"耳刈り {worst:.2f}° / 扇状 {fan:.2f}°")
+    check("面積は保たれる", info["area_error"] < 1.0e-9,
+          f"相対誤差 {info['area_error']:.2e}")
+
     # read_model が総表面積とレイヤ別面積を持っていること
     m = rd.read_model(TEST_DXF, verbose=False)
     check("read_model が総表面積を持つ", m.surface_area > 0, f"{m.surface_area:.3f} m2")
@@ -965,6 +991,9 @@ def test_area_and_volume():
     check("容積が出ていて出し方も分かる",
           m.volume is not None and m.volume_source is not None,
           f"{m.volume:.3f} m3 / {m.volume_source}")
+    check("三角形の形の統計を持っている",
+          m.triangle_quality is not None and m.triangle_quality["median"] > 0,
+          f"最小角の中央値 {m.triangle_quality['median']:.1f}°")
 
 
 # ---------------------------------------------------------------- バンド数変換
