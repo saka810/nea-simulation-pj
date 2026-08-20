@@ -49,7 +49,8 @@ def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref
             reverberation_filename=None, decay_filename=None,
             statistical_filename=None, statistical=True,
             clarity=True, clarity_filename=None, surface_filename=None,
-            flip_faces=None, face_materials=None, progress=None):
+            flip_faces=None, face_materials=None, traced_history=None,
+            progress=None):
     """
     閉じた室でも、一面だけの壁のような**開いた形状**でも計算できる
     （当たる壁がなくなった音線はそこで打ち切られる）。
@@ -131,6 +132,10 @@ def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref
         **面ごとの吸音材の割り当て** {面インデックス: 材料名}（同じく `face_editor.py`）。
         レイヤで吸音材を分けられないモデル（1 つの 3DSOLID で出来ていて
         面ごとのレイヤが無いなど）で使う。指定した面はレイヤより優先される。
+    traced_history : list[list[int]] | None
+        **すでに済ませた音線追跡の結果**（この受音点ぶんの反射面 ID 履歴）。
+        渡すと音線の生成と追跡を飛ばす。受音点が複数あるとき、追跡は受音点に
+        依らないので `run_project` が 1 回だけ回して各受音点に配る（F-6）。
     progress : callable(段階名: str, 割合: float|None) | None
         **進み具合の通知先**（GUI の進捗表示用）。割合は 0〜1、分からない段階は None。
         重い段階（音線追跡・バックトレース）は途中でも何度か呼ばれる。
@@ -208,27 +213,34 @@ def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref
                                  frequencies)
             print(f"[統計残響] 材料別の面積・吸音率: {surface_filename}")
 
-    # 音線ベクトルを作成
-    report("音線を生成中")
-    soundray_list = sr.soundray_generator(soundray_number)
+    if traced_history is None:
+        # 音線ベクトルを作成
+        report("音線を生成中")
+        soundray_list = sr.soundray_generator(soundray_number)
 
-    # 可視化用の軌跡レコーダ（本線の計算には影響しない副チャンネル）
-    recorder = None
-    if raylog_filename is not None:
-        recorder = RayRecorder(total_rays=soundray_number, max_rays=raylog_max_rays,
-                               sound_velocity=sound_velocity,
-                               band_number=len(frequencies))
+        # 可視化用の軌跡レコーダ（本線の計算には影響しない副チャンネル）
+        recorder = None
+        if raylog_filename is not None:
+            recorder = RayRecorder(total_rays=soundray_number, max_rays=raylog_max_rays,
+                                   sound_velocity=sound_velocity,
+                                   band_number=len(frequencies))
 
-    # 音線ループで反射面のIDを履歴として記録します
-    # 元コード524行目に対応
-    report("音線追跡", 0.0)
-    reflection_history = lr.loop(soundsource_point, receiver_point, soundray_list, nref, mesh,
-                                 sphere_radius, recorder=recorder, two_sided=two_sided,
-                                 progress=lambda f: report("音線追跡", f))
+        # 音線ループで反射面のIDを履歴として記録します
+        # 元コード524行目に対応
+        report("音線追跡", 0.0)
+        reflection_history = lr.loop(soundsource_point, receiver_point, soundray_list,
+                                     nref, mesh, sphere_radius, recorder=recorder,
+                                     two_sided=two_sided,
+                                     progress=lambda f: report("音線追跡", f))
 
-    if recorder is not None:
-        print("音線軌跡:", recorder.summary())
-        recorder.save_npz(raylog_filename)
+        if recorder is not None:
+            print("音線軌跡:", recorder.summary())
+            recorder.save_npz(raylog_filename)
+    else:
+        # ★受音点が複数あるとき、追跡は**呼び出し側で 1 回だけ**済ませてある
+        #   （追跡は受音点に依らない。`loop_reflectionmesh.loop` の受音判定を参照）
+        report("音線追跡（済み・受音点間で共有）", 1.0)
+        reflection_history = traced_history
 
     # 重複経路の削除
     # 元コード721行目に対応

@@ -344,6 +344,20 @@ def _head_patch(ax, radius, colour="#d6dae2"):
                              linewidth=1.0, zorder=6))
 
 
+def _head_azimuth(project, results=None):
+    """図に使う顔の向き [度]。**受音点ごとの値が結果に入っていればそれを使う。**
+
+    `project.head_azimuth` は受音点ごとのリストになりうる（2026-08-20）。
+    そのまま渡すと図が壊れるので、ここで 1 つの数値に落とす。
+    """
+    if isinstance(results, dict) and results.get("head_azimuth") is not None:
+        return float(results["head_azimuth"])
+    value = getattr(project, "head_azimuth", 0.0)
+    if value is None:
+        return 0.0
+    return float(value) if np.isscalar(value) else float(value[0] if len(value) else 0.0)
+
+
 def direction_histogram(direction, energy, head_azimuth=0.0,
                         sectors=DIRECTION_SECTORS):
     """到来方向を水平面で集計する。
@@ -977,7 +991,7 @@ def save_all(project, results, verbose=True):
         emit("direction.png", propagation_direction,
              pulse_list.direction, pulse_list.energy,
              distance=pulse_list.distance, time=pulse_list.time,
-             head_azimuth=getattr(project, "head_azimuth", 0.0),
+             head_azimuth=_head_azimuth(project, results),
              frequencies=results.get("frequencies"),
              reflection_count=pulse_list.reflection_count)
 

@@ -37,10 +37,17 @@ def run(project, verbose=True, make_figures=True, progress=None):
     if len(receivers) <= 1:
         return _run_one(project, receivers[0] if receivers else None,
                         verbose=verbose, make_figures=make_figures,
+                        head_azimuth=project.head_azimuth_for(0),
                         progress=progress)
 
+    # ★音線追跡は**受音点に依らない**ので 1 回だけ回し、受音点ごとに配る（F-6）。
+    #   受音しても音線は打ち切られないため、受音球をいくつ置いても追跡は同じ。
+    #   受音点ごとに追い直していたときは、その回数だけ全部やり直していた
     if verbose:
-        print(f"[run] 受音点が {len(receivers)} 点あります。1 点ずつ計算します")
+        print(f"[run] 受音点が {len(receivers)} 点あります。"
+              f"音線追跡は 1 回で済ませ、受音判定だけ {len(receivers)} 点ぶん行います")
+    traced, recorder = _trace_once(project, receivers, verbose=verbose, progress=progress)
+
     results = []
     for k, point in enumerate(receivers):
         sub = _sub_project(project, k)
@@ -51,9 +58,76 @@ def run(project, verbose=True, make_figures=True, progress=None):
         #   書き戻すと `receiver` が 1 点に固定され、**次回から 1 点目しか回らなくなる**
         results.append(_run_one(sub, point, verbose=verbose,
                                 make_figures=make_figures, write_back=(k > 0),
+                                head_azimuth=project.head_azimuth_for(k),
+                                traced_history=None if traced is None else traced[k],
                                 progress=_prefixed(progress,
                                                    f"受音点{k + 1}/{len(receivers)} ")))
+        if recorder is not None:
+            # 軌跡は受音点ごとに同じものを置く（形は同じで、受音の印は
+            # 「どれかの受音点に届いた」の意味になる）。`clear_results` のあとに置く
+            recorder.save_npz(sub.result_path("raylog"))
     return {"receivers": receivers, "results": results, **results[0]}
+
+
+def _trace_once(project, receivers, verbose=True, progress=None):
+    """**全受音点ぶんの音線追跡を 1 回で**行い、受音点ごとの反射面 ID 履歴を返す。
+
+    追跡そのものは受音点に依らない（受音しても音線は打ち切られない）。
+    受音球だけ受音点の数だけ置いて判定すればよいので、ここで 1 回に畳む。
+    可視化用の軌跡は 1 本ぶんしか作らないため、**「どれかの受音点に届いた」**が
+    受音の印になる（受音点ごとの色分けが要るようになったら作り直す）。
+
+    読み込みに失敗するなど何かあれば None を返し、呼び出し側は
+    従来どおり受音点ごとに追跡する（安全側）。
+    """
+    import loop_reflectionmesh as lr
+    import read_dxffile as rd
+    import sound_ray as sr
+    from ray_recorder import RayRecorder
+    import absorption as ab
+
+    try:
+        table = None
+        if project.absorption_path:
+            library = ab.MaterialLibrary.from_csv(project.absorption_path,
+                                                  kind=project.absorption_kind)
+            table = library.absorption_table(project.assignment,
+                                             band_number=project.band_number)
+        model = rd.read_model(project.dxf_path, unit=project.unit,
+                              absorption_table=table,
+                              orient_normals=project.orient_normals,
+                              band_number=project.band_number,
+                              flip_faces=_flip_faces_for(project),
+                              face_materials=_face_materials_for(project),
+                              verbose=False)
+        source = (project.source if project.source is not None
+                  else (model.source_points[0] if model.source_points else None))
+        if source is None:
+            return None
+        rays = sr.soundray_generator(project.rays)
+        recorder = RayRecorder(total_rays=project.rays,
+                               max_rays=project.raylog_max_rays,
+                               sound_velocity=Atmosphere(
+                                   temperature=project.temperature,
+                                   humidity=project.humidity,
+                                   pressure=project.pressure).sound_velocity,
+                               band_number=project.band_number)
+        if verbose:
+            print("[run] 音線追跡（全受音点ぶんを 1 回で）")
+        histories = lr.loop(np.asarray(source, dtype=float),
+                            np.asarray(receivers, dtype=float), rays,
+                            project.nref, model.mesh, project.radius,
+                            recorder=recorder, two_sided=project.two_sided,
+                            progress=(lambda f: progress("音線追跡（共有）", f))
+                            if progress else None)
+        print("音線軌跡:", recorder.summary())
+        # ★軌跡の保存は**呼び出し側が `_run_one` のあとで**行う。
+        #   `_run_one` の頭で `clear_results()` が走るので、先に置くと消される
+        return histories, recorder
+    except Exception as error:      # 何かあっても従来どおり受音点ごとに追跡できる
+        print(f"[run] 音線追跡の共有に失敗したので受音点ごとに追跡します: "
+              f"{type(error).__name__}: {error}")
+        return None, None
 
 
 def _prefixed(progress, prefix):
@@ -74,11 +148,18 @@ def _receivers(project):
 
 
 def _sub_project(project, index):
-    """受音点 2 点目以降の書き出し先。条件は同じで**フォルダだけ分ける**。"""
+    """受音点 `index` 番目の書き出し先。条件は同じで**フォルダだけ分ける**。
+
+    ★**顔の向きだけは受音点ごとに違う**ので、その点のぶんを取り出して入れ直す
+    （`head_azimuth` は数値でもリストでもよい。`Project.head_azimuth_for` を参照）。
+    """
     if index == 0:
+        # ★親は**触らない**。ここで数値に置き換えると project.json のリストが消える
         return project
+    azimuth = project.head_azimuth_for(index)
     sub = pj.Project.load(project.folder)
     sub.__dict__.update({k: getattr(project, k) for k in pj.DEFAULTS})
+    sub.head_azimuth = azimuth
     sub.folder = os.path.join(project.folder, f"rec{index + 1}")
     sub.name = f"{project.name} 受音点{index + 1}"
     # DXF と吸音率は親フォルダのものをそのまま使う（絶対パスにしておく）
@@ -90,7 +171,7 @@ def _sub_project(project, index):
 
 
 def _run_one(project, receiver, verbose=True, make_figures=True,
-             write_back=True, progress=None):
+             write_back=True, head_azimuth=None, traced_history=None, progress=None):
     project.ensure_dirs()
     # 前回の結果を消してから回す。条件を変えたときに古いファイルが残っていると、
     # 今回の条件の値だと思って読んでしまう
@@ -121,6 +202,7 @@ def _run_one(project, receiver, verbose=True, make_figures=True,
         volume=project.volume,
         flip_faces=flip_faces,
         face_materials=face_materials,
+        traced_history=traced_history,
         atmosphere=Atmosphere(temperature=project.temperature,
                               humidity=project.humidity,
                               pressure=project.pressure),
@@ -146,6 +228,10 @@ def _run_one(project, receiver, verbose=True, make_figures=True,
             print(f"[run] 図を {len(written)} 枚書き出しました → {project.path(pj.FIGURE_DIR)}")
 
     # 実際に使った音源・受音点を project.json に残す（DXF から取った場合も分かるように）
+    # ★顔の向きは**結果に持たせる**（受音点ごとに違うため）。
+    #   project に書き戻すと、複数受音点のときにリストが 1 点ぶんの数値に潰れる
+    results["head_azimuth"] = (project.head_azimuth_for(0)
+                               if head_azimuth is None else float(head_azimuth))
     project.source = results["soundsource_point"].tolist()
     if write_back:
         project.receiver = results["receiver_point"].tolist()

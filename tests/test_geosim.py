@@ -1724,6 +1724,77 @@ def test_patch_collision():
     check("枠のところは当たる", hit[1] >= 0, f"hit={hit[1]}")
 
 
+# ---------------------------------- 追跡の共有とバックトレースの配列演算（F-5 / F-6）
+def test_shared_trace_and_batch_backtrace():
+    print("\n[29] 受音点をまたぐ追跡の共有 と バックトレースの配列演算")
+    import loop_reflectionmesh as lr
+    import loop_deleteredundancy as ld
+    import loop_noredundancy as ln
+    import mesh_method as mm
+    import sound_ray as sr
+
+    model, source, _ = load_test_room()
+    mesh = model.mesh
+    receivers = [np.array([1.4, 2.2, 0.6]), np.array([0.6, 1.0, 0.4]),
+                 np.array([1.2, 2.8, 0.7])]
+    rays = sr.soundray_generator(4000)
+
+    # ---- ① 追跡は受音点に依らない。1 回で全受音点ぶんを判定できる ----
+    separate = [lr.loop(source, r, rays, 6, mesh, 0.25) for r in receivers]
+    together = lr.loop(source, np.array(receivers), rays, 6, mesh, 0.25)
+    check("受音点ごとに追跡したのと 1 回で判定したのが一致",
+          all(a == b for a, b in zip(separate, together)),
+          f"経路 {[len(x) for x in separate]}")
+    check("1 点だけ渡せば従来どおり平らなリストを返す",
+          lr.loop(source, receivers[0], rays, 6, mesh, 0.25) == separate[0])
+
+    # ---- ①b 音源も複数まとめて追えること（PA など複数音源を想定。F-7）----
+    #      音線は音源から出るので受音点のようには共有できないが、
+    #      音源ごとの音線を 1 本の配列に並べれば配列演算の効率はそのまま活きる
+    sources = [source, np.array([0.8, 2.5, 0.6])]
+    apart = [[lr.loop(s, r, rays, 6, mesh, 0.25) for r in receivers] for s in sources]
+    at_once = lr.loop(np.array(sources), np.array(receivers), rays, 6, mesh, 0.25)
+    check("音源ごとに追跡したのと一括で追跡したのが一致",
+          all(a == b for ra, rb in zip(apart, at_once) for a, b in zip(ra, rb)),
+          f"経路 {[[len(x) for x in row] for row in apart]}")
+    check("戻り値の入れ子は [音源][受音点]",
+          len(at_once) == len(sources) and len(at_once[0]) == len(receivers))
+    check("音源 1 つなら受音点だけの入れ子に戻る",
+          [len(x) for x in lr.loop(source, np.array(receivers), rays, 6, mesh, 0.25)]
+          == [len(x) for x in apart[0]])
+
+    # ---- ② バックトレースを束でやっても 1 本ずつと同じ ----
+    unique = ld.delete(separate[0])
+    faces = mm.collision_arrays(mesh)
+    band = len(np.atleast_1d(mesh[0].absorption_coefficient))
+    one = [ln.backtrace_path(source, receivers[0], w, mesh, band, faces=faces)
+           for w in unique]
+    one = [r for r in one if r is not None]
+    many = ln.backtrace_batch(source, receivers[0], unique, mesh, faces, band)
+    check("却下される経路の本数まで一致",
+          len(one) == len(many), f"1 本ずつ {len(one)} / 束 {len(many)}")
+
+    key = lambda r: (r["reflection_count"], round(r["time"], 12), tuple(r["wall_ids"]))
+    a, b = sorted(one, key=key), sorted(many, key=key)
+    check("残る経路が同じ", [key(x) for x in a] == [key(x) for x in b])
+    if a and len(a) == len(b):
+        worst = max(float(np.max(np.abs(x["energy"] - y["energy"])))
+                    for x, y in zip(a, b))
+        check("バンド別エネルギーが一致（丸めまで）", worst < 1.0e-12,
+              f"最大差 {worst:.3e}")
+        check("到来時刻が一致",
+              max(abs(x["time"] - y["time"]) for x, y in zip(a, b)) == 0.0)
+        check("到来方向が一致",
+              max(float(np.max(np.abs(x["direction"] - y["direction"])))
+                  for x, y in zip(a, b)) == 0.0)
+
+    # `loop()` は束の版を使う。1 本ずつの版は参照実装として残っていること
+    pulses = ln.loop(source, receivers[0], unique, mesh, band_number=band, verbose=False)
+    check("loop() の結果も一致", len(pulses) == len(one), f"{len(pulses)} 本")
+    check("★1 本ずつの参照実装は残してある",
+          callable(getattr(ln, "backtrace_path", None)))
+
+
 def main():
     print("geosim 数値検証")
     print(f"  Python {sys.version.split()[0]} / numpy {np.__version__}")
@@ -1739,7 +1810,7 @@ def main():
                test_mode_buildup, test_redraw, test_capture, test_table,
                test_reflection_vectorised, test_face_groups,
                test_ray_filter, test_area_and_volume,
-               test_patch_collision):
+               test_patch_collision, test_shared_trace_and_batch_backtrace):
         fn()
 
     failed = [name for name, ok in _results if not ok]

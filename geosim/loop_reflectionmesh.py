@@ -50,8 +50,15 @@ def loop(soundsource_point, receiver_point, soundray_list, nref, mesh, sphere_ra
     """音線追跡。
 
     引数:
-        soundsource_point : (3,)     音源座標
-        receiver_point    : (3,)     受音点座標
+        soundsource_point : (3,) | (S,3)
+            音源座標。**複数渡せる**（2026-08-21）。音線は音源から出るので受音点の
+            ようには共有できない（音源の数だけ音線が要る）が、音源ごとの音線を
+            1 本の配列に並べて追跡するので配列演算の効率はそのまま活きる。
+            複数渡すと戻り値が **[音源][受音点]** の入れ子になる
+        receiver_point    : (3,) | (R,3)
+            受音点座標。**複数渡せる**（2026-08-21）。追跡は受音点に依らないので、
+            受音球をいくつ置いても**追跡は 1 回で済む**。
+            1 点なら従来どおり経路のリスト、複数なら**受音点ごとのリスト**を返す
         soundray_list     : (nray,3) 音源から出る音線の単位ベクトル群
         nref              : int      最大反射回数
         mesh              : list[Mesh] 室形状
@@ -81,30 +88,55 @@ def loop(soundsource_point, receiver_point, soundray_list, nref, mesh, sphere_ra
         Python は可変長リストなので持つ意味がなく、持っていると
         `mesh[history[0]]` が -1 で最後の面を指す事故のもとになるため落とした。
     """
+    receivers = np.atleast_2d(np.asarray(receiver_point, dtype=float))
+    sources = np.atleast_2d(np.asarray(soundsource_point, dtype=float))
+    one_receiver = np.asarray(receiver_point, dtype=float).ndim == 1
+    one_source = np.asarray(soundsource_point, dtype=float).ndim == 1
+
     faces = mm.collision_arrays(mesh, two_sided=two_sided)
     soundray_list = np.atleast_2d(np.asarray(soundray_list, dtype=float))
-    results = []
+    n_direction = len(soundray_list)
+
+    # ★音源が複数あるときは、**音源ごとの音線を 1 本の配列に並べて**まとめて追跡する。
+    #   音線は音源から出るので受音点のようには共有できないが（音源の数だけ音線が要る）、
+    #   束を大きくすれば配列演算の効率はそのまま活きる。
+    #   どの音源から出た音線かは `ray_source` で持つ
+    directions = np.tile(soundray_list, (len(sources), 1))
+    origins = np.repeat(sources, n_direction, axis=0)
+    ray_source = np.repeat(np.arange(len(sources)), n_direction)
+    ray_ids = np.tile(np.arange(n_direction), len(sources))
+
+    results = [[[] for _ in receivers] for _ in sources]
 
     # 音線を塊に分けて処理する。1 塊のなかは配列演算なので Python のループが回らない
     step = max(1, int(ray_chunk))
-    total = len(soundray_list)
+    total = len(directions)
     for start in range(0, total, step):
         stop = min(start + step, total)
-        _trace_chunk(soundsource_point, receiver_point,
-                     soundray_list[start:stop], np.arange(start, stop),
+        _trace_chunk(origins[start:stop], receivers,
+                     directions[start:stop], ray_ids[start:stop],
+                     ray_source[start:stop],
                      nref, mesh, faces, sphere_radius, results, recorder)
         if progress is not None:
             # 塊ごとに進み具合を知らせる（GUI の進捗表示用。本線の計算には影響しない）
             progress(stop / total)
-    return results
+
+    if one_source:
+        return results[0][0] if one_receiver else results[0]
+    return [r[0] for r in results] if one_receiver else results
 
 
-def _trace_chunk(soundsource_point, receiver_point, soundray_list, ray_ids,
+def _trace_chunk(ray_origins, receivers, soundray_list, ray_ids, ray_source,
                  nref, mesh, faces, sphere_radius, results, recorder):
-    """音線の塊 1 つぶんを追跡する。処理の順序は元コードと同じ。"""
+    """音線の塊 1 つぶんを追跡する。処理の順序は元コードと同じ。
+
+    `receivers` は (R,3)、`ray_origins` は音線ごとの出発点 (A,3)、
+    `ray_source` はその音線がどの音源から出たか (A,)。
+    **`results[音源][受音点]` へ経路を積む。**
+    """
     n_ray = len(soundray_list)
 
-    origins = np.repeat(np.asarray(soundsource_point, dtype=float)[None, :], n_ray, axis=0)
+    origins = np.array(ray_origins, dtype=float, copy=True)
     directions = soundray_list / np.linalg.norm(soundray_list, axis=1)[:, None]
 
     # 反射履歴。元コードの固定長配列 tractmp と同じ持ち方にした。
@@ -146,14 +178,20 @@ def _trace_chunk(soundsource_point, receiver_point, soundray_list, ray_ids,
 
         # 受音判定（元コード 649〜663行）
         # ★ 壁 ID の追記より前に行う。この時点の履歴が「そこまでに済んだ反射」になる
-        inside = rs.inside_sphere_batch(sphere_radius, direction_alive, origin_alive,
-                                        receiver_point, min_distance)
-        for local in np.nonzero(inside)[0]:
-            ray = alive[local]
-            # 受音経路として保存（元コード 666〜669行 traceff への書き込み）
-            results.append(history[ray, :depth[ray]].tolist())
-            if recorded[ray]:
-                recorder.mark_receive(k, ray_index=int(ray_ids[ray]))
+        #
+        # ★**受音点ごとに判定する。**追跡そのものは受音点に依らない（受音しても
+        #   音線は打ち切られない）ので、受音球をいくつ置いても追跡は 1 回で済む。
+        #   受音点ごとに追い直していたときは、その回数だけ全部やり直していた
+        for r, receiver in enumerate(receivers):
+            inside = rs.inside_sphere_batch(sphere_radius, direction_alive, origin_alive,
+                                            receiver, min_distance)
+            for local in np.nonzero(inside)[0]:
+                ray = alive[local]
+                # 受音経路として保存（元コード 666〜669行 traceff への書き込み）
+                results[int(ray_source[ray])][r].append(
+                    history[ray, :depth[ray]].tolist())
+                if recorded[ray]:
+                    recorder.mark_receive(k, ray_index=int(ray_ids[ray]))
 
         # 当たる壁がなければその音線は終了（元コード 709〜712行）
         collision = hit_id >= 0

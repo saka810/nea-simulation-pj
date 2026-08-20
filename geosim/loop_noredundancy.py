@@ -249,9 +249,164 @@ def backtrace_path(soundsource_point, receiver_point, wall_ids, mesh,
     }
 
 
+# ------------------------------------------------------------------------------
+# バックトレースの配列演算化（F-5。2026-08-21 追加）
+#
+# `backtrace_path()` は経路 1 本ずつ Python のループで回る。1 経路につき反射回数ぶん
+# `nearest_hit` を**単発で**呼ぶので、研修室（経路 37,592 本・最大反射 160 回）では
+# 実測で全体の 65% を占めていた（音線追跡は 34%）。
+#
+# ここでは**全経路を同時に、反射回数 k を大きいほうから 1 段ずつ**下ろす。
+# 経路の長さはまちまちだが、長さ L の経路は k = L のときに入ってくると考えれば、
+# **どの時点でも動いている経路はすべて同じ k にいる**ので、素直に束で処理できる。
+#
+#   k = Kmax        L = Kmax の経路が入る
+#   k = Kmax-1      L = Kmax-1 の経路が入り、上の経路は 1 段下りている
+#   …
+#   k = 0           直接音の区間。ここまで残った経路が受音成立
+#
+# 虚音源も同じく束で作る（面での鏡像は p - 2(n·p + d)n の 1 行で、経路ごとに面が
+# 違うだけなので配列で引ける）。
+#
+# ★`backtrace_path()` は**参照実装として残す**。同じ結果になることを
+#   tests/test_geosim.py の「バックトレースの配列演算（1 本ずつとの一致）」で確かめる。
+# ------------------------------------------------------------------------------
+
+def _image_source_table(soundsource_point, walls, lengths, faces):
+    """経路ごとの虚音源の列 (P, Kmax+1, 3) をまとめて作る。
+
+    `image_sources()` を束にしたもの。k 段目は「k 回反射ぶんの虚音源」で、
+    長さ L の経路では k = 0..L だけが意味を持つ（それ以外は使わない）。
+    """
+    n_path, kmax = len(lengths), walls.shape[1]
+    images = np.empty((n_path, kmax + 1, 3))
+    images[:, 0, :] = np.asarray(soundsource_point, dtype=float)
+    for k in range(kmax):
+        active = np.nonzero(lengths > k)[0]
+        if not len(active):
+            break
+        wall = walls[active, k]
+        # 1 本ずつの版（image_sources）と同じく、念のため正規化してから使う
+        normal = faces.normal[wall]
+        normal = normal / np.linalg.norm(normal, axis=1)[:, None]
+        offset = -np.einsum("ij,ij->i", normal, faces.plane_point[wall])
+        signed = np.einsum("ij,ij->i", normal, images[active, k, :]) + offset
+        images[active, k + 1, :] = images[active, k, :] - 2.0 * signed[:, None] * normal
+    return images
+
+
+def _energy_decay_batch(vray, normal, absorption, energy):
+    """`sound_ray.energy_decay` を束で。式は 1 本ずつの版とまったく同じ順序で書く。
+
+    vray (A,3) / normal (A,3) / absorption (A,b) / energy (A,b) → (A,b)
+    """
+    coefficient = np.abs(np.einsum("ij,ij->i", vray, normal))[:, None]
+    root = np.sqrt(1.0 - absorption)
+    reflection = (1.0 + root) * coefficient - (1.0 - root)
+    reflection = reflection / ((1.0 + root) * coefficient + (1.0 - root))
+    reflection = np.abs(reflection)
+    return energy * reflection * reflection
+
+
+def backtrace_batch(soundsource_point, receiver_point, histories, mesh, faces,
+                    band_number, sound_velocity=SOUND_VELOCITY):
+    """経路の束をまとめてバックトレースする。戻り値は `backtrace_path` と同じ dict のリスト。
+
+    却下された経路は入らない（1 本ずつの版が None を返すのと同じ扱い）。
+    """
+    n_path = len(histories)
+    if n_path == 0:
+        return []
+    lengths = np.array([len(h) for h in histories], dtype=np.int64)
+    kmax = int(lengths.max())
+    walls = np.full((n_path, max(kmax, 1)), -1, dtype=np.int64)
+    for i, h in enumerate(histories):
+        if len(h):
+            walls[i, :len(h)] = h
+
+    images = _image_source_table(soundsource_point, walls, lengths, faces)
+
+    receiver = np.asarray(receiver_point, dtype=float)
+    source = np.asarray(soundsource_point, dtype=float)
+    absorption = np.array([np.atleast_1d(m.absorption_coefficient) for m in mesh])
+
+    origin = np.repeat(receiver[None, :], n_path, axis=0)
+    ray = np.zeros((n_path, 3))
+    energy = np.ones((n_path, band_number))
+    last_face = np.full(n_path, -1, dtype=np.int64)
+    alive = np.zeros(n_path, dtype=bool)        # すでに入ってきて、まだ却下されていない
+    done = np.zeros(n_path, dtype=bool)         # 受音成立
+    source_distance = np.linalg.norm(receiver - source)
+
+    for k in range(kmax, -1, -1):
+        entering = np.nonzero(lengths == k)[0]
+        if len(entering):
+            # 受音点から「最後の虚音源」を見込む向きで始める（元コード 951〜969 行）
+            vector = images[entering, k, :] - receiver
+            length = np.linalg.norm(vector, axis=1)
+            ok = length > 0.0
+            ray[entering[ok]] = vector[ok] / length[ok][:, None]
+            alive[entering[ok]] = True
+        index = np.nonzero(alive)[0]
+        if not len(index):
+            continue
+
+        hit_id, hit_distance, node = faces.nearest_hit(
+            origin[index], ray[index],
+            ignore=last_face[index] if faces.two_sided else None)
+        hit = hit_id >= 0
+
+        if k == 0:
+            # 音源より手前に壁があれば直接音は遮蔽（元コード 1066〜1072 行）。
+            # 壁に当たらないなら遮るものが無いということで受音成立
+            blocked = np.zeros(len(index), dtype=bool)
+            if np.any(hit):
+                reach = np.linalg.norm(origin[index] - source, axis=1)
+                blocked = hit & (hit_distance < reach)
+            done[index[~blocked]] = True
+            alive[index] = False
+            continue
+
+        # 経路が言う壁と違う壁に当たったら却下（元コード 1086 行）
+        want = walls[index, k - 1]
+        good = hit & (hit_id == want)
+        alive[index[~good]] = False
+        keep = index[good]
+        if not len(keep):
+            continue
+        local = np.nonzero(good)[0]
+
+        wall = want[good]
+        energy[keep] = _energy_decay_batch(ray[keep], faces.normal[wall],
+                                           absorption[wall], energy[keep])
+        last_face[keep] = wall
+        origin[keep] = node[local]
+        vector = images[keep, k - 1, :] - origin[keep]
+        length = np.linalg.norm(vector, axis=1)
+        alive[keep[length <= 0.0]] = False
+        good_length = length > 0.0
+        ray[keep[good_length]] = vector[good_length] / length[good_length][:, None]
+
+    records = []
+    for i in np.nonzero(done)[0]:
+        vtgt = receiver - images[i, lengths[i], :]
+        distance = float(np.linalg.norm(vtgt))
+        if distance == 0.0:
+            continue          # 虚音源が受音点に一致。時刻 0 で割れないので捨てる
+        records.append({
+            "reflection_count": int(lengths[i]),
+            "time": distance / sound_velocity,
+            "distance": distance,
+            "direction": (-vtgt) / distance,
+            "energy": energy[i].copy(),
+            "wall_ids": list(histories[i]),
+        })
+    return records
+
+
 def loop(soundsource_point, receiver_point, reflectionmeshid_history, mesh,
          sound_velocity=SOUND_VELOCITY, band_number=None, filename=None,
-         verbose=True, two_sided=False, progress=None):
+         verbose=True, two_sided=False, progress=None, path_chunk=20000):
     """非重複経路ループ。元コード 878 行 `do i = 1, countred`。
 
     引数:
@@ -269,6 +424,9 @@ def loop(soundsource_point, receiver_point, reflectionmeshid_history, mesh,
             面の裏からの入射も当てるか。**音線追跡と必ず揃えること**。
             食い違うと、追跡側が通した経路をバックトレース側が全部却下する。
             詳細は mesh_method.FaceArrays
+        path_chunk              : int
+            一度に束で処理する経路の本数。虚音源の表 (経路 × 反射回数 × 3) の
+            メモリ量を抑えるためのもので、結果には影響しない
 
     戻り値:
         PulseList
@@ -284,20 +442,21 @@ def loop(soundsource_point, receiver_point, reflectionmeshid_history, mesh,
 
     faces = mm.collision_arrays(mesh, two_sided=two_sided)
     records = []
-    rejected = 0
 
     total = len(reflectionmeshid_history)
-    # 進捗を知らせる間隔。経路 1 本ごとに呼ぶと通知のほうが重くなる
-    notify_every = max(1, total // 100)
-    for i, wall_ids in enumerate(reflectionmeshid_history):
-        record = backtrace_path(soundsource_point, receiver_point, wall_ids, mesh,
-                                band_number, sound_velocity, faces=faces)
-        if record is None:
-            rejected += 1
-        else:
-            records.append(record)
-        if progress is not None and (i + 1) % notify_every == 0:
-            progress((i + 1) / total)
+    # 経路を塊に分けて束で処理する（`backtrace_batch`）。1 本ずつの `backtrace_path` は
+    # 参照実装として残してあり、結果が一致することをテストで確かめている。
+    # 塊に分けるのは虚音源の表 (経路 × 反射回数 × 3) がメモリに乗る大きさに保つため
+    step = max(1, int(path_chunk))
+    for start in range(0, total, step):
+        stop = min(start + step, total)
+        records.extend(backtrace_batch(
+            soundsource_point, receiver_point,
+            reflectionmeshid_history[start:stop], mesh, faces,
+            band_number, sound_velocity))
+        if progress is not None:
+            progress(stop / total)
+    rejected = total - len(records)
 
     pulses = PulseList.from_records(records, band_number, sound_velocity).sort_by_time()
 

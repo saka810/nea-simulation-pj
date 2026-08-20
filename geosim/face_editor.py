@@ -55,6 +55,7 @@ CAD で面を 1 枚ずつ描くと巻き順と押し出し方向で向きが決�
     `i` 選択した面の法線を反転（**選択が空なら全部**）
     `a` 自動判定どおりに揃える   `d` CAD の巻き順に戻す
     `n` 法線の矢印 ON/OFF        `o` 不透明度の対象を切り替え
+    `w` **向きを調整する受音点を切り替え**（受音点ごとに正面方向を持てる）
     `t` 値を数字で入力（不透明度・正面の方位）
     `g` **いまの画面を画像で保存**（`図/画面/面_01.png` … 連番）
     `s` **保存して閉じる**       `q` 保存せずに閉じる
@@ -124,6 +125,10 @@ SHELL_ROLE_NAMES = {"outer": "外殻（容積を囲む）",
 # 開いた辺の色。穴なのか T 字接合なのかを目で確かめるために重ねて描く
 OPEN_EDGE_COLOR = "#e5484d"
 
+# 受音点の正面方向の矢印。**いま調整している点**とそれ以外を色で分ける
+HEAD_COLOR = "#ffd166"
+HEAD_OTHER_COLOR = "#8a7a3f"
+
 # 「同じ向きの面」とみなす角度。床・天井・壁をまとめて選ぶのに使う。
 # 面グループのしきい値（1°）より緩くしてあるのは、**別々の平面でも向きが揃っていれば
 # まとめたい**ため（例：段差のある天井を一度に選ぶ）
@@ -188,8 +193,12 @@ class FaceEditor:
         # 受音点に置く「人」の正面方向 [度]（真上から見て +X から反時計回り）。
         # G-5 の伝搬方向の図で「前・後ろ・左・右」を決めるのに使う。
         # CAD で表すのは難しいという判断で、ここ（3D が見えている画面）で決める
-        self.head_azimuth = None if head_azimuth is None else float(head_azimuth)
+        # 受音点ごとの正面方向 [度]。**受音点ごとに違う向きを持てる**（2026-08-20）。
+        # 数値で渡されたら全点に同じ値を使う（従来どおり）
+        self.head_azimuth = _azimuth_list(head_azimuth, len(model.receiver_points))
+        self.head_index = 0             # いま調整している受音点
         self.head_actor = None
+        self.head_markers = []
         self.model = model
         self.mesh = model.mesh
         self.count = len(self.mesh)
@@ -261,6 +270,7 @@ class FaceEditor:
         self.show_normals = False
         self.label = None
         self.status = None
+        self.head_slider = None
 
     # ---- 状態 ----------------------------------------------------------
 
@@ -604,8 +614,10 @@ class FaceEditor:
             panel.text(self.title, size=11, color=TEXT_COLOR)
             self.label = panel.reserve_text(LABEL_LINES)
 
-            self._build_material_panel(panel)
-
+            # ★並び順は「短くて必ず要るもの」が上。
+            #   吸音材の一覧は材料が増えるといくらでも伸びる（実案件で 19 種になり、
+            #   下にあった向きのスライダと操作説明が画面外に押し出された）。
+            #   パネルは縦に伸びずスクロールもしないので、**長いものは最後に置く**
             panel.heading("レイヤ表示（数字キーで選択）")
             for k, name in enumerate(self.layers):
                 faces = np.nonzero(self.layer_of == k)[0]
@@ -620,12 +632,17 @@ class FaceEditor:
 
             # 受音点に置く「人」の正面方向（G-5 の伝搬方向の図で使う）。
             # CAD で表すのは難しいので、3D が見えているここで決める
-            if self.head_azimuth is not None and self.model.receiver_points:
+            if self.head_azimuth and self.model.receiver_points:
                 panel.heading("受音点の向き（伝搬方向の図）")
-                panel.slider("正面の方位 [°]", [0.0, 360.0], self.head_azimuth,
+                panel.slider("正面の方位 [°]", [0.0, 360.0],
+                             self.head_azimuth[self.head_index],
                              lambda v: self.set_head_azimuth(v), fmt="%.0f")
+                self.head_slider = panel.controls[-1]
                 panel.text("0°=+X / 90°=+Y（真上から見て反時計回り）\n"
-                           "黄色い矢印が正面です", size=8)
+                           + ("w で調整する受音点を切り替え\n"
+                              "濃い黄色が調整中の点です"
+                              if len(self.head_azimuth) > 1 else "黄色い矢印が正面です"),
+                           size=8)
 
             panel.heading("操作")
             # ★パネルは縦に伸びず、横も狭い（`Panel.text` は右を「…」で切り詰める）。
@@ -642,6 +659,9 @@ class FaceEditor:
                        "s 保存して閉じる  q 保存せず閉じる",
                        size=8, color="#7f8794")
             self.status = panel.reserve_text(2, size=9, color="#ffd166")
+
+            # 吸音材の一覧は長くなりうるので**いちばん下**（上の説明を参照）
+            self._build_material_panel(panel)
         else:
             self.label = self.plotter.add_text(" ", position=(14, window_size[1] - 130),
                                                font_size=10, color=TEXT_COLOR,
@@ -657,6 +677,8 @@ class FaceEditor:
         self.plotter.add_key_event("n", self._toggle_normals)
         self.plotter.add_key_event("m", self.toggle_mode)      # mode
         self.plotter.add_key_event("y", self.toggle_unit)
+        # `w` は VTK のワイヤフレーム表示だが、`s`（保存）と同じく上書きして使う
+        self.plotter.add_key_event("w", self.next_receiver)
         self.plotter.add_key_event("0", self.clear_selection)
         self.plotter.add_key_event("j", self.select_all)
         self.plotter.add_key_event("h", self.invert_selection)
@@ -674,8 +696,8 @@ class FaceEditor:
         self.plotter.enable_cell_picking(callback=self._picked, through=False,
                                          show_message=False, color=SELECTED_COLOR)
 
-        if self.head_azimuth is not None:
-            self.set_head_azimuth(self.head_azimuth, render=False)
+        if self.head_azimuth:
+            self.set_head_azimuth(self.head_azimuth[self.head_index], render=False)
         self.refresh(render=False)
         if panel is not None:
             panel.enable_value_input()
@@ -747,31 +769,50 @@ class FaceEditor:
         self.select(np.concatenate(ids))
 
     def set_head_azimuth(self, degrees, render=True):
-        """受音点に置く「人」の正面方向を変え、矢印を描き直す。
+        """**いま選んでいる受音点**の正面方向を変え、矢印を描き直す。
 
         上下の向きは扱わない（実務では水平面で足りるというユーザー判断）。
         矢印は**受音点から正面へ**伸ばす。長さは室の対角の 8% にしてあり、
         「どちらを向いているか」が分かればよい大きさ。
+        調整中の受音点は**濃い黄色**、それ以外は薄い黄色で描く。
         """
-        self.head_azimuth = float(degrees) % 360.0
+        if not self.head_azimuth:
+            return
+        self.head_azimuth[self.head_index] = float(degrees) % 360.0
         if self.plotter is None or not self.model.receiver_points:
             return
-        if self.head_actor is not None:
-            self.plotter.remove_actor(self.head_actor, render=False)
-            self.head_actor = None
+        for actor in self.head_markers:
+            self.plotter.remove_actor(actor, render=False)
+        self.head_markers = []
 
         lo, hi = self.model.extents
         length = float(np.linalg.norm(np.asarray(hi) - np.asarray(lo))) * 0.08
-        angle = np.deg2rad(self.head_azimuth)
-        direction = np.array([np.cos(angle), np.sin(angle), 0.0])
-        start = np.asarray(self.model.receiver_points[0], dtype=float)
-        arrow = pv.Arrow(start=start, direction=direction, scale=length,
-                         tip_length=0.3, tip_radius=0.12, shaft_radius=0.04)
-        self.head_actor = self.plotter.add_mesh(arrow, color="#ffd166",
-                                                lighting=False, pickable=False)
+        for k, point in enumerate(self.model.receiver_points):
+            angle = np.deg2rad(self.head_azimuth[k])
+            direction = np.array([np.cos(angle), np.sin(angle), 0.0])
+            arrow = pv.Arrow(start=np.asarray(point, dtype=float), direction=direction,
+                             scale=length, tip_length=0.3, tip_radius=0.12,
+                             shaft_radius=0.04)
+            here = (k == self.head_index)
+            self.head_markers.append(self.plotter.add_mesh(
+                arrow, color=HEAD_COLOR if here else HEAD_OTHER_COLOR,
+                opacity=1.0 if here else 0.45, lighting=False, pickable=False))
+        self.head_actor = self.head_markers[self.head_index] if self.head_markers else None
         self._refresh_label()
         if render:
             self.plotter.render()
+
+    def next_receiver(self):
+        """調整する受音点を次に送る（`w` キー）。スライダも追随させる。"""
+        if len(self.head_azimuth) <= 1:
+            self._say("受音点が 1 点しかありません")
+            return
+        self.head_index = (self.head_index + 1) % len(self.head_azimuth)
+        self._say(f"受音点 {self.head_index + 1}/{len(self.head_azimuth)} を調整中")
+        if self.head_slider is not None:
+            self.head_slider["set"](self.head_azimuth[self.head_index])
+        else:
+            self.set_head_azimuth(self.head_azimuth[self.head_index])
 
     def _toggle_normals(self):
         self.show_normals = not self.show_normals
@@ -780,6 +821,16 @@ class FaceEditor:
     def _save_and_close(self):
         self.saved = True
         self.plotter.close()
+
+
+def _azimuth_list(value, count):
+    """正面方向を**受音点ごとのリスト**に揃える。数値なら全点に同じ値を使う。"""
+    if value is None:
+        return []
+    if np.isscalar(value):
+        return [float(value) % 360.0] * max(count, 1)
+    values = [float(v) % 360.0 for v in value]
+    return (values + [0.0] * count)[:max(count, 1)]
 
 
 def _line_mesh(segments):
@@ -823,7 +874,8 @@ def edit(project, model=None, off_screen=False, screenshot=None):
                         face_materials=project.face_materials_for(len(model.mesh)),
                         materials=material_names(project),
                         title=f"{project.name} — 面の確認（法線・吸音材）",
-                        head_azimuth=getattr(project, "head_azimuth", 0.0),
+                        head_azimuth=project.head_azimuth_list(
+                            len(model.receiver_points)),
                         save_dir=project.screenshot_dir())
     saved = editor.show(off_screen=off_screen, screenshot=screenshot)
     if saved:
@@ -834,11 +886,14 @@ def edit(project, model=None, off_screen=False, screenshot=None):
         path = project.save_face_materials(editor.assigned, editor.count)
         print(f"[face_editor] 吸音材の割り当てを保存しました: {path}"
               f"（{len(editor.assigned)} / {editor.count} 枚）")
-        if editor.head_azimuth is not None:
-            project.head_azimuth = editor.head_azimuth
+        if editor.head_azimuth:
+            # 受音点が 1 点なら数値、複数ならリストで持つ（project.json が読みやすい）
+            project.head_azimuth = (editor.head_azimuth[0] if len(editor.head_azimuth) == 1
+                                    else list(editor.head_azimuth))
             project.save()
             print(f"[face_editor] 受音点の向きを保存しました: "
-                  f"正面 {editor.head_azimuth:.0f}°")
+                  + " / ".join(f"{k + 1}点目 {v:.0f}°"
+                               for k, v in enumerate(editor.head_azimuth)))
     else:
         print("[face_editor] 保存せずに閉じました（前回の指定のままです）")
     return saved, editor.flipped

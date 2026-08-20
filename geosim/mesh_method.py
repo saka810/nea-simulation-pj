@@ -68,6 +68,9 @@ class FaceArrays:
 
         # 平面の方程式 n·x + d = 0 の d（scalar 版 parameter_d と同じ）
         self.d = -np.einsum("ij,ij->i", self.normal, self.v0)
+        # **面ごと**の「その面の平面上の点」。虚音源を束で作るのに使う
+        # （loop_noredundancy._image_source_table）
+        self.plane_point = self.v0
 
         # 三角形内部の判定に使う辺ベクトル。
         # scalar 版は innerproduct_from3vertexes(node, 頂点0, 頂点1, 頂点2) と
@@ -320,6 +323,9 @@ class PatchArrays:
         # （呼び出し側が `faces.normal[hit_id]` と書いているため）。
         # 判定に使うパッチごとの法線は `patch_normal`
         self.normal = face_normal
+        # **面ごと**の「その面の平面上の点」。虚音源を束で作るのに使う
+        # （パッチの中は同一平面なので、面自身の頂点を使えば 1 本ずつの版と一致する）
+        self.plane_point = np.array([t[0] for t in triangles])
         self.patch_normal = face_normal[self.face_of_patch]
         self.origin = np.array([triangles[j][0] for j in self.face_of_patch])
         self.d = -np.einsum("ij,ij->i", self.patch_normal, self.origin)

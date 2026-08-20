@@ -75,6 +75,10 @@ DEFAULTS = {
     # **0° = +X 方向、反時計回り**（真上から見て）。
     # 伝搬方向の図（G-5）で「前・後ろ・左・右」を決めるのに使う。
     # 上下の向きは扱わない（実務では水平面で足りるため。ユーザー判断）
+    #
+    # ★**受音点ごとに持てる**（2026-08-20 ユーザー要望）。値は数値でもリストでもよい。
+    #   数値なら全受音点に同じ向きを使う（従来の project.json をそのまま読める）。
+    #   リストなら k 番目の受音点に k 番目の向きを使う。`head_azimuth_for()` を通すこと
     "head_azimuth": 0.0,
     "raylog_max_rays": 2000,
     "statistical": True,
@@ -185,6 +189,9 @@ class Project:
             value = data[key]
             if value is not None:
                 data[key] = [float(v) for v in np.asarray(value).ravel()]
+        # 受音点ごとの向きはリストで持つ（1 点しかなければ数値のままでよい）
+        if data["head_azimuth"] is not None and not np.isscalar(data["head_azimuth"]):
+            data["head_azimuth"] = [float(v) for v in data["head_azimuth"]]
         return data
 
     def save(self):
@@ -250,6 +257,26 @@ class Project:
                   f"面の番号が対応しないので**使いません**。法線の確認をやり直してください")
             return set()
         return flipped
+
+    # ---- 受音点ごとの顔の向き --------------------------------------------
+
+    def head_azimuth_list(self, count):
+        """受音点 `count` 個ぶんの正面方向 [度] のリストを返す。
+
+        `head_azimuth` は数値でもリストでもよい。数値なら全点に同じ値を使う
+        （従来の project.json との互換）。リストが短ければ足りない分は 0° で埋める。
+        """
+        value = self.head_azimuth
+        if value is None:
+            return [0.0] * count
+        if np.isscalar(value):
+            return [float(value)] * count
+        values = [float(v) for v in value]
+        return (values + [0.0] * count)[:count]
+
+    def head_azimuth_for(self, index):
+        """`index` 番目の受音点の正面方向 [度]。"""
+        return self.head_azimuth_list(index + 1)[index]
 
     # ---- 面ごとの吸音材（materials.json） --------------------------------
     #
