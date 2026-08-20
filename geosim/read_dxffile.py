@@ -140,7 +140,8 @@ class DxfModel:
         layer_areas     dict        **DXF のレイヤ名** → 面積 [m²]（どの部分を拾ったかの確認用）
         volume          float|None  空気の容積 [m³]（囲まれている場合。家具の体積は引かれる）
         volume_source   str|None    容積の出し方（'法線（発散定理）'）
-        volume_note     str|None    容積についての注意（食い違い・出せない理由）
+        volume_note     str|None    容積についての注意（自由端・食い違い・出せない理由）
+        free_edges      list        自由端の線分。**あると容積は目安**（`uncovered_open_edges`）
         shells          list[dict]  シェル（連結成分）ごとの診断。analyse_shells() を参照
         winding_consistent bool     頂点の巻き順が一貫しているか
     """
@@ -170,6 +171,7 @@ class DxfModel:
         self.volume = None
         self.volume_source = None
         self.volume_note = None
+        self.free_edges = []        # 覆われていない開いた辺（容積が怪しいことの印）
         self.shells = []
         self.winding_consistent = True
         self.polygon_notes = {"ねじれた四角形": 0, "最大ねじれ量": 0.0,
@@ -953,6 +955,71 @@ def open_edge_segments(triangles, tol=1.0e-9):
             for (a, b), faces in undirected.items() if len(faces) != 2]
 
 
+def uncovered_open_edges(triangles, tol=1.0e-9, gap=1.0e-6):
+    """開いた辺のうち、**他の開いた辺に覆われていないもの**を返す。
+
+    「開いた辺」には性質のまったく違う 2 種類が混ざっている。
+
+    | 種類 | 例 | 面としては |
+    |---|---|---|
+    | **T 字接合** | 壁を高さの帯で分割した継ぎ目。長い辺 1 本 対 短い辺 3 本 | **閉じている** |
+    | **本当の自由端** | 宙に浮いた片面の板の外周、面の抜け | **開いている** |
+
+    見分け方は「同じ直線上の他の開いた辺で覆われているか」。覆われていれば
+    面は連続していて、辺の分け方が違うだけ。
+
+    ★**容積の判定に要る。** `volume_from_normals()` は閉曲面でしか成り立たないが、
+    自由端のある板が混ざっていても**黙って値を返してしまう**。ここで検出する。
+    実測：階段教室 16 本・視聴覚室 70 本の「開いた辺」はすべて覆われていた（T 字接合）。
+
+    戻り値: 覆われていない線分のリスト [(始点, 終点), …]
+    """
+    segments = open_edge_segments(triangles, tol)
+    if not segments:
+        return []
+
+    digits = int(round(-np.log10(tol)))
+    # 同じ直線に乗る辺をまとめる（総当たりを避けるため）
+    lines = {}
+    for a, b in segments:
+        direction = b - a
+        length = np.linalg.norm(direction)
+        if length < gap:
+            continue
+        unit = direction / length
+        if tuple(np.round(unit, 6)) > tuple(np.round(-unit, 6)):
+            unit = -unit                       # 向きを一意にする
+        # 直線上の基準点＝原点からいちばん近い点
+        foot = a - float(np.dot(a, unit)) * unit
+        lines.setdefault((tuple(np.round(unit, digits // 2)),
+                          tuple(np.round(foot, digits // 2))),
+                         []).append((a, b, unit))
+
+    uncovered = []
+    for members in lines.values():
+        unit = members[0][2]
+        spans = []
+        for a, b, _ in members:
+            s, e = float(np.dot(a, unit)), float(np.dot(b, unit))
+            spans.append((min(s, e), max(s, e)))
+
+        # 直線上を端点で区切り、各区間が何本の辺に覆われているかを数える。
+        # 自分自身も 1 本に数えられるので、**2 本以上なら「他にも覆う辺がある」**
+        bounds = sorted({v for span in spans for v in span})
+        depth = [0] * max(1, len(bounds) - 1)
+        for lo, hi in spans:
+            for k in range(len(bounds) - 1):
+                if bounds[k] >= lo - gap and bounds[k + 1] <= hi + gap:
+                    depth[k] += 1
+        for (lo, hi), (a, b, _) in zip(spans, members):
+            for k in range(len(bounds) - 1):
+                if bounds[k] >= lo - gap and bounds[k + 1] <= hi + gap \
+                        and bounds[k + 1] - bounds[k] > gap and depth[k] < 2:
+                    uncovered.append((a, b))
+                    break
+    return uncovered
+
+
 def winding_is_consistent(triangles, tol=1.0e-9):
     """頂点の巻き順が一貫しているかを返す。
 
@@ -1578,6 +1645,19 @@ def read_model(file_name, unit=None, absorption_table=None, default_absorption=N
             model.volume = abs(volume_from_normals(
                 triangles, [f.normal for f in model.mesh]))
             model.volume_source = "法線（発散定理）"
+            # ★発散定理は**閉曲面でしか成り立たない**。開いた辺があっても、それが
+            #   T 字接合（他の辺に覆われている）なら面としては閉じているので使える。
+            #   覆われていない自由端があると、宙に浮いた片面の板などが混ざっていて
+            #   値が黙って狂うので、必ず知らせる
+            if not model.is_closed:
+                model.free_edges = uncovered_open_edges(triangles)
+                if model.free_edges:
+                    length = sum(float(np.linalg.norm(b - a)) for a, b in model.free_edges)
+                    model.volume_note = (
+                        f"自由端（他の辺に覆われていない開いた辺）が "
+                        f"{len(model.free_edges)} 本・計 {length:.2f} m あります。"
+                        f"宙に浮いた片面の板や面の抜けがあると容積は正しく出ません。"
+                        f"**この値は目安として扱ってください**")
             # 巻き順から出した値と食い違ったら、**巻き順のほうを疑う**（そう作ってある）
             if by_winding and abs(by_winding - model.volume) > 0.01 * model.volume:
                 model.volume_note = (
@@ -1682,6 +1762,11 @@ def check_model(model, absorption_table=None, verbose=True):
         level = "info" if model.open_edges < 4 else "warning"
         add(level, f"開いた辺が {model.open_edges} 本あります"
                    f"（閉じた室のつもりなら作図ミス。一面反射板などなら問題ありません）")
+    if model.free_edges:
+        length = sum(float(np.linalg.norm(b - a)) for a, b in model.free_edges)
+        add("warning", f"自由端（他の辺に覆われていない開いた辺）が "
+                       f"{len(model.free_edges)} 本・計 {length:.2f} m あります。"
+                       f"宙に浮いた片面の板や面の抜けです。容積は目安になります")
     if not model.winding_consistent:
         add("warning", "巻き順が一貫していません"
                        "（隣り合う面で法線が反対を向いている箇所があります）")

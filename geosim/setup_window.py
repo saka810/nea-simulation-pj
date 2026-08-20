@@ -56,7 +56,11 @@ def estimate_volume(dxf_path, unit=None):
     黙って飛ばされる（実際にそれで比較できない結果が出た）ので、
     ここで目安を出して入力欄に入れられるようにした。
 
-    戻り値 (容積 [m³], 求め方の説明)。求められなければ (None, 理由)。
+    **総表面積も一緒に返す**。統計残響式に効くのは容積だけでなく面積もで、
+    「拾えている面が想定どおりか」を確かめる目安になるため（2026-08-19 ユーザー要望）。
+
+    戻り値 (容積 [m³], 総表面積 [m²], 求め方の説明)。
+    容積が求められなければ (None, 総表面積, 理由)。
     """
     import numpy as np
     import read_dxffile as rd
@@ -65,11 +69,12 @@ def estimate_volume(dxf_path, unit=None):
     #   「法線が真上＝床」で拾うと天井まで床に数えて容積が倍になる（実際になった）
     model = rd.read_model(dxf_path, unit=unit, orient_normals="auto", verbose=False)
     if not model.mesh:
-        return None, "面が読めません"
+        return None, 0.0, "面が読めません"
+    area = float(model.surface_area)
     if model.volume:
         # `read_model` が法線から発散定理で出した値。辺が 1 対 1 で閉じていなくても
         # （T 字接合でも）正しく、家具・反射板の体積も引かれている
-        return float(model.volume), f"囲まれた形状の空気容積（{model.volume_source}）"
+        return float(model.volume), area, f"囲まれた形状の空気容積（{model.volume_source}）"
 
     # 床（法線がほぼ真上＝室内を向いている水平面）の面積 × 高さ。
     # 壁が鉛直な部屋ならこれで足りる
@@ -81,8 +86,8 @@ def estimate_volume(dxf_path, unit=None):
                 np.cross(v[1] - v[0], v[2] - v[0])))
     height = float(model.extents[1][2] - model.extents[0][2])
     if floor <= 0.0 or height <= 0.0:
-        return None, "床が見つからないので見積もれません"
-    return floor * height, f"床 {floor:.1f} m² × 高さ {height:.2f} m の目安"
+        return None, area, "床が見つからないので見積もれません"
+    return floor * height, area, f"床 {floor:.1f} m² × 高さ {height:.2f} m の目安"
 
 
 class SetupWindow:
@@ -347,17 +352,24 @@ class SetupWindow:
                                  "DXF ファイルが指定されていません")
             return
         try:
-            volume, note = estimate_volume(dxf, unit=self.project.unit)
+            volume, area, note = estimate_volume(dxf, unit=self.project.unit)
         except Exception as e:
             messagebox.showerror("見積もれませんでした", f"{type(e).__name__}: {e}")
             return
+        # 総表面積は**参考表示**（入力欄は無い。計算はモデルから直接引く）。
+        # 統計残響式に効くのは容積だけでなく面積もなので、
+        # 「拾えている面が想定どおりか」をここで確かめられるようにした
+        reference = f"\n\n［参考］総表面積 {area:.2f} m²"
         if volume is None:
-            messagebox.showwarning("見積もれませんでした", note)
+            messagebox.showwarning("見積もれませんでした", note + reference)
             return
         self.vars["volume"].set(f"{volume:.2f}")
+        free_path = 4.0 * volume / area if area > 0 else 0.0
         messagebox.showinfo("室容積",
                             f"{volume:.2f} m³ を入れました\n（{note}）\n\n"
-                            f"統計残響式（Sabine / Eyring-Knudsen）はこの値を使います。")
+                            f"統計残響式（Sabine / Eyring-Knudsen）はこの値を使います。"
+                            + reference
+                            + f"\n　平均自由行程 4V/S = {free_path:.3f} m")
 
     def _on_save(self):
         error = self._collect()

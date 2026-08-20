@@ -983,6 +983,31 @@ def test_area_and_volume():
     check("面積は保たれる", info["area_error"] < 1.0e-9,
           f"相対誤差 {info['area_error']:.2e}")
 
+    # 「開いた辺」には T 字接合と本当の自由端が混ざる。容積が使えるかの見分けに要る
+    lid_open = rd.uncovered_open_edges(lid)
+    check("面を欠かすと自由端として検出される",
+          len(lid_open) == 4, f"{len(lid_open)} 本")
+    check("閉じた箱に自由端は無い", rd.uncovered_open_edges(box) == [])
+
+    # T 字接合（長い辺 1 本 対 短い辺 2 本）は自由端ではない。
+    # 1 枚の四角形の隣に、その辺を 2 分割した 2 枚を並べた形で試す
+    quad = [(np.array([0.0, 0, 0]), np.array([0.0, 2, 0]), np.array([-1.0, 2, 0])),
+            (np.array([0.0, 0, 0]), np.array([-1.0, 2, 0]), np.array([-1.0, 0, 0]))]
+    split = [(np.array([0.0, 0, 0]), np.array([1.0, 0, 0]), np.array([1.0, 1, 0])),
+             (np.array([0.0, 0, 0]), np.array([1.0, 1, 0]), np.array([0.0, 1, 0])),
+             (np.array([0.0, 1, 0]), np.array([1.0, 1, 0]), np.array([1.0, 2, 0])),
+             (np.array([0.0, 1, 0]), np.array([1.0, 2, 0]), np.array([0.0, 2, 0]))]
+    joined = quad + split
+    edges = rd.open_edge_segments(joined)
+    free = rd.uncovered_open_edges(joined)
+    on_seam = [e for e in free
+               if abs(e[0][0]) < 1e-9 and abs(e[1][0]) < 1e-9]
+    check("★T 字接合の継ぎ目は開いた辺に数えられる",
+          any(abs(a[0]) < 1e-9 and abs(b[0]) < 1e-9 for a, b in edges),
+          f"開いた辺 {len(edges)} 本")
+    check("★でも自由端ではない（他の辺に覆われている）",
+          not on_seam, f"継ぎ目の自由端 {len(on_seam)} 本")
+
     # read_model が総表面積とレイヤ別面積を持っていること
     m = rd.read_model(TEST_DXF, verbose=False)
     check("read_model が総表面積を持つ", m.surface_area > 0, f"{m.surface_area:.3f} m2")
