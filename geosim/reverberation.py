@@ -263,14 +263,23 @@ def statistical_labels(result=None):
 def statistical_reverberation_from_model(model, **kwargs):
     """`read_dxffile.read_model()` の結果からそのまま統計残響式を計算する。
 
-    閉じていない形状では容積が定義できないので、その場合は None を返して警告する。
+    容積が決まらない形状（囲まれていない）では None を返して警告する。
+
+    ★判定は `model.volume` があるかで行う。**`is_closed` で見てはいけない**。
+    `is_closed` は「辺が 1 対 1 で閉じているか」なので、壁を高さの帯や開口で
+    分割したモデル（T 字接合）では False になるが、面としては閉じていて容積は出せる。
+    実際それで統計残響式が使えず、値が出ないモデルがあった（2026-08-19）。
+    容積が怪しいかどうかは `model.free_edges` / `volume_note` が知らせる。
     """
-    if not getattr(model, "is_closed", False):
-        print(f"[統計残響] 形状が閉じていないので容積が決まりません"
-              f"（開いた辺 {getattr(model, 'open_edges', '?')} 本）。"
-              f"統計残響式は使えません")
+    volume = getattr(model, "volume", None)
+    if not volume:
+        print(f"[統計残響] 容積が決まらないので統計残響式は使えません"
+              f"（{getattr(model, 'volume_note', None) or '囲まれていない形状'}）")
         return None
-    return statistical_reverberation(model.mesh, abs(model.volume), **kwargs)
+    if getattr(model, "free_edges", None):
+        print(f"[統計残響] 注意: 自由端が {len(model.free_edges)} 本あるので"
+              f"容積 {abs(volume):.2f} m3 は目安です")
+    return statistical_reverberation(model.mesh, abs(volume), **kwargs)
 
 
 def write_statistical_reverberation(filename, result):
