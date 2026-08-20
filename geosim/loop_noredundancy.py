@@ -169,7 +169,7 @@ def backtrace_path(soundsource_point, receiver_point, wall_ids, mesh,
         受音に至れば dict、途中で却下されれば None。
     """
     if faces is None:
-        faces = mm.FaceArrays(mesh)
+        faces = mm.collision_arrays(mesh)
     images = image_sources(soundsource_point, wall_ids, mesh)
     ktmp = len(wall_ids)
 
@@ -187,7 +187,8 @@ def backtrace_path(soundsource_point, receiver_point, wall_ids, mesh,
     for k in range(ktmp, -1, -1):
 
         # 基点から音線方向で最も手前に当たる面を探す（元コード 978〜1049 行）。
-        # 音線追跡と同じ `FaceArrays` を使うので、全面との判定が 1 回の配列演算で済む
+        # 音線追跡と**同じ入れ物**を使う（`mesh_method.collision_arrays`）。
+        # 反射面の番号を突き合わせるので、ここが食い違うと経路が全部却下される
         hit_id_array, hit_distance_array, node_array = faces.nearest_hit(
             vini[None, :], vray[None, :],
             ignore=[last_face] if faces.two_sided else None)
@@ -281,7 +282,7 @@ def loop(soundsource_point, receiver_point, reflectionmeshid_history, mesh,
             raise ValueError("メッシュが空です")
         band_number = len(np.atleast_1d(mesh[0].absorption_coefficient))
 
-    faces = mm.FaceArrays(mesh, two_sided=two_sided)
+    faces = mm.collision_arrays(mesh, two_sided=two_sided)
     records = []
     rejected = 0
 

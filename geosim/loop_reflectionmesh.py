@@ -81,7 +81,7 @@ def loop(soundsource_point, receiver_point, soundray_list, nref, mesh, sphere_ra
         Python は可変長リストなので持つ意味がなく、持っていると
         `mesh[history[0]]` が -1 で最後の面を指す事故のもとになるため落とした。
     """
-    faces = mm.FaceArrays(mesh, two_sided=two_sided)
+    faces = mm.collision_arrays(mesh, two_sided=two_sided)
     soundray_list = np.atleast_2d(np.asarray(soundray_list, dtype=float))
     results = []
 

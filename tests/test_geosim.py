@@ -1613,6 +1613,92 @@ def _raises(kind, func, *args):
     return False
 
 
+# ------------------------------------------- 同一平面パッチ単位の交差判定（F-4）
+def test_patch_collision():
+    print("\n[28] 同一平面パッチ単位の交差判定（三角形版との一致）")
+    import mesh
+    import mesh_method as mm
+
+    # 2 x 3 x 4 m の直方体を三角形 12 枚で作る（法線は内向き＝空気側）
+    size = np.array([2.0, 3.0, 4.0])
+    corner = np.array(list(itertools.product([0.0, 1.0], repeat=3))) * size
+    quads = [[0, 2, 6, 4], [1, 5, 7, 3], [0, 1, 3, 2],
+             [4, 6, 7, 5], [0, 4, 5, 1], [2, 3, 7, 6]]
+    tris = []
+    for indices in quads:
+        a, b, c, d = (corner[i] for i in indices)
+        tris += [(a, b, c), (a, c, d)]
+    centre = corner.mean(axis=0)
+
+    def build(materials):
+        faces = []
+        for k, t in enumerate(tris):
+            n = rd.face_normal(*t)
+            if np.dot(n, centre - np.mean(t, axis=0)) < 0:
+                n = -n
+            faces.append(mesh.Mesh(t[0], t[1], t[2], n, materials[k], np.full(6, 0.2)))
+        return faces
+
+    same = build(["壁"] * 12)
+    patch = mm.coplanar_patches([tuple(t) for t in tris],
+                                np.array([f.normal for f in same]),
+                                [f.material for f in same])
+    check("立方体の三角形 12 枚 → 判定パッチ 6 個",
+          len(set(patch.tolist())) == 6, f"{len(set(patch.tolist()))} 個")
+
+    # ★材料が違えば同じ平面でも分ける（まとめると吸音率が引けなくなる）
+    mixed = ["壁"] * 12
+    mixed[0] = "扉"
+    split = mm.coplanar_patches([tuple(t) for t in tris],
+                                np.array([f.normal for f in same]), mixed)
+    check("★材料が違えば同じ平面でも分ける",
+          len(set(split.tolist())) == 7, f"{len(set(split.tolist()))} 個")
+
+    # 三角形版と結果が一致すること（**これが本丸**）
+    face_arrays = mm.FaceArrays(same)
+    patch_arrays = mm.PatchArrays(same)
+    rng = np.random.default_rng(3)
+    origins = np.repeat((centre)[None, :], 4000, axis=0)
+    directions = rng.normal(size=(4000, 3))
+    directions /= np.linalg.norm(directions, axis=1, keepdims=True)
+    h1, d1, n1 = face_arrays.nearest_hit(origins, directions)
+    h2, d2, n2 = patch_arrays.nearest_hit(origins, directions)
+    check("当たり外れが一致", np.array_equal(h1 >= 0, h2 >= 0),
+          f"三角形 {int((h1 >= 0).sum())} 本 / パッチ {int((h2 >= 0).sum())} 本")
+    check("★同じパッチに当たる",
+          np.array_equal(patch_arrays.patch_of_face[h1], patch_arrays.patch_of_face[h2]))
+    check("距離が一致（丸めまで同じ）", np.allclose(d1, d2, rtol=0, atol=1e-12),
+          f"最大差 {np.abs(d1 - d2).max():.3e} m")
+    check("交点が一致", np.allclose(n1, n2, rtol=0, atol=1e-12),
+          f"最大差 {np.abs(n1 - n2).max():.3e} m")
+    check("返るのは面インデックス（下流はパッチを知らなくてよい）",
+          h2.max() < len(same) and same[int(h2[0])].material == "壁")
+
+    # 穴の開いた面でも正しく判定できる（外周だけを辺として持ち、偶奇で数えるため）。
+    # 床（Z=0）の中央に穴を開け、その穴を通る音線が床に当たらないことを確かめる
+    outer = [np.array([0.0, 0.0, 0.0]), np.array([4.0, 0.0, 0.0]),
+             np.array([4.0, 4.0, 0.0]), np.array([0.0, 4.0, 0.0])]
+    hole = [np.array([1.0, 1.0, 0.0]), np.array([3.0, 1.0, 0.0]),
+            np.array([3.0, 3.0, 0.0]), np.array([1.0, 3.0, 0.0])]
+    ring = []
+    for k in range(4):
+        a, b = outer[k], outer[(k + 1) % 4]
+        c, d = hole[k], hole[(k + 1) % 4]
+        ring += [(a, b, d), (a, d, c)]          # 外周 a→b と穴 d→c で四角形を作る
+    up = np.array([0.0, 0.0, 1.0])
+    floor = [mesh.Mesh(t[0], t[1], t[2], up, "床", np.full(6, 0.2)) for t in ring]
+    holed = mm.PatchArrays(floor)
+    check("穴あきの床は 1 パッチにまとまる", holed.count == 1, f"{holed.count} 個")
+    # 法線は上向きなので、上から下へ向かう音線が表側からの入射になる
+    down = np.array([[0.0, 0.0, -1.0]] * 2)
+    from_above = np.array([[2.0, 2.0, 1.0],       # 穴の真上 → 抜ける
+                           [0.5, 0.5, 1.0]])      # 枠の真上 → 当たる
+    hit, _, _ = holed.nearest_hit(from_above, down)
+    check("★穴を通る音線は当たらない（外周だけを辺に持ち偶奇で数えるため）",
+          hit[0] == -1, f"hit={hit[0]}")
+    check("枠のところは当たる", hit[1] >= 0, f"hit={hit[1]}")
+
+
 def main():
     print("geosim 数値検証")
     print(f"  Python {sys.version.split()[0]} / numpy {np.__version__}")
@@ -1627,7 +1713,8 @@ def main():
                test_project, test_resample, test_direction, test_modes,
                test_mode_buildup, test_redraw, test_capture, test_table,
                test_reflection_vectorised, test_face_groups,
-               test_ray_filter, test_area_and_volume):
+               test_ray_filter, test_area_and_volume,
+               test_patch_collision):
         fn()
 
     failed = [name for name, ok in _results if not ok]

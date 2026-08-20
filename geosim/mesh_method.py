@@ -6,7 +6,8 @@
 
 | 実装 | 何を扱うか | 用途 |
 |---|---|---|
-| `FaceArrays` | 音線の束 × 全面をまとめて配列演算 | **本番**（F-1 高速化。180〜250 倍） |
+| `PatchArrays` | 音線の束 × **同一平面パッチ** | **本番**（F-4。`collision_arrays()` が返す） |
+| `FaceArrays` | 音線の束 × 全**三角形** | 一致確認の基準。F-1 で作ったもの |
 | `collision_distance` ほか | 音線 1 本 × 面 1 枚 | **参照実装**。元コードの二重ループをそのまま写したもの |
 
 scalar 版は読みやすさと「ベクトル化版が正しいことの基準」のために残してある。
@@ -207,6 +208,281 @@ def _inside_triangle_batch(node, v0, v1, edge0a, edge0b, edge1a, edge1b):
     inner_1 = np.einsum("ij,ij->i", cross_c, cross_d)
 
     return (inner_0 <= 0.0) & (inner_1 <= 0.0)
+
+
+# ------------------------------------------------------------------------------
+# 同一平面パッチ単位の交差判定（F-4。2026-08-19 追加）
+#
+# **三角形に割るのは「ねじれのない面」を保証するためであって、判定の都合ではない。**
+# 同一平面に並んだ三角形は、まとめて 1 枚の多角形として扱ってよい（ユーザー指摘）。
+#
+# `FaceArrays` は音線 × **三角形** の (A,M) 配列を作るのが主なコストなので、
+# M を減らすのがそのまま効く。同一平面・辺で連結・同じ材料・同じ法線の向きの
+# 三角形をまとめて 1 パッチにすると:
+#
+#   ModelTest  68 枚 → 16 パッチ（4.2 倍）
+#   階段教室  272 枚 → 68 パッチ（4.0 倍）
+#   視聴覚室  292 枚 → 114 パッチ（2.6 倍）
+#
+# おまけが 2 つある。
+#   ・**面の内部に辺が無くなる**。辺のすぐ近くを通る音線のあいまいさは総辺長に比例
+#     するので、外周だけになれば減る（三角形の辺 816 本 → 外周 406 本）
+#   ・**経路の重複削除が効く**。壁 1 枚を通る経路は、どの三角形に当たったかに関係なく
+#     同じ鏡像なので、パッチ単位にすると同じ経路として畳まれる
+#
+# 材料で割るのを忘れないこと。視聴覚室では扉・窓が壁の帯と同じ平面で接しており、
+# 同一平面だけでまとめると 18 パッチで材料が混ざった。
+# ------------------------------------------------------------------------------
+
+# 判定用パッチの「同一平面」のしきい値。
+# ★`read_dxffile.COPLANAR_*`（1°／1 mm）より**厳しくする**。あちらは編集画面で
+#   「壁 1 枚」を選びやすくするための緩い値で、判定に使うと**形が変わる**。
+#   実測（階段教室）：1°／1 mm だと代表面の平面から最大 3.5 mm ずれた三角形まで
+#   同じパッチに入り、交点距離が 3.15 mm 動いた。0.1°／0.1 mm ならずれは 0.7 µm で、
+#   パッチ数は 68 → 70 とほとんど変わらない
+PATCH_ANGLE_DEGREES = 0.1
+PATCH_DISTANCE = 1.0e-4         # [m]
+
+
+def coplanar_patches(triangles, normals, materials=None,
+                     angle_degrees=PATCH_ANGLE_DEGREES, distance=PATCH_DISTANCE,
+                     tol=1.0e-9):
+    """交差判定に使うパッチ番号 (M,) を返す。
+
+    条件は 4 つとも満たすこと。
+
+    1. **同一平面で辺を共有**（`read_dxffile.coplanar_groups`）
+    2. **同じ材料**。まとめると吸音率が引けなくなるため
+    3. **同じ法線の向き**。まとめると反射方向が決まらないため
+    """
+    import read_dxffile as rd      # 循環しない（read_dxffile は mesh_method を使わない）
+
+    normals = np.asarray(normals, dtype=float)
+    group = rd.coplanar_groups(triangles, normals, angle_degrees=angle_degrees,
+                               distance=distance, tol=tol)
+    if not len(group):
+        return np.zeros(0, dtype=np.int64)
+
+    # グループの代表の法線と向きが揃っているか（coplanar_groups は絶対値で比べるので
+    # 裏返った面が同じグループに入りうる）
+    first = {}
+    for j, g in enumerate(group):
+        first.setdefault(int(g), j)
+    side = np.array([1 if float(np.dot(normals[j], normals[first[int(group[j])]])) >= 0.0
+                     else -1 for j in range(len(group))])
+    material = ([None] * len(group) if materials is None else list(materials))
+
+    label, patch = {}, np.empty(len(group), dtype=np.int64)
+    for j in range(len(group)):
+        key = (int(group[j]), side[j], material[j])
+        patch[j] = label.setdefault(key, len(label))
+    return patch
+
+
+# 本番でどちらを使うか。**音線追跡とバックトレースで必ず同じもの**を使うこと
+# （反射面の番号を突き合わせるので、片方だけパッチにすると経路が全部却下される）。
+# 三角形版に戻したいときはここを FaceArrays にする
+def collision_arrays(mesh, two_sided=False):
+    """本番で使う交差判定の入れ物を作る。既定は同一平面パッチ単位。"""
+    return PatchArrays(mesh, two_sided=two_sided)
+
+
+class PatchArrays:
+    """**同一平面パッチ単位**の交差判定。`FaceArrays` と入れ替えて使える。
+
+    `nearest_hit()` の引数と戻り値は `FaceArrays` と同じで、`hit_id` も
+    **三角形のインデックス**を返す（そのパッチの代表面）。下流はパッチを知らなくてよい。
+    代表面を返してよいのは、パッチの中では法線も材料も同じだからで、
+    そうなるように `coplanar_patches()` が割っている。
+
+    判定の中身は「平面との交点を 1 回求め、外周多角形の内側かを交差数で数える」。
+    偶数なら外、奇数なら内（even-odd）。外周は輪に並べ替えず**辺の集まりのまま**扱う
+    ので、穴の開いた面もそのまま正しく判定できる。
+    """
+
+    def __init__(self, mesh, two_sided=False, tol=1.0e-9):
+        self.two_sided = bool(two_sided)
+        self.face_count = len(mesh)
+        if self.face_count == 0:
+            raise ValueError("メッシュが空です")
+
+        triangles = [tuple(np.asarray(m.vertexes, dtype=float)) for m in mesh]
+        face_normal = np.array([np.asarray(m.normal, dtype=float) for m in mesh])
+        self.patch_of_face = coplanar_patches(
+            triangles, face_normal, [m.material for m in mesh], tol=tol)
+        self.count = int(self.patch_of_face.max()) + 1
+
+        self.face_of_patch = np.zeros(self.count, dtype=np.int64)
+        for j in range(self.face_count - 1, -1, -1):
+            self.face_of_patch[self.patch_of_face[j]] = j    # 若い番号を代表にする
+
+        # `normal` は **FaceArrays と同じく面インデックス**で引ける形にしておく
+        # （呼び出し側が `faces.normal[hit_id]` と書いているため）。
+        # 判定に使うパッチごとの法線は `patch_normal`
+        self.normal = face_normal
+        self.patch_normal = face_normal[self.face_of_patch]
+        self.origin = np.array([triangles[j][0] for j in self.face_of_patch])
+        self.d = -np.einsum("ij,ij->i", self.patch_normal, self.origin)
+
+        # 面上の 2 軸。法線といちばん揃っていない座標軸から作れば安定する
+        axis = np.eye(3)[np.argmin(np.abs(self.patch_normal), axis=1)]
+        u = np.cross(self.patch_normal, axis)
+        u /= np.linalg.norm(u, axis=1, keepdims=True)
+        self.u = u
+        self.v = np.cross(self.patch_normal, u)
+
+        self._build_outlines(triangles, tol)
+
+    def _build_outlines(self, triangles, tol):
+        """パッチごとの外周辺を 2 次元で持つ（CSR 風に 1 本の配列に詰める）。
+
+        外周＝**そのパッチの中で 1 回しか現れない辺**。輪に並べ替える必要はない
+        （交差数は辺の集まりのまま数えられる）。
+        """
+        digits = int(round(-np.log10(tol)))
+        shared = [dict() for _ in range(self.count)]
+        for j, (x1, x2, x3) in enumerate(triangles):
+            p = int(self.patch_of_face[j])
+            for a, b in ((x1, x2), (x2, x3), (x3, x1)):
+                ka = tuple(np.round(a, digits))
+                kb = tuple(np.round(b, digits))
+                key = (ka, kb) if ka <= kb else (kb, ka)
+                shared[p][key] = shared[p].get(key, 0) + 1
+
+        starts, x0, y0, x1, y1 = [0], [], [], [], []
+        for p in range(self.count):
+            for (ka, kb), n in shared[p].items():
+                if n != 1:
+                    continue                      # 内部の辺は外周ではない
+                for point, xs, ys in ((ka, x0, y0), (kb, x1, y1)):
+                    rel = np.asarray(point, dtype=float) - self.origin[p]
+                    xs.append(float(np.dot(rel, self.u[p])))
+                    ys.append(float(np.dot(rel, self.v[p])))
+            starts.append(len(x0))
+        self.edge_start = np.array(starts, dtype=np.int64)
+        self.edge_count = np.diff(self.edge_start)
+        self.ex0 = np.array(x0); self.ey0 = np.array(y0)
+        self.ex1 = np.array(x1); self.ey1 = np.array(y1)
+
+    # ---- 判定 ------------------------------------------------------------
+
+    def inside(self, points, patch_index, chunk_elements=4_000_000):
+        """交点がそのパッチの多角形の内側か（交差数の偶奇）。"""
+        points = np.atleast_2d(np.asarray(points, dtype=float))
+        patch_index = np.asarray(patch_index, dtype=np.int64)
+        result = np.zeros(len(points), dtype=bool)
+        counts = self.edge_count[patch_index]
+        if not len(points) or counts.sum() == 0:
+            return result
+
+        # 辺の本数ぶんに展開するので、要素数を見ながら区切る
+        step = max(1, int(chunk_elements // max(1, int(counts.max()))))
+        for start in range(0, len(points), step):
+            stop = min(start + step, len(points))
+            result[start:stop] = self._inside_block(points[start:stop],
+                                                    patch_index[start:stop])
+        return result
+
+    def _inside_block(self, points, patch_index):
+        rel = points - self.origin[patch_index]
+        x = np.einsum("ij,ij->i", rel, self.u[patch_index])
+        y = np.einsum("ij,ij->i", rel, self.v[patch_index])
+
+        counts = self.edge_count[patch_index]
+        total = int(counts.sum())
+        if total == 0:
+            return np.zeros(len(points), dtype=bool)
+        # (点, その点のパッチの辺) の組をまっすぐな 1 次元に展開する
+        which = np.repeat(np.arange(len(points)), counts)
+        offset = np.repeat(np.cumsum(counts) - counts, counts)
+        edge = self.edge_start[patch_index][which] + (np.arange(total) - offset)
+
+        ey0, ey1 = self.ey0[edge], self.ey1[edge]
+        ex0, ex1 = self.ex0[edge], self.ex1[edge]
+        yy, xx = y[which], x[which]
+        # その辺が点の高さをまたぐか（またがない辺は数えない）
+        straddle = (ey0 > yy) != (ey1 > yy)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            crossing_x = ex0 + (yy - ey0) * (ex1 - ex0) / (ey1 - ey0)
+        counted = straddle & (xx < crossing_x)
+        odd = np.bincount(which, weights=counted.astype(np.int64),
+                          minlength=len(points)).astype(np.int64)
+        return (odd % 2) == 1
+
+    def nearest_hit(self, origins, directions, chunk_elements=4_000_000, ignore=None):
+        """`FaceArrays.nearest_hit` と同じ引数・戻り値。中身がパッチ単位になっただけ。"""
+        origins = np.atleast_2d(np.asarray(origins, dtype=float))
+        directions = np.atleast_2d(np.asarray(directions, dtype=float))
+        n_ray = len(origins)
+        if ignore is not None:
+            ignore = np.asarray(ignore, dtype=np.int64).reshape(n_ray)
+
+        hit_id = np.full(n_ray, -1, dtype=np.int64)
+        distance = np.full(n_ray, np.inf)
+        node = origins.copy()
+
+        step = max(1, int(chunk_elements // self.count))
+        for start in range(0, n_ray, step):
+            stop = min(start + step, n_ray)
+            block = self._nearest_hit_block(
+                origins[start:stop], directions[start:stop],
+                None if ignore is None else ignore[start:stop])
+            hit_id[start:stop], distance[start:stop], node[start:stop] = block
+        return hit_id, distance, node
+
+    def _nearest_hit_block(self, origins, directions, ignore=None):
+        n_ray = len(origins)
+        hit_id = np.full(n_ray, -1, dtype=np.int64)
+        distance = np.full(n_ray, np.inf)
+        node = origins.copy()
+
+        denominator = directions @ self.patch_normal.T             # (A,P)
+        numerator = origins @ self.patch_normal.T + self.d[None, :]
+        if self.two_sided:
+            candidate = denominator != 0.0
+        else:
+            candidate = denominator < 0.0
+        with np.errstate(divide="ignore", invalid="ignore"):
+            t = -numerator / denominator
+        candidate &= t > 0.0
+
+        if ignore is not None:
+            has_ignore = ignore >= 0
+            if np.any(has_ignore):
+                rows = np.nonzero(has_ignore)[0]
+                # `ignore` は面の番号で来るので、そのパッチを外す
+                candidate[rows, self.patch_of_face[ignore[rows]]] = False
+
+        ray_index, patch_index = np.nonzero(candidate)
+        if len(ray_index) == 0:
+            return hit_id, distance, node
+
+        origin_candidate = origins[ray_index]
+        node_candidate = (origin_candidate
+                          + t[ray_index, patch_index][:, None] * directions[ray_index])
+
+        hit = self.inside(node_candidate, patch_index)
+        if not np.any(hit):
+            return hit_id, distance, node
+
+        ray_index = ray_index[hit]
+        patch_index = patch_index[hit]
+        node_candidate = node_candidate[hit]
+        distance_candidate = np.linalg.norm(
+            node_candidate - origin_candidate[hit], axis=1)
+
+        order = np.lexsort((distance_candidate, ray_index))
+        ray_sorted = ray_index[order]
+        first = np.empty(len(ray_sorted), dtype=bool)
+        first[0] = True
+        np.not_equal(ray_sorted[1:], ray_sorted[:-1], out=first[1:])
+
+        winner = order[first]
+        rays = ray_sorted[first]
+        hit_id[rays] = self.face_of_patch[patch_index[winner]]
+        distance[rays] = distance_candidate[winner]
+        node[rays] = node_candidate[winner]
+        return hit_id, distance, node
 
 
 # 7/9打ち合わせ用
