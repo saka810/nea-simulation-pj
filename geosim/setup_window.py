@@ -66,8 +66,10 @@ def estimate_volume(dxf_path, unit=None):
     model = rd.read_model(dxf_path, unit=unit, orient_normals="auto", verbose=False)
     if not model.mesh:
         return None, "面が読めません"
-    if model.is_closed and model.volume:
-        return float(model.volume), "閉じた形状の体積"
+    if model.volume:
+        # `read_model` が法線から発散定理で出した値。辺が 1 対 1 で閉じていなくても
+        # （T 字接合でも）正しく、家具・反射板の体積も引かれている
+        return float(model.volume), f"囲まれた形状の空気容積（{model.volume_source}）"
 
     # 床（法線がほぼ真上＝室内を向いている水平面）の面積 × 高さ。
     # 壁が鉛直な部屋ならこれで足りる

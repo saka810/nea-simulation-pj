@@ -138,6 +138,9 @@ python run_project.py "C:\...\プロジェクト"
 # 面の確認だけ開く（法線・吸音材）
 python face_editor.py "C:\...\プロジェクト"
 
+# モデルの幾何だけを確認する（容積・総表面積・レイヤ別面積。音源や受音点は不要）
+python read_dxffile.py ..	est.dxf
+
 # モデルビューア（ネイティブウィンドウ / PyVista）
 python view_model_gui.py ..\test.dxf --absorption ..\absorption.csv
 

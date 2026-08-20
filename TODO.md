@@ -50,6 +50,10 @@ Fortran → Python 移植の残作業リスト。着手・完了したら本フ�
 - [x] E-17 統計残響式を Sabine / Eyring / Eyring-Knudsen の 3 つに（ミリントンは削除）
 - [x] G-9a **面ごとの吸音材の割り当て**（`face_editor.py` ＋ `materials.json`）。
       面グループ（同一平面パッチ）単位で選んで、左パネルの材料をクリックで貼る（2026-08-19）
+- [x] G-16 **容積・総表面積を読み込み時に出す**（`volume_from_normals` / `surface_area` /
+      `layer_areas`。`python read_dxffile.py 室.dxf` で幾何だけ確認できる）（2026-08-19）
+- [x] G-17 **「容積の拾い方」表示**（`face_editor` の `m` 3 段目。外殻＝青／内側の物体＝橙／
+      開いた辺＝赤い線）。どの領域を容積として拾ったかが目で分かる（2026-08-19）
 - [ ] **G-9b 材料の編集 UI**（追加・変更・吸音率グラフ） — 土台（`MaterialLibrary` /
       `LayerAssignment`）はある。**吸音材リストの持ち方の判断待ち**（下記 B-20）
 - [ ] **G-10 温度・湿度のスライダ** — いまは入力欄。動かしながら見たいなら要実装

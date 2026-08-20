@@ -892,6 +892,81 @@ def test_face_groups():
           np.allclose(model.mesh[0].vertexes, plain.mesh[0].vertexes))
 
 
+# ------------------------------------------------------- 総表面積と容積（幾何だけ）
+def test_area_and_volume():
+    print("\n[27] 総表面積と容積（法線から＝発散定理）")
+
+    # 2 x 3 x 4 m の直方体。表面積 2(6+8+12)=52 m2、体積 24 m3。
+    # 法線は**内向き**（室として使うときの向き）にしておく
+    size = np.array([2.0, 3.0, 4.0])
+    corner = np.array(list(itertools.product([0.0, 1.0], repeat=3))) * size
+    quads = [[0, 2, 6, 4], [1, 5, 7, 3], [0, 1, 3, 2],
+             [4, 6, 7, 5], [0, 4, 5, 1], [2, 3, 7, 6]]
+    box = []
+    for indices in quads:
+        a, b, c, d = (corner[i] for i in indices)
+        box += [(a, b, c), (a, c, d)]
+    centre = corner.mean(axis=0)
+    inward = []
+    for t in box:
+        n = rd.face_normal(*t)
+        inward.append(n if np.dot(n, centre - np.mean(t, axis=0)) > 0 else -n)
+    inward = np.array(inward)
+
+    check("総表面積", np.isclose(rd.surface_area(box), 52.0),
+          f"{rd.surface_area(box):.3f} m2（正解 52）")
+    check("容積（法線が内向き＝空気側）",
+          np.isclose(rd.volume_from_normals(box, inward), 24.0),
+          f"{rd.volume_from_normals(box, inward):.4f} m3（正解 24）")
+
+    # **巻き順に依存しない**ことの確認。
+    # ★全部まとめて裏返すと巻き順は「一貫したまま」なので符号が変わるだけ。
+    #   一貫性を壊すには**一部だけ**裏返す必要がある（実モデルで起きるのはこちら）
+    mixed = [(t[1], t[0], t[2]) if k % 2 == 0 else t for k, t in enumerate(box)]
+    check("巻き順が一貫しなくなっている（前提の確認）",
+          not rd.winding_is_consistent(mixed))
+    check("★巻き順が崩れても容積は変わらない（法線を使うので）",
+          np.isclose(rd.volume_from_normals(mixed, inward), 24.0),
+          f"{rd.volume_from_normals(mixed, inward):.4f} m3")
+    check("巻き順から出す signed_volume は崩れると合わない（だから法線を使う）",
+          not np.isclose(abs(rd.signed_volume(mixed)), 24.0),
+          f"{abs(rd.signed_volume(mixed)):.4f} m3（正解 24 にならない）")
+
+    # 中に浮かせた 1 m 立方の物体。法線は物体の外＝空気側を向くので体積が引かれる
+    inner_corner = np.array(list(itertools.product([0.0, 1.0], repeat=3))) + 0.5
+    inner = []
+    for indices in quads:
+        a, b, c, d = (inner_corner[i] for i in indices)
+        inner += [(a, b, c), (a, c, d)]
+    inner_centre = inner_corner.mean(axis=0)
+    outward = []
+    for t in inner:
+        n = rd.face_normal(*t)
+        outward.append(n if np.dot(n, np.mean(t, axis=0) - inner_centre) > 0 else -n)
+    both = box + inner
+    normals = np.vstack([inward, np.array(outward)])
+    check("★家具（宙に浮いた物体）の体積が自動で引かれる",
+          np.isclose(rd.volume_from_normals(both, normals), 23.0),
+          f"{rd.volume_from_normals(both, normals):.4f} m3（24 − 1 = 23）")
+
+    # 開いた辺は本数だけでなく場所も返す（画面に赤で重ねて穴か T 字接合かを見るため）
+    check("閉じた箱に開いた辺は無い", rd.open_edge_segments(box) == [])
+    lid = box[:-2]      # 面を 1 枚（三角形 2 枚）欠かす
+    segments = rd.open_edge_segments(lid)
+    check("面を欠かすと開いた辺の場所が返る",
+          len(segments) == rd.open_edge_count(lid) and len(segments) == 4,
+          f"{len(segments)} 本")
+
+    # read_model が総表面積とレイヤ別面積を持っていること
+    m = rd.read_model(TEST_DXF, verbose=False)
+    check("read_model が総表面積を持つ", m.surface_area > 0, f"{m.surface_area:.3f} m2")
+    check("レイヤ別面積の合計が総表面積と一致",
+          np.isclose(sum(m.layer_areas.values()), m.surface_area))
+    check("容積が出ていて出し方も分かる",
+          m.volume is not None and m.volume_source is not None,
+          f"{m.volume:.3f} m3 / {m.volume_source}")
+
+
 # ---------------------------------------------------------------- バンド数変換
 def test_resample():
     print("\n[17] バンド数の変換（対数軸の補間）")
@@ -1523,7 +1598,7 @@ def main():
                test_project, test_resample, test_direction, test_modes,
                test_mode_buildup, test_redraw, test_capture, test_table,
                test_reflection_vectorised, test_face_groups,
-               test_ray_filter):
+               test_ray_filter, test_area_and_volume):
         fn()
 
     failed = [name for name, ok in _results if not ok]

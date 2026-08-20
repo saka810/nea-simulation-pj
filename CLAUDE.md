@@ -128,6 +128,16 @@
 - **`face_editor` は「選ぶ → 適用する」の二段階**（2026-08-19 ユーザー指摘）。
   以前は枠で囲んだ瞬間に反転していて、何を選んだか分からなかった。
   選択は残り、橙で塗られ外周が線で描かれる。**この流儀を崩さないこと**
+- **容積は「法線から」出す**（2026-08-19）。`read_dxffile.volume_from_normals()` が
+  発散定理 `V=(1/3)∮r·n dA` を法線で評価する。巻き順から出す `signed_volume()` は
+  **巻き順が一貫した閉曲面でしか成り立たない**ので、リージョン変換したモデルや
+  壁を帯で分割したモデル（T 字接合で「開いた辺」が出る）では合わない。
+  法線なら T 字接合でも正しく、**家具・反射板の体積も自動で引かれる**。
+  ただし**穴があると誤る**ので `encloses_point()` で確かめてから採用する。
+  `signed_volume` は検算用に残してあり、1% 以上食い違ったら `volume_note` で知らせる
+- **総表面積・レイヤ別面積も読み込み時に持つ**（`DxfModel.surface_area` /
+  `layer_areas`）。音源・受音点が無いモデルでも `python read_dxffile.py 室.dxf` で
+  容積と面積だけ確認できる
 - **残響指標は EDT / T20 / T30 を出す**（`reverberation.decay_measures`）。
   60 dB 減を厳密に見る運用ではない。
 - **統計残響式は Sabine / Eyring / Eyring-Knudsen の 3 つ**（`reverberation.STATISTICAL_LABELS`）。

@@ -51,7 +51,7 @@ CAD で面を 1 枚ずつ描くと巻き順と押し出し方向で向きが決�
     `l` 同じ吸音材の面をまとめて選ぶ
     `1`〜`9` そのレイヤの面を選択に足す
     `y` 面グループ ⇔ 三角形 の切り替え
-    `m` 表示を 法線 ⇔ 吸音材 で切り替え
+    `m` 表示を **法線 → 吸音材 → 容積の拾い方** と切り替え
     `i` 選択した面の法線を反転（**選択が空なら全部**）
     `a` 自動判定どおりに揃える   `d` CAD の巻き順に戻す
     `n` 法線の矢印 ON/OFF        `o` 不透明度の対象を切り替え
@@ -61,6 +61,24 @@ CAD で面を 1 枚ずつ描くと巻き順と押し出し方向で向きが決�
 
 吸音材は**左パネルの材料をクリックすると、選択中の面に貼られる**。
 「未設定（レイヤに戻す）」を選べば剥がせる。
+
+## 「容積の拾い方」モード
+
+**どの面を拾って、どの領域を容積として数えたか**を目で確かめるためのもの
+（`m` で 3 番目に出る）。容積は `read_dxffile.volume_from_normals()` が
+法線から発散定理で出しており、その内訳をそのまま色にしている。
+
+| 色 | 意味 |
+|---|---|
+| 青 | 外殻。**この面が囲む中身が容積になる** |
+| 橙 | 内側の閉じた物体（家具・反射板）。**その体積は容積から引かれる** |
+| 灰 | 内側の開いた板。体積には寄与しない |
+| **赤い線** | **開いた辺**。穴なのか T 字接合なのかがここで分かる |
+
+赤い線が要点。「開いた辺 70 本」と言われても穴なのか判断できないが、
+線が**壁の継ぎ目や床際に沿って走っている**なら面の割り方が違うだけの
+T 字接合だと分かる（実際に視聴覚室モデルでそう判断できた）。
+左パネルに総表面積・容積・シェルの内訳も出る。
 
 **`e` は使えない**（VTK の終了キー。`view_model_gui.VTK_RESERVED_KEYS` 参照）。
 """
@@ -86,10 +104,25 @@ SELECTED_COLOR = "#ffd166"
 # 吸音材が割り当てられていない面の色（吸音材モード）
 UNASSIGNED_COLOR = "#4a5160"
 
-# 表示モード
+# 表示モード。`m` でこの順に切り替わる
 MODE_NORMALS = "normals"
 MODE_MATERIALS = "materials"
-MODE_NAMES = {MODE_NORMALS: "法線の向き", MODE_MATERIALS: "吸音材"}
+MODE_SHELLS = "shells"
+MODE_ORDER = (MODE_NORMALS, MODE_MATERIALS, MODE_SHELLS)
+MODE_NAMES = {MODE_NORMALS: "法線の向き", MODE_MATERIALS: "吸音材",
+              MODE_SHELLS: "容積の拾い方"}
+
+# シェル（連結した面のかたまり）の役割ごとの色。「どの領域を容積として拾ったか」を見る。
+#   外殻 … この面が囲む中身が容積になる
+#   内側で閉じている … 家具・反射板。その体積は容積から**引かれる**
+#   内側で開いている … 片面の板。体積には寄与しない
+SHELL_COLORS = {"outer": "#4cc9f0", "inner_closed": "#f6903d",
+                "inner_open": "#8b929e"}
+SHELL_ROLE_NAMES = {"outer": "外殻（容積を囲む）",
+                    "inner_closed": "内側の物体（体積を引く）",
+                    "inner_open": "内側の開いた板"}
+# 開いた辺の色。穴なのか T 字接合なのかを目で確かめるために重ねて描く
+OPEN_EDGE_COLOR = "#e5484d"
 
 # 「同じ向きの面」とみなす角度。床・天井・壁をまとめて選ぶのに使う。
 # 面グループのしきい値（1°）より緩くしてあるのは、**別々の平面でも向きが揃っていれば
@@ -206,6 +239,20 @@ class FaceEditor:
         self.auto_flip, self.ambiguous = rd.orient_inward(self.triangles, self.cad_normal)
         self.reliable = self.enclosure >= rd.ENCLOSURE_THRESHOLD
 
+        # 「どの領域を容積として拾ったか」を見るための下ごしらえ。
+        # シェルの役割（外殻／内側の物体／内側の開いた板）を面ごとに持たせ、
+        # 開いた辺は場所を線で持つ（穴なのか T 字接合なのかを目で確かめるため）
+        self.shell_role = ["inner_open"] * self.count
+        self.shell_of = np.full(self.count, -1, dtype=np.int64)
+        for k, shell in enumerate(model.shells):
+            role = ("outer" if shell["is_outer"]
+                    else ("inner_closed" if shell["closed"] else "inner_open"))
+            for j in shell["faces"]:
+                self.shell_role[j] = role
+                self.shell_of[j] = k
+        self.open_edges = rd.open_edge_segments(self.triangles)
+        self.open_edge_actor = None
+
         self.plotter = None
         self.panel = None
         self.surfaces = []      # [(面インデックス, PolyData)] をレイヤごとに
@@ -238,10 +285,13 @@ class FaceEditor:
         if self.mode == MODE_NORMALS:
             palette = np.array([_hex_to_rgb(c) for c in VERDICT_COLORS])
             colours[:] = palette[self.verdict()]
-        else:
+        elif self.mode == MODE_MATERIALS:
             colours[:] = _hex_to_rgb(UNASSIGNED_COLOR)
             for j, name in self.assigned.items():
                 colours[j] = _hex_to_rgb(self.material_colour.get(name, "#ffffff"))
+        else:
+            for j, role in enumerate(self.shell_role):
+                colours[j] = _hex_to_rgb(SHELL_COLORS[role])
         # 選択は判定・材料より優先して塗る（いま何を選んでいるかが最優先の情報）
         if self.selection:
             colours[sorted(self.selection)] = _hex_to_rgb(SELECTED_COLOR)
@@ -351,7 +401,7 @@ class FaceEditor:
         self.refresh()
 
     def toggle_mode(self):
-        self.mode = MODE_MATERIALS if self.mode == MODE_NORMALS else MODE_NORMALS
+        self.mode = MODE_ORDER[(MODE_ORDER.index(self.mode) + 1) % len(MODE_ORDER)]
         self.refresh()
 
     # ---- 表示 ----------------------------------------------------------
@@ -415,6 +465,15 @@ class FaceEditor:
         if self.outline is not None:
             self.plotter.remove_actor(self.outline, render=False)
             self.outline = None
+        # 開いた辺は「容積の拾い方」モードのときだけ赤で重ねる。
+        # 常時出すと線が多くて形が読めない
+        if self.open_edge_actor is not None:
+            self.plotter.remove_actor(self.open_edge_actor, render=False)
+            self.open_edge_actor = None
+        if self.mode == MODE_SHELLS and self.open_edges:
+            self.open_edge_actor = self.plotter.add_mesh(
+                _line_mesh(self.open_edges), color=OPEN_EDGE_COLOR, line_width=3,
+                lighting=False, render_lines_as_tubes=True, pickable=False)
         border = self._selection_outline()
         if border is not None:
             self.outline = self.plotter.add_mesh(border, color=SELECTED_COLOR,
@@ -472,13 +531,26 @@ class FaceEditor:
                 lines.append("　自動判定は使いません")
             elif self.ambiguous:
                 lines.append(f"※{self.ambiguous} 面は自動判定が割れました")
-        else:
+        elif self.mode == MODE_MATERIALS:
             done = len(self.assigned)
             lines.append(f"吸音材あり {done}面 / 未設定 {self.count - done}面")
             counts = {}
             for name in self.assigned.values():
                 counts[name] = counts.get(name, 0) + 1
             lines += _wrap(f"{k} {v}" for k, v in sorted(counts.items()))
+        else:
+            lines.append(f"総表面積 {self.model.surface_area:.1f} m2")
+            if self.model.volume is not None:
+                lines.append(f"容積 {self.model.volume:.1f} m3")
+            else:
+                lines.append("容積 出せません（囲まれていない）")
+            roles = {}
+            for role in self.shell_role:
+                roles[role] = roles.get(role, 0) + 1
+            lines += _wrap(f"{SHELL_ROLE_NAMES[r].split('（')[0]} {n}面"
+                           for r, n in roles.items())
+            if self.open_edges:
+                lines.append(f"赤い線 = 開いた辺 {len(self.open_edges)} 本")
         vg.set_actor_text(self.label, "\n".join(lines[:LABEL_LINES]))
 
     def show(self, off_screen=False, screenshot=None, window_size=(1280, 860),
@@ -708,6 +780,13 @@ class FaceEditor:
     def _save_and_close(self):
         self.saved = True
         self.plotter.close()
+
+
+def _line_mesh(segments):
+    """線分の列 [(始点, 終点), …] を PolyData にする。"""
+    points = np.array([p for a, b in segments for p in (a, b)], dtype=float)
+    lines = np.hstack([[2, 2 * i, 2 * i + 1] for i in range(len(segments))])
+    return pv.PolyData(points, lines=lines.astype(np.int64))
 
 
 def _triangle_area(triangle):

@@ -135,7 +135,11 @@ class DxfModel:
         extents         (2,3)       バウンディングボックス（m）
         is_closed       bool        全体が閉じているか（開いた辺が 0 本か）
         open_edges      int         開いた辺（三角形1枚にしか属さない辺）の本数
-        volume          float|None  全体が閉じている場合の体積 [m³]
+        surface_area    float       総表面積 [m²]
+        layer_areas     dict        **DXF のレイヤ名** → 面積 [m²]（どの部分を拾ったかの確認用）
+        volume          float|None  空気の容積 [m³]（囲まれている場合。家具の体積は引かれる）
+        volume_source   str|None    容積の出し方（'法線（発散定理）'）
+        volume_note     str|None    容積についての注意（食い違い・出せない理由）
         shells          list[dict]  シェル（連結成分）ごとの診断。analyse_shells() を参照
         winding_consistent bool     頂点の巻き順が一貫しているか
     """
@@ -159,7 +163,11 @@ class DxfModel:
         self.extents = None
         self.is_closed = False
         self.open_edges = 0
+        self.surface_area = 0.0
+        self.layer_areas = {}       # DXF のレイヤ名 → 面積（Mesh.material ではない）
         self.volume = None
+        self.volume_source = None
+        self.volume_note = None
         self.shells = []
         self.winding_consistent = True
         self.polygon_notes = {"ねじれた四角形": 0, "最大ねじれ量": 0.0,
@@ -189,6 +197,22 @@ class DxfModel:
             lines.append(f"寸法: {np.round(size, 4).tolist()} m "
                          f"(min={np.round(self.extents[0], 4).tolist()})")
 
+        # 総表面積と容積。**統計残響式に直接使う数字**なので目立つ位置に出す
+        lines.append(f"総表面積: {self.surface_area:.3f} m2")
+        if self.layer_areas:
+            lines.append("レイヤ別の面積: " + " / ".join(
+                f"{name} {self.layer_areas[name]:.2f}"
+                for name in sorted(self.layer_areas)))
+        if self.volume is not None:
+            lines.append(f"容積: {self.volume:.3f} m3（{self.volume_source}）"
+                         + ("  平均自由行程 "
+                            f"{4.0 * self.volume / self.surface_area:.3f} m"
+                            if self.surface_area else ""))
+        else:
+            lines.append("容積: 出せません")
+        if self.volume_note:
+            lines.append(f"  ★{self.volume_note}")
+
         # シェルごとの診断。法線の向きの正しさはここを見て判断する
         lines.append(f"シェル（連結した面のかたまり）: {len(self.shells)} 個"
                      + ("" if self.winding_consistent
@@ -199,6 +223,9 @@ class DxfModel:
             if s["closed"]:
                 want = "inward" if s["is_outer"] else "outward"
                 mark = "OK" if s["normals"] == want else f"★要確認（{want} が空気側）"
+                if (s.get("volume_winding") is not None
+                        and abs(s["volume_winding"] - s["volume"]) > 0.01 * max(s["volume"], 1e-12)):
+                    mark += f"  ※巻き順から出すと{s['volume_winding']:.4f}m3（巻き順が崩れている）"
                 lines.append(f"  シェル{k} [{tag}] 面{len(s['faces'])}枚 閉 "
                              f"体積{s['volume']:.4f}m3 法線={s['normals']} {mark} 寸法{size}")
             else:
@@ -592,6 +619,49 @@ def signed_volume(triangles):
     return total / 6.0
 
 
+def triangle_areas(triangles):
+    """三角形ごとの面積 (M,)。外積の長さの半分。"""
+    if not len(triangles):
+        return np.zeros(0)
+    t = np.asarray([np.asarray(x, dtype=float) for x in triangles], dtype=float)
+    return 0.5 * np.linalg.norm(np.cross(t[:, 1] - t[:, 0], t[:, 2] - t[:, 0]), axis=1)
+
+
+def surface_area(triangles):
+    """面群の総表面積 [m²]。"""
+    return float(triangle_areas(triangles).sum())
+
+
+def volume_from_normals(triangles, normals):
+    """**法線から**空気の容積を求める（発散定理）。巻き順に依存しない。
+
+    V = (1/3)∮ r·n dA。法線 n が「音が通る空気側」を向いているとき、
+    室の外殻では n が内向きなので符号が負になる。そこで符号を反転して返す。
+
+    `signed_volume()` より強いのは 2 点。
+
+    1. **巻き順が一貫していなくても正しい。** 頂点の並び順ではなく法線を使うため。
+       リージョン（ACIS）から輪郭をつないで作ったモデルのように、面ごとの巻き順が
+       まちまちでも、法線が空気側を向いていれば値が合う
+       （実例：反射板 1 枚の体積が巻き順だと 0.109 m³、法線だと正しい 0.327 m³）
+    2. **家具・反射板の体積が自動で引かれる。** 宙に浮いた物体の法線は物体の外側
+       ＝空気側を向くので、その寄与が正の符号で入り、外殻の分から差し引かれる
+
+    ★辺が 1 対 1 で閉じていなくてもよい（**T 字接合でも正しい**）が、
+      **面に穴が開いていると誤る**。`encloses_point()` で囲まれているかを
+      確かめてから使うこと。read_model() はそこまでやってから採用する。
+
+    戻り値: 容積 [m³]（面が無ければ None）
+    """
+    if not len(triangles):
+        return None
+    t = np.asarray([np.asarray(x, dtype=float) for x in triangles], dtype=float)
+    n = np.asarray(normals, dtype=float)
+    area = triangle_areas(triangles)
+    centre = t.mean(axis=1)
+    return -float(np.sum(np.einsum("ij,ij->i", centre, n) * area) / 3.0)
+
+
 # ------------------------------------------------------------------------------
 # 多角形 → 三角形への分割
 # ------------------------------------------------------------------------------
@@ -804,6 +874,18 @@ def open_edge_count(triangles, tol=1.0e-9):
     """
     undirected, _ = _edge_map(triangles, tol)
     return sum(1 for faces in undirected.values() if len(faces) != 2)
+
+
+def open_edge_segments(triangles, tol=1.0e-9):
+    """開いた辺を線分の列 [(始点, 終点), …] で返す。
+
+    `open_edge_count()` が本数だけを返すのに対し、こちらは**場所**を返す。
+    画面に赤で重ねて描くと「本当に穴が開いているのか、
+    それとも面の割り方が違うだけの T 字接合なのか」が目で分かる。
+    """
+    undirected, _ = _edge_map(triangles, tol)
+    return [(np.array(a, dtype=float), np.array(b, dtype=float))
+            for (a, b), faces in undirected.items() if len(faces) != 2]
 
 
 def winding_is_consistent(triangles, tol=1.0e-9):
@@ -1051,7 +1133,9 @@ def analyse_shells(triangles, tol=1.0e-9):
         faces      … 面インデックスのリスト
         closed     … そのシェルが閉じているか
         open_edges … 開いた辺の本数
-        volume     … 閉じている場合の体積 [m³]（開いていれば None）
+        volume     … 閉じている場合の体積 [m³]（開いていれば None）。
+                     **`read_model` があとで法線から出し直す**（巻き順が崩れていると
+                     ここの値は合わないため）。巻き順から出した値は volume_winding に残る
         normals    … 'inward' / 'outward' / 'unknown'（そのシェル自身から見た向き）
         is_outer   … 他のすべてのシェルを内包する外殻か
     """
@@ -1401,6 +1485,52 @@ def read_model(file_name, unit=None, absorption_table=None, default_absorption=N
         allpts = np.concatenate([m.vertexes for m in model.mesh])
         model.extents = np.array([allpts.min(axis=0), allpts.max(axis=0)])
 
+    # ---- 総表面積と容積 ----------------------------------------------------
+    #
+    # 面積は素直に足すだけ。容積は**法線から発散定理で出す**のが基本で、
+    # 巻き順から出した値（上の analyse_shells / signed_volume）は検算に使う。
+    # 法線を使う理由は volume_from_normals() の説明のとおり
+    # （巻き順が一貫していなくても正しく、家具や反射板の体積も自動で引かれる）。
+    model.surface_area = surface_area(triangles)
+    areas = triangle_areas(triangles)
+    for layer, a in zip(model.face_layers, areas):
+        model.layer_areas[layer] = model.layer_areas.get(layer, 0.0) + float(a)
+    if model.mesh:
+        by_winding = model.volume       # 閉じているときだけ入っている
+        # 面に穴が開いていると発散定理は誤るので、**囲まれているか**を確かめてから採用する
+        if model.enclosure is None and not model.is_closed:
+            probe = (model.source_points[0] if model.source_points
+                     else np.mean([np.mean(t, axis=0) for t in triangles], axis=0))
+            model.enclosure = encloses_point(triangles, probe)
+        enclosed = model.is_closed or (model.enclosure or 0.0) >= ENCLOSURE_THRESHOLD
+        if enclosed:
+            model.volume = abs(volume_from_normals(
+                triangles, [f.normal for f in model.mesh]))
+            model.volume_source = "法線（発散定理）"
+            # 巻き順から出した値と食い違ったら、**巻き順のほうを疑う**（そう作ってある）
+            if by_winding and abs(by_winding - model.volume) > 0.01 * model.volume:
+                model.volume_note = (
+                    f"巻き順から出すと {by_winding:.4f} m3 になり {model.volume:.4f} m3 と"
+                    f"食い違います。巻き順が一貫していないので**法線の値を採用**しました")
+        else:
+            model.volume = None
+            model.volume_source = None
+            model.volume_note = (
+                f"囲まれていないので容積は出せません"
+                f"（全方向の {(model.enclosure or 0.0) * 100:.0f}% しか面に当たりません）")
+
+        # シェルごとの体積も法線から出し直す。`analyse_shells` は巻き順から出しており、
+        # 巻き順が崩れているモデルでは値が合わない（反射板 1 枚が 0.109 / 正解 0.327 になった）。
+        # 巻き順のほうも `volume_winding` に残して、食い違いが見えるようにしておく
+        normals_all = [f.normal for f in model.mesh]
+        for shell in model.shells:
+            if not shell["closed"]:
+                continue
+            faces = shell["faces"]
+            shell["volume_winding"] = shell["volume"]
+            shell["volume"] = abs(volume_from_normals(
+                [triangles[j] for j in faces], [normals_all[j] for j in faces]))
+
     # verbose=False は「形状だけ知りたい下読み」なので警告も出さない
     # （面数の照合や受音点の取得で何度も読むため、そのたびに警告が出ると邪魔になる）
     if unresolved and verbose:
@@ -1532,10 +1662,38 @@ def read(file_name, unit=None, absorption_table=None, default_absorption=None,
                       band_number=band_number, verbose=verbose).mesh
 
 
-if __name__ == "__main__":
+def main():
+    """モデルを読んで**幾何だけ**を報告する（音源・受音点は無くてよい）。
+
+        cd geosim
+        python read_dxffile.py ..\\test.dxf
+        python read_dxffile.py "C:\\...\\室.dxf" --unit mm
+
+    「容積と総表面積だけ知りたい」「どの面を拾えたか確かめたい」ときの入口。
+    計算条件（吸音率・音線数）は要らないので、プロジェクトを作る前に使える。
+    """
+    import argparse
+
+    p = argparse.ArgumentParser(
+        description="DXF を読んで容積・総表面積・レイヤ別面積を報告する")
+    p.add_argument("dxf", nargs="?", help="室形状の DXF（省略すると test.dxf）")
+    p.add_argument("--unit", help="'mm' / 'm' など。省略すると $INSUNITS")
+    p.add_argument("--orient-normals", default="auto",
+                   choices=["auto", "cad", "flip", "shells", "inward"],
+                   help="法線の扱い。既定 auto（容積は法線から出すのでここが効く）")
+    p.add_argument("--faces", type=int, default=0,
+                   help="先頭 N 枚の面の座標も出す（読めているかの目視確認用）")
+    a = p.parse_args()
+
     here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    model = read_model(os.path.join(here, "test.dxf"))
+    path = a.dxf or os.path.join(here, "test.dxf")
+    model = read_model(path, unit=a.unit, orient_normals=a.orient_normals)
     print()
-    for j, m in enumerate(model.mesh[:4]):
+    check_model(model)
+    for j, m in enumerate(model.mesh[:a.faces]):
         print(f"mesh[{j}] layer='{m.material}' normal={np.round(m.normal, 3).tolist()}")
         print(f"         vertexes={np.round(m.vertexes, 3).tolist()}")
+
+
+if __name__ == "__main__":
+    main()
