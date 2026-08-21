@@ -1271,9 +1271,10 @@ def test_redraw():
     import run_project
 
     folder = tempfile.mkdtemp(prefix="geosim_redraw_")
-    project = pj.Project(folder, dxf=TEST_DXF, band_number=6, rays=2000,
-                         nref=8, radius=0.3, max_time=0.5, statistical=True,
-                         volume=6.0)
+    # 名前（対象室＋条件名）は**結果ファイル名の頭に付く**（2026-08-21）
+    project = pj.Project(folder, name="研修室_条件A", dxf=TEST_DXF, band_number=6,
+                         rays=2000, nref=8, radius=0.3, max_time=0.5,
+                         statistical=True, volume=6.0)
     if os.path.exists(ABSORPTION):
         project.absorption_csv = ABSORPTION
     project.ensure_dirs()
@@ -1286,12 +1287,21 @@ def test_redraw():
     rec1_results = project.path(pj.RESULT_DIR, pj.RECEIVER_DIR % 1)
     rec1_figures = project.path(pj.FIGURE_DIR, pj.RECEIVER_DIR % 1)
     check("受音点ごとの結果は 結果/rec1/ に入る",
-          os.path.isfile(os.path.join(rec1_results, "rt.csv")))
+          os.path.isfile(os.path.join(rec1_results, "研修室_条件A_rt.csv")),
+          str(sorted(os.listdir(rec1_results))))
     check("受音点に依らない結果は 結果/ 直下に入る",
-          os.path.isfile(project.path(pj.RESULT_DIR, "rt_statistical.csv")))
+          os.path.isfile(project.path(pj.RESULT_DIR, "研修室_条件A_吸音率と理論値.csv")),
+          str(sorted(os.listdir(project.path(pj.RESULT_DIR)))))
     check("受音点ごとの図は 図/rec1/ に入る", os.path.isdir(rec1_figures))
     check("まとめ表が作られる",
-          os.path.isfile(project.path(pj.RESULT_DIR, "まとめ_残響時間.csv")))
+          os.path.isfile(project.path(pj.RESULT_DIR, "研修室_条件A_まとめ_残響時間.csv")))
+    # ★ファイル名の頭に対象室＋条件名が入る（報告書に出しても見分けが付くように）
+    check("★結果ファイルすべてに対象室＋条件名が付く",
+          all(n.startswith("研修室_条件A_") for n in os.listdir(rec1_results)),
+          str(sorted(os.listdir(rec1_results))))
+    check("★図にも対象室＋条件名が付く",
+          all(n.startswith("研修室_条件A_") for n in os.listdir(rec1_figures)),
+          str(sorted(os.listdir(rec1_figures))[:3]))
 
     before = sorted(os.listdir(rec1_figures))
     check("計算すると図が書き出される", len(before) > 0, f"{len(before)} 枚")
@@ -1808,6 +1818,108 @@ def test_shared_trace_and_batch_backtrace():
           callable(getattr(ln, "backtrace_path", None)))
 
 
+# -------------------------------------------- 結果ファイルの名前と室のまとめ
+def test_result_naming():
+    print("\n[30] 結果ファイルの名前（対象室＋条件名）と『吸音率と理論値』")
+    import csv
+    import shutil
+    import tempfile
+
+    import project as pj
+
+    # ---- 名前の作り方 ----
+    check("ファイル名に使えない文字は _ にする",
+          pj.safe_name('研修室/条件:A?') == "研修室_条件_A_",
+          pj.safe_name('研修室/条件:A?'))
+    check("空白は _ にまとめる", pj.safe_name("研修室  条件 A") == "研修室_条件_A")
+    check("空の名前なら頭を付けない", pj.Project(tempfile.gettempdir(), name=" ")
+          .prefixed("rt.csv") == "rt.csv")
+
+    folder = tempfile.mkdtemp(prefix="geosim_name_")
+    project = pj.Project(folder, name="視聴覚室_残響改善案")
+    project.receiver_index = 2
+    check("受音点ごとの結果は 結果/rec2/ に入る",
+          project.result_path("rt").endswith(
+              os.path.join("結果", "rec2", "視聴覚室_残響改善案_rt.csv")),
+          project.result_path("rt"))
+    check("受音点に依らない結果は 結果/ 直下",
+          project.result_path("room").endswith(
+              os.path.join("結果", "視聴覚室_残響改善案_吸音率と理論値.csv")),
+          project.result_path("room"))
+    check("図にも頭が付く",
+          os.path.basename(project.figure_path("decay.png"))
+          == "視聴覚室_残響改善案_decay.png")
+
+    # ---- 昔の名前も読める（頭を付ける前・1 枚にまとめる前のプロジェクト）----
+    project.ensure_dirs()
+    legacy = os.path.join(project.result_dir(), "rt.csv")
+    open(legacy, "w").close()
+    check("★頭の付いていない昔のファイルも読める",
+          project.existing_result_path("rt") == legacy,
+          project.existing_result_path("rt"))
+    old_statistical = os.path.join(project.result_dir(shared=True),
+                                   "rt_statistical.csv")
+    open(old_statistical, "w").close()
+    check("★1 枚にまとめる前の rt_statistical.csv も読める",
+          project.existing_result_path("room") == old_statistical)
+    removed = project.clear_results(verbose=False)
+    check("昔の名前のファイルも消す（今回の結果と混ざらないように）",
+          not os.path.exists(legacy) and not os.path.exists(old_statistical),
+          f"{removed} 個")
+
+    # ---- 『吸音率と理論値』の中身（材料別 → 平均 → 理論値 の順）----
+    mesh = [rd.Mesh([0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1], "床",
+                    np.full(6, 0.1)),
+            rd.Mesh([0, 0, 1], [1, 0, 1], [0, 1, 1], [0, 0, -1], "天井",
+                    np.full(6, 0.4))]
+    # 面積は 0.5 m2 ずつ。平均吸音率は面積が同じなので単純平均になる
+    statistical = rv.statistical_reverberation(mesh, 1.0, verbose=False,
+                                               convert_to_random=False)
+    path = pj.write_room_csv(os.path.join(folder, "吸音率と理論値.csv"), statistical)
+    with open(path, encoding="utf-8-sig", newline="") as f:
+        table = [row for row in csv.reader(f) if row]
+    sections = [row[0] for row in table[1:]]
+    check("表の順番が 材料別 → 平均 → 理論値",
+          sections == ["材料別の吸音率"] * 2 + ["平均吸音率"] * 3
+                      + ["残響時間理論値"] * 3, str(sections))
+    check("1 列目が区分・2 列目が項目・3 列目が面積・以降が周波数",
+          table[0][:3] == ["区分", "項目", "面積_m2"]
+          and [float(v) for v in table[0][3:]] == [125, 250, 500, 1000, 2000, 4000],
+          str(table[0]))
+    materials = {row[1]: row for row in table[1:] if row[0] == "材料別の吸音率"}
+    check("材料別の吸音率が材料名で並ぶ", set(materials) == {"床", "天井"},
+          str(sorted(materials)))
+    check("材料の面積が入る",
+          np.isclose(float(materials["床"][2]), 0.5), materials["床"][2])
+    mean = [row for row in table[1:] if row[1] == "平均吸音率"][0]
+    check("★平均吸音率は面積で重み付けした値",
+          np.isclose(float(mean[3]), 0.25), f"{mean[3]}（正解 0.25）")
+    check("平均吸音率の行には総表面積が入る",
+          np.isclose(float(mean[2]), 1.0), mean[2])
+    check("等価吸音面積 A = S・ᾱ も並べる",
+          np.isclose(float([r for r in table if r[1] == "等価吸音面積_m2"][0][3]),
+                     0.25))
+    stat_rows = {row[1]: row for row in table[1:] if row[0] == "残響時間理論値"}
+    check("理論値は 3 式",
+          set(stat_rows) == {"sabine_s", "eyring_s", "eyring_knudsen_s"},
+          str(sorted(stat_rows)))
+    check("Sabine の値が計算結果と一致",
+          np.isclose(float(stat_rows["sabine_s"][3]), statistical["sabine"][0]))
+
+    # ---- 読み戻せる ----
+    back = pj.read_room_csv(path)
+    check("読み戻すと周波数と材料が揃う",
+          len(back["frequencies"]) == 6 and back["surface"]["names"] == ["天井", "床"],
+          str(back["surface"]["names"]))
+    check("読み戻した平均吸音率が一致",
+          np.allclose(back["rows"]["平均吸音率"], statistical["mean_absorption"]))
+    check("読み戻した理論値が一致",
+          np.allclose(back["rows"]["eyring_knudsen_s"],
+                      statistical["eyring_knudsen"], equal_nan=True))
+
+    shutil.rmtree(folder, ignore_errors=True)
+
+
 def main():
     print("geosim 数値検証")
     print(f"  Python {sys.version.split()[0]} / numpy {np.__version__}")
@@ -1823,7 +1935,8 @@ def main():
                test_mode_buildup, test_redraw, test_capture, test_table,
                test_reflection_vectorised, test_face_groups,
                test_ray_filter, test_area_and_volume,
-               test_patch_collision, test_shared_trace_and_batch_backtrace):
+               test_patch_collision, test_shared_trace_and_batch_backtrace,
+               test_result_naming):
         fn()
 
     failed = [name for name, ok in _results if not ok]

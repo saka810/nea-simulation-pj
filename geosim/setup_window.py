@@ -134,6 +134,11 @@ class SetupWindow:
         rows = [
             ("folder", "プロジェクトフォルダ", "dir",
              "結果と図をここに保存します。既存フォルダを選ぶと前回の条件を読み込みます"),
+            # ★この名前が**結果ファイル名の頭**になる（2026-08-21 ユーザー要望）。
+            #   報告書に出したときにどの室・どの条件か分かるようにするため
+            ("name", "対象室・条件名", "text",
+             "結果ファイル名の頭に付きます（例「研修室_吸音追加案」→ 研修室_吸音追加案_rt.csv）。"
+             "空欄ならフォルダ名"),
             ("dxf", "モデル（DXF）", "file", "室形状。音源・受音点も src / rec レイヤから読みます"),
             ("absorption_csv", "吸音率（CSV）", "file",
              "1列目=材料名または ID。レイヤ名の先頭の数字でも引けます"),
@@ -144,9 +149,10 @@ class SetupWindow:
             self.vars[key] = var
             entry = ttk.Entry(frame, textvariable=var)
             entry.grid(row=row * 2, column=1, sticky="ew", padx=8)
-            ttk.Button(frame, text="参照…", width=8,
-                       command=lambda k=key, t=kind: self._browse(k, t)
-                       ).grid(row=row * 2, column=2)
+            if kind != "text":      # 名前は手で書くので「参照…」は付けない
+                ttk.Button(frame, text="参照…", width=8,
+                           command=lambda k=key, t=kind: self._browse(k, t)
+                           ).grid(row=row * 2, column=2)
             ttk.Label(frame, text=hint, foreground="#666").grid(
                 row=row * 2 + 1, column=1, columnspan=2, sticky="w", padx=8)
 
@@ -222,6 +228,7 @@ class SetupWindow:
     def _load_into_widgets(self):
         p = self.project
         self.vars["folder"].set(p.folder)
+        self.vars["name"].set(p.name or "")
         self.vars["dxf"].set(p.dxf_path or "")
         self.vars["absorption_csv"].set(p.absorption_path or "")
         for key, _label, _type, _hint in NUMBER_FIELDS:
@@ -266,6 +273,9 @@ class SetupWindow:
 
         self.project.dxf = dxf
         self.project.absorption_csv = absorption
+        # 対象室・条件名。空欄ならフォルダ名（`Project.__init__` と同じ扱い）
+        self.project.name = (self.vars["name"].get().strip()
+                             or os.path.basename(self.project.folder))
         for key, _label, cast, _hint in NUMBER_FIELDS:
             text = self.vars[key].get().strip()
             if not text:

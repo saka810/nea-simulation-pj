@@ -4,11 +4,11 @@
 見たい**という要望（2026-08-21）。設計の検討では点ごとの値を並べて眺めるので、
 受音点ごとに開き直すのが手間になる。
 
-作るもの（プロジェクト直下の `結果/`）:
+作るもの（プロジェクト直下の `結果/`。名前の頭に対象室＋条件名が付く）:
 
-    まとめ_残響時間.csv   EDT / T20 / T30 を受音点ごと ＋ 平均 ＋ **理論値**
-                          （Sabine / Eyring / Eyring-Knudsen）
-    まとめ_明瞭度.csv     C50 / C80 / D50 / Ts を受音点ごと ＋ 平均
+    <対象室_条件>_まとめ_残響時間.csv   EDT / T20 / T30 を受音点ごと ＋ 平均 ＋ **理論値**
+                                       （Sabine / Eyring / Eyring-Knudsen）
+    <対象室_条件>_まとめ_明瞭度.csv     C50 / C80 / D50 / Ts を受音点ごと ＋ 平均
 
 **周波数は横**（`table.py` の共通ルール）。1 列目が「受音点」、2 列目が「項目」で、
 3 列目以降が周波数。受音点ごとの CSV（`rt.csv` など）はそのまま残す。
@@ -33,6 +33,19 @@ CLARITY_FILE = "まとめ_明瞭度.csv"
 REVERBERATION_ROWS = ["EDT_s", "T20_s", "T30_s"]
 STATISTICAL_ROWS = ["sabine_s", "eyring_s", "eyring_knudsen_s"]
 CLARITY_ROWS = ["C50_db", "C80_db", "D50", "Ts_s"]
+
+
+def _find(project, folder, filename):
+    """受音点フォルダの中からその CSV を探す。
+
+    ファイル名の頭には対象室＋条件名が付くが、**頭を付ける前に計算した
+    プロジェクトも読める**ように、付いていない名前も探す（2026-08-21）。
+    """
+    for name in (project.prefixed(filename), filename):
+        path = os.path.join(folder, name)
+        if os.path.exists(path):
+            return path
+    return os.path.join(folder, project.prefixed(filename))
 
 
 def receiver_folders(project):
@@ -95,13 +108,28 @@ def _write(filename, frequencies, records):
     return filename
 
 
+def _statistical_rows(project):
+    """残響時間の理論値 {項目: (nf,)} を `結果/` 直下から読む。
+
+    いまは『吸音率と理論値.csv』（材料別の吸音率 → 平均吸音率 → 理論値）に
+    入っている。1 枚にまとめる前の `rt_statistical.csv` も読めるようにしてある。
+    """
+    # 「room」は受音点に依らない（`pj.SHARED_RESULTS`）ので `結果/` 直下を見る
+    room = pj.read_room_csv(project.existing_result_path("room"))
+    if room is not None:
+        return room["rows"]
+    _, values = _read(os.path.join(project.folder, pj.RESULT_DIR,
+                                   "rt_statistical.csv"))
+    return values
+
+
 def write_reverberation_summary(project, verbose=True):
     """残響時間のまとめ表。受音点ごと ＋ 平均 ＋ 理論値。"""
     folders = receiver_folders(project)
     frequencies, records, gathered = None, [], {k: [] for k in REVERBERATION_ROWS}
 
     for name, folder in folders:
-        freq, values = _read(os.path.join(folder, "rt.csv"))
+        freq, values = _read(_find(project, folder, "rt.csv"))
         if freq is None:
             continue
         frequencies = frequencies or freq
@@ -123,14 +151,15 @@ def write_reverberation_summary(project, verbose=True):
             records.append(("ばらつき", key,
                             np.nanmax(block, axis=0) - np.nanmin(block, axis=0)))
 
-    # 理論値（統計残響式）。受音点に依らないので親フォルダのものを 1 回だけ
-    _, statistical = _read(os.path.join(project.folder, pj.RESULT_DIR,
-                                        "rt_statistical.csv"))
+    # 理論値（統計残響式）。受音点に依らないので `結果/` 直下のものを 1 回だけ。
+    # 『吸音率と理論値.csv』にまとめる前の `rt_statistical.csv` も読める
+    statistical = _statistical_rows(project)
     for key in STATISTICAL_ROWS:
         if key in statistical:
             records.append(("理論値", key, statistical[key]))
 
-    path = os.path.join(project.folder, pj.RESULT_DIR, REVERBERATION_FILE)
+    path = os.path.join(project.folder, pj.RESULT_DIR,
+                        project.prefixed(REVERBERATION_FILE))
     _write(path, frequencies, records)
     if verbose:
         print(f"[まとめ] 残響時間（{len(folders)} 点 ＋ 平均 ＋ 理論値）: {path}")
@@ -143,7 +172,7 @@ def write_clarity_summary(project, verbose=True):
     frequencies, records, gathered = None, [], {k: [] for k in CLARITY_ROWS}
 
     for name, folder in folders:
-        freq, values = _read(os.path.join(folder, "clarity.csv"))
+        freq, values = _read(_find(project, folder, "clarity.csv"))
         if freq is None:
             continue
         frequencies = frequencies or freq
@@ -163,7 +192,8 @@ def write_clarity_summary(project, verbose=True):
             records.append(("ばらつき", key,
                             np.nanmax(block, axis=0) - np.nanmin(block, axis=0)))
 
-    path = os.path.join(project.folder, pj.RESULT_DIR, CLARITY_FILE)
+    path = os.path.join(project.folder, pj.RESULT_DIR,
+                        project.prefixed(CLARITY_FILE))
     _write(path, frequencies, records)
     if verbose:
         print(f"[まとめ] 明瞭度（{len(folders)} 点 ＋ 平均）: {path}")

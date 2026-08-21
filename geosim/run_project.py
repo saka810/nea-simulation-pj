@@ -21,10 +21,10 @@ from atmosphere import Atmosphere
 def run(project, verbose=True, make_figures=True, progress=None):
     """プロジェクトの条件で計算し、結果 CSV と図を書き出す。
 
-    **受音点が複数ある場合は 1 点ずつ回す**（TODO B-9）。
-    受音球の位置が変わると音線追跡そのものをやり直す必要があるので、
-    1 回の追跡で全受音点を賄うことはできない。
-    2 点目以降は `結果/rec2/` `図/rec2/` のように**枝分かれしたフォルダ**に書く。
+    受音点が複数あるときは、**音線追跡を 1 回で済ませて**受音判定だけ点ごとに行う
+    （F-6。追跡は受音点に依らない）。結果は受音点ごとに `結果/recN/`・`図/recN/`、
+    受音点に依らないもの（室の吸音と理論値・音線軌跡）は `結果/` 直下へ書く。
+    ファイル名の頭には対象室＋条件名（`project.name`）が付く。
     """
     project.ensure_dirs()
     project.save()      # 実行した条件を必ず残す（あとで再現できるように）
@@ -184,8 +184,9 @@ def _sub_project(project, index):
                      **{k: getattr(project, k) for k in pj.DEFAULTS})
     sub.head_azimuth = project.head_azimuth_for(index)
     sub.receiver_index = index + 1
-    sub.name = (project.name if index == 0
-                else f"{project.name} 受音点{index + 1}")
+    # ★**名前は変えない。**`name` は結果ファイル名の頭に付く（対象室＋条件名）ので、
+    #   受音点ごとに変えるとファイル名が受音点ごとに違ってしまう。
+    #   何点目かは `receiver_index` が持っていて `Project.summary()` が表示する
     return sub
 
 
@@ -232,8 +233,7 @@ def _run_one(project, receiver, verbose=True, make_figures=True,
         max_time=project.max_time,
         reverberation_filename=project.result_path("rt"),
         decay_filename=project.result_path("decay"),
-        statistical_filename=project.result_path("statistical"),
-        surface_filename=project.result_path("surface"),
+        room_filename=project.result_path("room"),
         clarity_filename=project.clarity_path(),
         statistical=project.statistical,
         progress=progress,

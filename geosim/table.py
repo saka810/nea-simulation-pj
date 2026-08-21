@@ -21,9 +21,9 @@
 
 | ファイル | 1 行の意味 | 周波数の位置 |
 |---|---|---|
-| `rt.csv` / `rt_statistical.csv` / `clarity.csv` | 指標 | **列**（このモジュールの形） |
+| `rt.csv` / `clarity.csv` | 指標 | **列**（このモジュールの形） |
 | `decay.csv` | 時刻 | 列（`decay_125Hz_db` …） |
-| `surface.csv` | 材料 | 列（`alpha_125Hz` …） |
+| `吸音率と理論値.csv` | 材料／指標（1 列目が区分） | 列（`project.write_room_csv`） |
 | `pulses.csv` | 経路 | 列（`energy_125Hz` …） |
 | `ir.csv` | 時刻 | 周波数の軸を持たない |
 

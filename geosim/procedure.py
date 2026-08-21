@@ -47,8 +47,8 @@ def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref
             pulse_filename=None, impulse_filename=None,
             sampling_frequency=ir.SAMPLING_FREQUENCY, max_time=ir.MAX_TIME,
             reverberation_filename=None, decay_filename=None,
-            statistical_filename=None, statistical=True,
-            clarity=True, clarity_filename=None, surface_filename=None,
+            room_filename=None, statistical=True,
+            clarity=True, clarity_filename=None,
             flip_faces=None, face_materials=None, traced_history=None,
             progress=None):
     """
@@ -117,14 +117,17 @@ def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref
         Sabine / Eyring / Eyring-Knudsen の統計残響式でも残響時間を出すか（既定 True）。
         **室が閉じている場合のみ**（容積が決まらないと計算できない）。
         音線を飛ばさず面積と吸音率だけから出るので、シミュレーション結果の物差しになる。
-    statistical_filename : str | None
-        統計残響式の結果の CSV 出力先。
+    room_filename : str | None
+        **室の吸音と残響時間理論値**をまとめた CSV の出力先
+        （材料別の吸音率 → 平均吸音率 → 残響時間理論値。`project.write_room_csv`）。
+        以前は `rt_statistical.csv` と `surface.csv` に分かれていたが、
+        どちらも受音点に依らない室の性質なので 1 枚にした（2026-08-21）。
     clarity : bool
         明瞭度系の指標（C50 / C80 / D50 / Ts）も出すか（既定 True）。
         残響時間が「どれだけ長く響くか」なのに対し、こちらは
         「初期の音が後から来る音に対してどれだけ強いか」を見る。会議室・教室で効く。
-    clarity_filename / surface_filename : str | None
-        明瞭度の指標／材料別の面積と吸音率の CSV 出力先。
+    clarity_filename : str | None
+        明瞭度の指標の CSV 出力先。
     flip_faces : iterable[int] | None
         法線を反転する面インデックス（`face_editor.py` で目で見て直したぶん）。
         自動判定のあとに重ねて適用される。
@@ -204,14 +207,12 @@ def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref
         else:
             statistical_result = rv.statistical_reverberation_from_model(
                 model, frequencies=frequencies, atmosphere=atmosphere)
-        if statistical_result is not None and statistical_filename is not None:
-            rv.write_statistical_reverberation(statistical_filename, statistical_result)
-            print(f"[統計残響] 書き出しました: {statistical_filename}")
-        if statistical_result is not None and surface_filename is not None:
+        if statistical_result is not None and room_filename is not None:
+            # **1 枚にまとめて書く**（材料別の吸音率 → 平均吸音率 → 理論値）。
+            # 以前は rt_statistical.csv と surface.csv に分けていた
             import project as pj
-            pj.write_surface_csv(surface_filename, statistical_result["surface"],
-                                 frequencies)
-            print(f"[統計残響] 材料別の面積・吸音率: {surface_filename}")
+            pj.write_room_csv(room_filename, statistical_result, frequencies)
+            print(f"[統計残響] 材料別の吸音率・平均吸音率・理論値: {room_filename}")
 
     if traced_history is None:
         # 音線ベクトルを作成
@@ -416,7 +417,7 @@ def main():
             reverberation_filename=None if a.no_impulse else out("rt.csv"),
             decay_filename=None if a.no_impulse else out("decay.csv"),
             statistical=not a.no_statistical,
-            statistical_filename=None if a.no_statistical else out("rt_statistical.csv"))
+            room_filename=None if a.no_statistical else out("吸音率と理論値.csv"))
 
 
 if __name__ == "__main__":

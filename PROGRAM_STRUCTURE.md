@@ -1063,12 +1063,65 @@ CSV にしてあるのは Excel でそのまま開けるようにするため。
   project.json          条件（DXF・吸音率・音線数・受音球・温度湿度…）
   normals.json          法線の反転指定（face_editor.py が書く）
   materials.json        面ごとの吸音材の割り当て（同上。レイヤで分けられないモデル用）
-  結果/  pulses.csv  ir.csv  rt.csv  rt_statistical.csv  clarity.csv
-         decay.csv  surface.csv  raylog.npz
-  図/    impulse_response.png  decay.png  reverberation.png
-         clarity.png  absorption.png  pulses.png
-  rec2/  受音点が複数ある場合、2 点目以降は同じ構造で枝分かれ（B-9）
+  結果/                 ← **受音点に依らないもの**は直下
+    研修室_条件A_まとめ_残響時間.csv   全受音点 ＋ 平均 ＋ 理論値（summary.py）
+    研修室_条件A_まとめ_明瞭度.csv     全受音点 ＋ 平均
+    研修室_条件A_吸音率と理論値.csv    材料別の吸音率 → 平均吸音率 → 残響時間理論値
+    研修室_条件A_raylog.npz            音線軌跡（可視化用）
+    rec1/  研修室_条件A_{pulses,ir,rt,decay,clarity}.csv   ← **受音点ごと**
+    rec2/ …
+  図/
+    rec1/  研修室_条件A_{impulse_response,decay,reverberation,clarity,
+                         absorption,pulses,direction,modes,mode_buildup}.png
+    rec2/ …
+    画面/  画面から手で撮った画像・動画（`clear_results` で消えない）
 ```
+
+★**受音点ごとのものは `結果/recN/`、受音点に依らないものは `結果/` 直下**
+（2026-08-21 にこの形へ。それまでは 1 点目だけ `結果/` 直下、2 点目以降が
+`rec2/結果/` という不揃いな置き方だった）。
+
+★**ファイル名の頭に「対象室＋条件名」を付ける**（2026-08-21 ユーザー要望）。
+プロジェクト名（`name`。既定はフォルダ名）を `Project.prefixed()` が付ける。
+結果は報告書やメールでフォルダの外へ出るので、`rt.csv` のままだと
+どの室・どの条件か分からなくなる。**図（PNG）にも同じ頭を付ける。**
+
+| メソッド | 役割 |
+|---|---|
+| `result_path(key)` | **書き出し先**。頭を付けた今の名前 |
+| `result_candidates(key)` | 読める名前を探す順に返す（今の名前 → 頭なし → 昔の名前） |
+| `existing_result_path(key)` | **読む先**。上のうち実在するもの。無ければ今の名前 |
+| `figure_path(name)` | 図のパス（頭を付ける） |
+
+`clear_results()` は `result_candidates()` を全部消す。**昔の名前のファイルが
+残っていると今回の結果と並んでしまう**ため。
+
+#### 『吸音率と理論値.csv』（`write_room_csv` / `read_room_csv`）
+
+元は `rt_statistical.csv`（統計残響式）と `surface.csv`（材料別の面積・吸音率）に
+分かれていたが、**どちらも受音点に依らない室の性質**で、見るときは
+「材料の吸音率 → 平均吸音率 → 理論値」と続けて追うので 1 枚にした
+（2026-08-21 ユーザー要望。並び順もユーザー指定）。
+
+```
+区分,項目,面積_m2,63,125,…
+材料別の吸音率,コンクリート,120.5,0.02,…     ← 材料ごとの α（乱入射に変換したあと）
+材料別の吸音率,吸音板,45.0,0.15,…
+平均吸音率,平均吸音率,340.2,0.153,…         ← ᾱ = Σ Sᵢαᵢ / S（面積で重み付け）
+平均吸音率,等価吸音面積_m2,,52.1,…          ← A = S・ᾱ
+平均吸音率,空気吸収_4mV_m2,,0.0,…
+残響時間理論値,sabine_s,,1.91,…
+残響時間理論値,eyring_s,,…
+残響時間理論値,eyring_knudsen_s,,…
+```
+
+**周波数は横**（`table.py` の共通ルール）。1 行の意味が区分ごとに変わるので
+`write_frequency_table` は使わず、1 列目に区分を立てて書く。
+等価吸音面積を並べているのは、理論値が `T = 24 ln10 · V /(c·A)` の A から
+出ていることを表の中で追えるようにするため。
+
+読むのは `read_room_csv()`。**1 枚にまとめる前の 2 ファイルも読める**
+（`_load_legacy_room`。作り直す前のプロジェクトを開き直せるように）。
 
 - DXF と吸音率 CSV は**プロジェクトフォルダからの相対パスで持つ**
   （フォルダごと別の端末へ移してもそのまま開ける）。外にあるものは絶対パスのまま
@@ -1301,7 +1354,7 @@ cmap を差し替えるより配列を書き換えるほうが単純で確実）
 **保存したものを読めば再現できる**。適用の順序は **自動判定 → 手動指定**。
 
 面ごとに吸音材を割り当てると `Mesh.material` が材料名になるので、
-**`surface.csv` が材料別の面積・吸音率の表になる**（レイヤ別ではなく）。
+**『吸音率と理論値.csv』が材料別の面積・吸音率の表になる**（レイヤ別ではなく）。
 DXF の実際のレイヤ名は `DxfModel.face_layers` に別に持っている
 （画面のレイヤ表示が材料名に化けないように）。
 
@@ -1398,9 +1451,9 @@ CSV の読み方をここに別途書かずに済む（実測で保存済み CSV
 
 | ファイル | 1 行の意味 | 周波数の位置 |
 |---|---|---|
-| `rt.csv` / `rt_statistical.csv` / `clarity.csv` | 指標 | **列**（`write_frequency_table`） |
+| `rt.csv` / `clarity.csv` / `まとめ_*.csv` | 指標 | **列**（`write_frequency_table`） |
 | `decay.csv` | 時刻 | 列（`decay_125Hz_db` …） |
-| `surface.csv` | 材料 | 列（`alpha_125Hz` …） |
+| `吸音率と理論値.csv` | 材料／指標（1 列目が区分） | 列（`project.write_room_csv`） |
 | `pulses.csv` | 経路 | 列（`energy_125Hz` …） |
 | `ir.csv` | 時刻 | 周波数の軸を持たない |
 
@@ -1618,6 +1671,10 @@ VTK が Windows に作るウィンドウは **ANSI ウィンドウ**で、日本
 
 `ask()` が `(Project, 'run'|'normals'|None)` を返すだけなので、
 将来 PySide6 などに載せ替えるときもこの契約を守れば `app.py` は変えずに済む。
+
+**「対象室・条件名」欄がそのまま結果ファイル名の頭になる**
+（2026-08-21。空欄ならフォルダ名）。容積の「モデルから見積もる」は
+容積と**総表面積・平均自由行程 4V/S** も出す（参考値。ユーザー要望）。
 
 ### reverberation.clarity_measures() ― 明瞭度系の指標（G-4）
 

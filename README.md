@@ -117,12 +117,20 @@ python app.py "C:\...\プロジェクト" --run  入力ウィンドウを出さ�
 project.json          条件（次に開いたときそのまま復元される）
 normals.json          法線の反転指定
 materials.json        面ごとの吸音材の割り当て（レイヤで分けられないモデル用）
-結果/  pulses.csv  ir.csv  rt.csv  rt_statistical.csv  clarity.csv
-       decay.csv  surface.csv  raylog.npz
-図/    impulse_response.png  decay.png  reverberation.png
-       clarity.png  absorption.png  pulses.png
-rec2/  受音点が複数ある場合、2 点目以降は同じ構造で枝分かれ
+結果/                 ← 受音点に依らないものは直下
+  研修室_条件A_まとめ_残響時間.csv    全受音点 ＋ 平均 ＋ 理論値
+  研修室_条件A_まとめ_明瞭度.csv      全受音点 ＋ 平均
+  研修室_条件A_吸音率と理論値.csv     材料別の吸音率 → 平均吸音率 → 残響時間理論値
+  研修室_条件A_raylog.npz             可視化用の音線軌跡
+  rec1/ rec2/ …       受音点ごとに pulses / ir / rt / decay / clarity の CSV
+図/
+  rec1/ rec2/ …       受音点ごとの PNG
+  画面/               画面から手で撮った画像・動画（計算し直しても消えない）
 ```
+
+**ファイル名の頭には「対象室＋条件名」（プロジェクト名）が付く。**
+報告書やメールでフォルダの外へ出したときに、どの室・どの条件のものか
+分かるようにするため。図（PNG）にも同じ頭が付く。
 
 **インパルス応答の図は最大値で正規化してある。** 絶対振幅の校正が未了なので、
 そのままの値には意味が無いため（TODO E-11）。
@@ -196,11 +204,12 @@ python procedure.py ..\test.dxf --absorption ..\absorption.csv --absorption-kind
 | `*_pulses.csv` | パルス列（反射回数・到来時刻・到来方向・バンド別エネルギー） |
 | `*_ir.csv` | インパルス応答 |
 | `*_rt.csv` | 残響指標 **EDT / T20 / T30**（オクターブバンド別）と曲率 |
-| `*_rt_statistical.csv` | **統計残響式**（Sabine / Eyring / Millington）。閉じた室のみ |
+| `*_吸音率と理論値.csv` | 材料別の吸音率 → **平均吸音率** → **残響時間理論値**（Sabine / Eyring / Eyring-Knudsen）。閉じた室のみ |
 | `*_decay.csv` | 減衰曲線 |
 
-（`app.py` / `run_project.py` から回した場合は、プロジェクトフォルダの `結果/` に
-`pulses.csv` `ir.csv` … という素の名前で入り、あわせて `図/` に PNG が出る）
+（`app.py` / `run_project.py` から回した場合は、プロジェクトフォルダの
+`結果/recN/` に受音点ごとの CSV、`結果/` 直下に受音点に依らないものが入り、
+あわせて `図/recN/` に PNG が出る。名前の頭にはプロジェクト名が付く）
 
 ## 検証
 
@@ -208,7 +217,7 @@ python procedure.py ..\test.dxf --absorption ..\absorption.csv --absorption-kind
 .\.venv\Scripts\python tests\test_geosim.py
 ```
 
-**208 項目**（2026-08-17 時点）。解析的に答えが分かる問題（直方体の虚音源距離、
+**323 項目**（2026-08-21 時点）。解析的に答えが分かる問題（直方体の虚音源距離、
 減衰率が既知の応答など）で数式レベルの正しさを確かめる。
 **数式に関わるコードを変更したら必ず走らせること。**
 
