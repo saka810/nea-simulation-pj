@@ -55,7 +55,7 @@ def _find(project, folder, filename):
     ファイル名の頭には対象室＋条件名が付くが、**頭を付ける前に計算した
     プロジェクトも読める**ように、付いていない名前も探す（2026-08-21）。
     """
-    for name in (project.prefixed(filename), filename):
+    for name in project.name_candidates(filename):
         path = os.path.join(folder, name)
         if os.path.exists(path):
             return path
@@ -345,10 +345,12 @@ def write_condition_summary(project, conditions=None, verbose=True):
         conditions = ct.discover(project.folder)
     records, frequencies = [], None
 
-    for condition in conditions:
+    for item in conditions:
+        file_name, sheet = item if isinstance(item, (tuple, list)) else (item, None)
         sub = pj.Project(project.folder,
                          **{k: getattr(project, k) for k in pj.DEFAULTS})
-        sub.condition_csv = condition
+        sub.condition_csv = file_name
+        sub.condition_sheet = sheet or ""
         label = sub.condition_label or "（既定）"
 
         for filename, keys, skip in (
@@ -390,8 +392,7 @@ def _read_summary(project, filename, skip):
     まとめ表は 1 列目が受音点、2 列目が項目で、`skip` が 3 なら 3 列目に
     周波数に依らない値が入る（`_write` と対応）。読めなければ None。
     """
-    path = os.path.join(project.folder, pj.RESULT_DIR,
-                        project.prefixed(filename))
+    path = _find(project, os.path.join(project.folder, pj.RESULT_DIR), filename)
     if not os.path.exists(path):
         return None
     with open(path, encoding="utf-8-sig", newline="") as f:

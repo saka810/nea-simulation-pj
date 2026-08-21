@@ -145,16 +145,9 @@ def _paths_ready(project, receivers, verbose=True):
 
 def _model_for(project, verbose=False):
     """プロジェクトの設定で DXF を読む（吸音率・法線・面ごとの材料まで反映）。"""
-    import absorption as ab
     import read_dxffile as rd
 
-    table = None
-    if project.absorption_path:
-        library = ab.MaterialLibrary.from_csv(project.absorption_path,
-                                              kind=project.absorption_kind)
-        table = library.absorption_table(_assignment_for(project),
-                                         band_number=project.band_number,
-                                         warn=verbose)
+    table = _absorption_table_for(project, verbose=verbose)
     return rd.read_model(project.dxf_path, unit=project.unit,
                          absorption_table=table,
                          orient_normals=project.orient_normals,
@@ -183,8 +176,10 @@ def run_conditions(project, conditions=None, verbose=True, make_figures=True,
     実測（研修室・受音点 5 点）で 1 条件目 10 分 → 2 条件目以降 数十秒。
 
     引数:
-        conditions : 条件表のパスのリスト。None ならプロジェクトフォルダの
-                     条件表を全部（`condition_table.discover`）
+        conditions : 条件のリスト。`(条件表のパス, シート名)` の組か、
+                     パスだけ（その中の条件シートに展開する）。
+                     None ならプロジェクトフォルダの条件を全部
+                     （`condition_table.discover`。**xlsx はシートごとに 1 条件**）
 
     結果は条件ごとに別のファイル名で並ぶ（頭が「対象室名_条件名」になる）。
     最後に**条件を横に並べた比較表**を作る（`summary.write_condition_summary`）。
@@ -202,20 +197,22 @@ def run_conditions(project, conditions=None, verbose=True, make_figures=True,
                                                   progress=progress)]}
 
     results, done = [], []
-    for i, condition in enumerate(conditions):
+    for i, (file_name, sheet) in enumerate(conditions):
         sub = pj.Project(project.folder,
                          **{k: getattr(project, k) for k in pj.DEFAULTS})
-        sub.condition_csv = condition
+        sub.condition_csv = file_name
+        sub.condition_sheet = sheet or ""
         if verbose:
-            print("\n" + "=" * 70)
+            print("")
+            print("=" * 70)
             print(f"[run] 条件 {i + 1}/{len(conditions)}: "
-                  f"{os.path.basename(condition)} → 結果の頭 "
+                  f"{ct.label_of(file_name, sheet)} → 結果の頭 "
                   f"{sub.file_prefix!r}")
             print("=" * 70)
         stage = _prefixed(progress, f"条件{i + 1}/{len(conditions)} ")
         results.append(run(sub, verbose=verbose, make_figures=make_figures,
                            progress=stage))
-        done.append(condition)
+        done.append((file_name, sheet))
 
     # 条件を横に並べた比較表。**全条件が終わってから**でないと作れない
     comparison = None
@@ -230,10 +227,11 @@ def run_conditions(project, conditions=None, verbose=True, make_figures=True,
     if comparison is not None:
         try:
             import workbook as wb
-            for condition in done:
+            for file_name, sheet in done:
                 sub = pj.Project(project.folder,
                                  **{k: getattr(project, k) for k in pj.DEFAULTS})
-                sub.condition_csv = condition
+                sub.condition_csv = file_name
+                sub.condition_sheet = sheet or ""
                 wb.write(sub, verbose=False)
             if verbose:
                 print(f"[run] 条件ごとの Excel に比較シートを入れました"
@@ -283,12 +281,7 @@ def _trace_once(project, receivers, verbose=True, progress=None):
     import absorption as ab
 
     try:
-        table = None
-        if project.absorption_path:
-            library = ab.MaterialLibrary.from_csv(project.absorption_path,
-                                                  kind=project.absorption_kind)
-            table = library.absorption_table(_assignment_for(project),
-                                             band_number=project.band_number)
+        table = _absorption_table_for(project)
         model = rd.read_model(project.dxf_path, unit=project.unit,
                               absorption_table=table,
                               orient_normals=project.orient_normals,
@@ -391,6 +384,7 @@ def _run_one(project, receiver, verbose=True, make_figures=True,
         soundray_number=project.rays,
         absorption_csv=project.absorption_path,
         absorption_kind=project.absorption_kind,
+        material_library=_library_for(project),
         layer_assignment=_assignment_for(project),
         band_number=project.band_number,
         unit=project.unit,
@@ -508,12 +502,7 @@ def redraw(project, verbose=True):
     # ---- モデル（外形寸法・容積・レイヤ別面積に要る）----
     # 吸音率の作り方は procedure.process() と同じ手順に揃える
     # （残響室法なら Paris の式で垂直入射へ、レイヤ対応は assignment で差し替え）
-    absorption_table = None
-    if project.absorption_path:
-        library = ab.MaterialLibrary.from_csv(project.absorption_path,
-                                              kind=project.absorption_kind)
-        absorption_table = library.absorption_table(
-            _assignment_for(project), band_number=project.band_number)
+    absorption_table = _absorption_table_for(project)
     model = rd.read_model(project.dxf_path, band_number=project.band_number,
                           absorption_table=absorption_table, unit=project.unit,
                           orient_normals=project.orient_normals,
@@ -580,7 +569,7 @@ def redraw(project, verbose=True):
 
 
 def _assignment_for(project):
-    """レイヤ → 材料の対応。**材料条件表（CSV）が最優先**（依頼 2026-08-21）。
+    """レイヤ → 材料番号の対応。**条件表が最優先**（依頼 2026-08-21）。
 
     CAD のレイヤ名を書き換えずに材料を差し替えられるようにするための仕組み。
     表が無ければ従来どおり `project.assignment`（project.json）を使う。
@@ -591,6 +580,35 @@ def _assignment_for(project):
     return ct.assignment_for(owner, verbose=False)
 
 
+def _library_for(project, verbose=False):
+    """材料の一覧。**条件表の「吸音率」シートが最優先**（依頼 2026-08-21）。
+
+    PJ 固有の吸音データを条件表 1 ファイルに閉じ込められるようにするため。
+    シートが無ければ従来どおり吸音率 CSV（`absorption_csv`）を読む。
+    """
+    import absorption as ab
+    import condition_table as ct
+
+    library = ct.library_from_book(ct.path(project), kind=project.absorption_kind,
+                                  verbose=verbose)
+    if library is not None:
+        return library
+    if project.absorption_path:
+        return ab.MaterialLibrary.from_csv(project.absorption_path,
+                                           kind=project.absorption_kind)
+    return None
+
+
+def _absorption_table_for(project, verbose=False):
+    """`read_dxffile.read_model(absorption_table=...)` に渡す辞書。無ければ None。"""
+    library = _library_for(project, verbose=verbose)
+    if library is None:
+        return None
+    return library.absorption_table(_assignment_for(project),
+                                    band_number=project.band_number,
+                                    warn=verbose)
+
+
 def _update_condition_table(project, model, verbose=True):
     """材料条件表を作る／更新する（面数・面積・吸音率の参考列を書き直す）。
 
@@ -598,13 +616,9 @@ def _update_condition_table(project, model, verbose=True):
     計算のたびに更新するので、**そのとき実際に使った条件が表に残る**。
     """
     try:
-        import absorption as ab
         import condition_table as ct
-        library = (ab.MaterialLibrary.from_csv(project.absorption_path,
-                                               kind=project.absorption_kind)
-                   if project.absorption_path else None)
-        return ct.update(project, model, library, _assignment_for(project),
-                         verbose=verbose)
+        return ct.update(project, model, _library_for(project),
+                         _assignment_for(project), verbose=verbose)
     except Exception as error:     # 表が作れなくても計算結果は残す
         print(f"[run] 材料条件表を更新できませんでした: "
               f"{type(error).__name__}: {error}")

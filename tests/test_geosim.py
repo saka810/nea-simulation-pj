@@ -2115,82 +2115,173 @@ def test_speech_transmission_index():
           sum(1 for s, _ in back["order"] if s == "変調伝達関数") == 14)
 
 
-# ----------------------------------------------- 材料条件表（依頼 2026-08-21）
+# ------------------------------------------------- 条件表（依頼 2026-08-21）
 def test_condition_table():
-    print("\n[33] 材料条件表（レイヤー名 → 吸音材）")
-    import re
+    print("\n[33] 条件表（レイヤー名 → 材料番号。吸音率シート同梱の xlsx）")
     import shutil
     import tempfile
 
     import condition_table as ct
     import project as pj
 
+    try:
+        from openpyxl import load_workbook
+    except ImportError:
+        check("openpyxl が入っている（条件表 xlsx に要る）", False,
+              "pip install -r requirements.txt")
+        return
+
     folder = tempfile.mkdtemp(prefix="geosim_cond_")
-    project = pj.Project(folder, name="条件表テスト", dxf=TEST_DXF, band_number=6)
+    shutil.copy(TEST_DXF, os.path.join(folder, "条件テスト室.dxf"))
+    project = pj.Project(folder, dxf="条件テスト室.dxf", band_number=6)
+    project.absorption_kind = "normal"
     project.ensure_dirs()
 
     library = ab.MaterialLibrary()
     library.add("コンクリート", [0.02] * 6)
     library.add("吸音板", [0.6] * 6)
     library.add_alias("1", "コンクリート")
+    library.add_alias("11", "吸音板")
 
-    model = rd.read_model(TEST_DXF, band_number=6, verbose=False)
+    model = rd.read_model(project.dxf_path, band_number=6, verbose=False)
     check("条件表は最初は無い", not ct.exists(project))
+    check("既定の置き場は 条件表.xlsx",
+          os.path.basename(ct.path(project)) == "条件表.xlsx",
+          os.path.basename(ct.path(project)))
 
-    path = ct.update(project, model, library, verbose=False)
-    check("材料条件表が作られる", os.path.isfile(path), os.path.basename(path))
-    check("置き場はプロジェクト直下（結果ではなく入力なので）",
-          os.path.dirname(path) == project.folder)
+    # ---- ★DXF のレイヤから作る（設定画面の「条件表を作成」）----
+    path = ct.create(project, model, library, verbose=False)
+    check("条件表（xlsx）が作られる", os.path.isfile(path), os.path.basename(path))
+    book = load_workbook(path)
+    check("★「吸音率」シートが同梱される",
+          ct.ABSORPTION_SHEET in book.sheetnames, str(book.sheetnames))
+    check("★条件シートができる（既定名『現状』）",
+          ct.FIRST_SHEET in book.sheetnames, str(book.sheetnames))
+    check("条件シートの一覧に吸音率シートは入らない",
+          ct.sheets(path) == [ct.FIRST_SHEET], str(ct.sheets(path)))
 
-    assignment, records = ct.read(path)
-    layers = [r for r in records if r[0] == ct.SECTION_LAYER]
+    sheet = book[ct.FIRST_SHEET]
+    header = [c.value for c in sheet[1]]
+    check("★見出しは 区分/レイヤー名/材料番号/材料名（参考）/面数/面積",
+          header == ct.HEADER, str(header))
+    check("★吸音率の列は載せない（ミスリードを避ける）",
+          not any(str(h).replace(".", "").isdigit() for h in header if h),
+          str(header))
+
+    layers = [row for row in sheet.iter_rows(min_row=2, values_only=True)
+              if row[0] == ct.SECTION_LAYER]
     check("DXF のレイヤが全部並ぶ", len(layers) == len(model.layer_counts),
           f"{len(layers)} 行 / レイヤ {len(model.layer_counts)}")
     check("面数と面積が参考として入る",
-          all(r[3] and r[4] for r in layers), str(layers[0]))
-    check("先頭の番号で引ける材料は自動で入る",
-          assignment.get("1") == "コンクリート", str(assignment))
+          all(isinstance(r[4], int) and isinstance(r[5], (int, float))
+              for r in layers), str(layers[0]))
+    check("★材料番号は数値で入る（Excel で並べ替えられるように。空欄は空のまま）",
+          all(isinstance(r[2], int) or r[2] is None for r in layers),
+          str([r[2] for r in layers]))
+    check("★材料名は VLOOKUP で吸音率シートを引く（番号を入れれば名前が出る）",
+          all(str(r[3]).startswith("=IFERROR(VLOOKUP(") for r in layers),
+          str(layers[0][3]))
 
-    # ---- ★利用者が書いた材料名は上書きされない ----
-    body = open(path, encoding="utf-8-sig").read()
-    body = re.sub(r"レイヤ,2,[^,]*,", "レイヤ,2,吸音板,", body)
-    open(path, "w", encoding="utf-8-sig").write(body)
+    absorption = book[ct.ABSORPTION_SHEET]
+    rows = list(absorption.iter_rows(min_row=2, values_only=True))
+    check("吸音率シートに材料が並ぶ（番号・材料名・α）", len(rows) == 2,
+          str([(r[0], r[1]) for r in rows]))
+    numbers = {str(r[0]): r[1] for r in rows}
+    check("番号と材料名の対応が入る",
+          numbers.get("1") == "コンクリート" and numbers.get("11") == "吸音板",
+          str(numbers))
+    check("吸音率も入る（バンド数ぶん）",
+          all(isinstance(r[2], float) for r in rows)
+          and len(rows[0]) == 2 + 6 + 2, f"{len(rows[0])} 列")
+
+    # ---- ★吸音率シートから材料一覧を読み戻せる（PJ 固有データの持ち回り）----
+    back = ct.library_from_book(path, kind="normal", verbose=False)
+    check("★「吸音率」シートを材料一覧として読める",
+          back is not None and set(back.names()) == {"コンクリート", "吸音板"},
+          str(None if back is None else back.names()))
+    check("番号で引ける（別名として登録される）",
+          back.get("11") is not None and back.get("11").name == "吸音板")
+    check("吸音率の値が一致", np.allclose(back.get("1").coefficients, 0.02))
+
+    # ---- 読み込みは番号の列だけを見る ----
+    assignment, records = ct.read(path)
+    check("先頭の番号で引けるレイヤは自動で埋まる",
+          assignment.get("1") == "1", str(assignment))
+    check("記録も取れる（区分・レイヤー名・材料番号・面数・面積）",
+          len(records) == len(layers), f"{len(records)} 件")
+
+    # ---- ★利用者が書いた番号は上書きされない ----
+    sheet["C2"] = 11
+    book.save(path)
     assignment, _ = ct.read(path)
-    check("書き換えた材料名が読める", assignment.get("2") == "吸音板", str(assignment))
-
+    check("書き換えた番号が読める", assignment.get(layers[0][1]) == "11",
+          str(assignment))
     ct.update(project, model, library, verbose=False)
     assignment, _ = ct.read(path)
-    check("★更新しても利用者の材料名は残る（面積などだけ書き直す）",
-          assignment.get("2") == "吸音板", str(assignment))
+    check("★更新しても利用者の番号は残る（面数などだけ書き直す）",
+          assignment.get(layers[0][1]) == "11", str(assignment))
 
-    # ---- 条件表が project.json より優先される ----
-    project.assignment = {"2": "コンクリート"}
-    check("★条件表があればそちらを使う",
-          ct.assignment_for(project, verbose=False).get("2") == "吸音板")
-    os.remove(path)
-    check("条件表が無ければ project.json の指定に戻る",
-          ct.assignment_for(project, verbose=False).get("2") == "コンクリート")
+    # ---- シートを増やすと条件が増える ----
+    book = load_workbook(path)
+    copy = book.copy_worksheet(book[ct.FIRST_SHEET])
+    copy.title = "吸音追加案"
+    copy["C2"] = 1
+    book.save(path)
+    check("★シートを増やすと条件が増える",
+          ct.sheets(path) == [ct.FIRST_SHEET, "吸音追加案"], str(ct.sheets(path)))
+    found = ct.discover(folder)
+    check("一括計算はシートごとに 1 条件として拾う",
+          [s for _, s in found] == [ct.FIRST_SHEET, "吸音追加案"], str(found))
+    check("条件名はシート名", ct.label_of(path, "吸音追加案") == "吸音追加案")
 
-    # ---- 吸音率テーブルに効いているか（レイヤ 2 が吸音板になる）----
-    table = library.absorption_table({"2": "吸音板"}, band_number=6, warn=False)
-    changed = rd.read_model(TEST_DXF, band_number=6, absorption_table=table,
-                            verbose=False)
+    project.condition_csv = path
+    project.condition_sheet = "吸音追加案"
+    check("★結果ファイル名が「部屋名_シート名」になる",
+          project.file_prefix == "条件テスト室_吸音追加案",
+          project.file_prefix)
+    check("シート違いで割り当てが変わる",
+          ct.assignment_for(project, verbose=False).get(layers[0][1]) == "1",
+          str(ct.assignment_for(project, verbose=False)))
+
+    # ---- 更新はシートをまたいで番号を保つ ----
+    ct.update(project, model, library, verbose=False)
+    check("更新しても両方のシートが残る",
+          ct.sheets(path) == [ct.FIRST_SHEET, "吸音追加案"], str(ct.sheets(path)))
+    project.condition_sheet = ct.FIRST_SHEET
+    check("『現状』の番号は 11 のまま",
+          ct.assignment_for(project, verbose=False).get(layers[0][1]) == "11")
+    project.condition_sheet = "吸音追加案"
+    check("『吸音追加案』の番号は 1 のまま",
+          ct.assignment_for(project, verbose=False).get(layers[0][1]) == "1")
+
+    # ---- 吸音率テーブルに効いているか ----
+    table = library.absorption_table({layers[0][1]: "11"}, band_number=6,
+                                     warn=False)
+    changed = rd.read_model(project.dxf_path, band_number=6,
+                            absorption_table=table, verbose=False)
     alpha = {m.material: float(np.max(m.absorption_coefficient))
              for m in changed.mesh}
-    check("条件表の割り当てが実際の吸音率に反映される",
+    check("★番号での割り当てが実際の吸音率に反映される",
           any(v > 0.3 for v in alpha.values()), str(alpha))
 
-    # ---- モデルから消えたレイヤも記録として残る ----
-    ct.update(project, model, library, assignment={"消えたレイヤ": "吸音板"},
-              verbose=False)
-    body = open(ct.path(project), encoding="utf-8-sig").read()
-    body = body.replace("レイヤ,1,", "レイヤ,消えたレイヤ,")
-    open(ct.path(project), "w", encoding="utf-8-sig").write(body)
-    ct.update(project, model, library, verbose=False)
-    _, records = ct.read(ct.path(project))
-    check("モデルに無いレイヤは（モデルに無し）として残す",
-          any(r[0] == ct.SECTION_GONE and r[1] == "消えたレイヤ" for r in records),
-          str([r[:2] for r in records]))
+    # ---- 昔の CSV も読める ----
+    legacy = os.path.join(folder, "材料条件表.csv")
+    with open(legacy, "w", encoding="utf-8-sig", newline="") as f:
+        f.write("# 材料条件表\n")
+        f.write("区分,レイヤー名,材料名,面数,面積_m2\n")
+        f.write("レイヤ,1,コンクリート,2,6.000\n")
+    old_assignment, _ = ct.read(legacy)
+    check("★昔の CSV（3 列目が材料名）もそのまま読める",
+          old_assignment.get("1") == "コンクリート", str(old_assignment))
+    # ★既定名の CSV は xlsx があれば無視する（同じ内容が 2 条件に増えないように）
+    check("★昔の既定名 CSV は xlsx があれば条件に数えない",
+          (legacy, None) not in ct.discover(folder),
+          str([os.path.basename(f) for f, _ in ct.discover(folder)]))
+    named = os.path.join(folder, "別案.csv")
+    shutil.copy(legacy, named)
+    check("名前を付けた CSV なら条件として拾う",
+          (named, None) in ct.discover(folder),
+          str([os.path.basename(f) for f, _ in ct.discover(folder)]))
 
     shutil.rmtree(folder, ignore_errors=True)
 
@@ -2401,8 +2492,9 @@ def test_conditions_batch():
     check("条件表を指定しなければ条件名は付かない",
           project.condition_label == "" and project.file_prefix == "テスト室",
           project.file_prefix)
-    project.condition_csv = "吸音追加案.csv"
-    check("★結果ファイル名が「部屋名_条件名」になる",
+    project.condition_csv = "条件表.xlsx"
+    project.condition_sheet = "吸音追加案"
+    check("★結果ファイル名が「部屋名_条件名（シート名）」になる",
           project.file_prefix == "テスト室_吸音追加案"
           and os.path.basename(project.result_path("rt"))
           == "テスト室_吸音追加案_rt.csv",
@@ -2417,6 +2509,7 @@ def test_conditions_batch():
     check("対象室名を書けばそちらが優先", project.room_label == "研修室A")
     project.name = ""
     project.condition_csv = ""
+    project.condition_sheet = ""
 
     # ---- 条件表を 2 つ作る（吸音率だけ違う＝パッチの分け方は同じ）----
     library = ab.MaterialLibrary()
@@ -2437,19 +2530,34 @@ def test_conditions_batch():
           np.allclose(back.get("吸音板").coefficients, 0.7)
           and np.allclose(back.get("硬い壁").coefficients, 0.02))
     model = rd.read_model(project.dxf_path, band_number=6, verbose=False)
-    plans = {"現状": {"1": "硬い壁", "2": "硬い壁", "3": "硬い壁"},
-             "吸音追加案": {"1": "硬い壁", "2": "吸音板", "3": "硬い壁"}}
-    for name, assignment in plans.items():
-        sub = pj.Project(folder, **{k: getattr(project, k) for k in pj.DEFAULTS})
-        sub.condition_csv = name + ".csv"
-        ct.update(sub, model, library, assignment=assignment, verbose=False)
+    plans = {"現状": {"1": "1", "2": "1", "3": "1"},
+             "吸音追加案": {"1": "1", "2": "11", "3": "1"}}
+    library.add_alias("1", "硬い壁")
+    library.add_alias("11", "吸音板")
+    # ★条件表（xlsx）を作り、シートを増やして条件を 2 つにする
+    book_path = ct.create(project, model, library, sheet="現状", verbose=False)
+    from openpyxl import load_workbook
+    book = load_workbook(book_path)
+    numbers = {"現状": 1, "吸音追加案": 11}
+    for name in plans:
+        sheet = (book[ct.FIRST_SHEET] if name == ct.FIRST_SHEET
+                 else book.copy_worksheet(book[ct.FIRST_SHEET]))
+        sheet.title = name
+        for row in sheet.iter_rows(min_row=2):
+            if row[0].value != ct.SECTION_LAYER:
+                continue
+            # レイヤ「2」だけ条件で変える（壁 10 m² ぶん）
+            row[2].value = numbers[name] if row[1].value == "2" else 1
+    book.save(book_path)
 
     found = ct.discover(folder)
-    check("フォルダの条件表を見つける", len(found) == 2,
-          str([os.path.basename(f) for f in found]))
-    check("★中身で判別する（吸音率表や結果 CSV を拾わない）",
-          not ct.is_condition_table(os.path.join(folder, "テスト室.dxf"))
-          and all(ct.is_condition_table(f) for f in found))
+    check("条件表のシートを 1 件ずつ拾う", len(found) == 2,
+          str([(os.path.basename(f), sheet) for f, sheet in found]))
+    check("★吸音率シートは条件に数えない",
+          all(sheet != ct.ABSORPTION_SHEET for _, sheet in found),
+          str([sheet for _, sheet in found]))
+    check("吸音率 CSV やモデルを条件表と間違えない",
+          not ct.is_condition_table(os.path.join(folder, "吸音率.csv")))
 
     # ---- 一括計算 ----
     outcome = run_project.run_conditions(project, verbose=False,
@@ -2470,7 +2578,8 @@ def test_conditions_batch():
     # ---- 条件で結果が変わっていること（吸音を足したら残響が短い）----
     def average(condition, filename, item, skip):
         sub = pj.Project(folder, **{k: getattr(project, k) for k in pj.DEFAULTS})
-        sub.condition_csv = condition + ".csv"
+        sub.condition_csv = book_path
+        sub.condition_sheet = condition
         table = sm._read_summary(sub, filename, skip)
         return None if table is None else table[1].get(("平均", item))
 
@@ -2502,10 +2611,10 @@ def test_conditions_batch():
 
     # ---- Excel に比較シートが入る ----
     try:
-        from openpyxl import load_workbook
         import workbook as wb
         sub = pj.Project(folder, **{k: getattr(project, k) for k in pj.DEFAULTS})
-        sub.condition_csv = "現状.csv"
+        sub.condition_csv = book_path
+        sub.condition_sheet = "現状"
         book = load_workbook(wb.path(sub))
         check("Excel に『条件比較』シートが入る",
               wb.SHEET_COMPARISON in book.sheetnames, str(book.sheetnames))
@@ -2524,14 +2633,14 @@ def test_conditions_batch():
               f"{sti.cell(row=2, column=3).value!r}")
         condition_sheet = book[wb.SHEET_CONDITION]
         check("★材料条件表の面数・面積も数値",
-              isinstance(condition_sheet.cell(row=2, column=4).value, (int, float))
-              and isinstance(condition_sheet.cell(row=2, column=5).value,
+              isinstance(condition_sheet.cell(row=2, column=5).value, (int, float))
+              and isinstance(condition_sheet.cell(row=2, column=6).value,
                              (int, float)),
-              f"{condition_sheet.cell(row=2, column=4).value!r} / "
-              f"{condition_sheet.cell(row=2, column=5).value!r}")
-        check("材料名は文字のまま",
-              isinstance(condition_sheet.cell(row=2, column=3).value, str),
-              f"{condition_sheet.cell(row=2, column=3).value!r}")
+              f"{condition_sheet.cell(row=2, column=5).value!r} / "
+              f"{condition_sheet.cell(row=2, column=6).value!r}")
+        check("材料名は文字のまま（記録として名前も残す）",
+              isinstance(condition_sheet.cell(row=2, column=4).value, str),
+              f"{condition_sheet.cell(row=2, column=4).value!r}")
         # 全シートを走査して「数値になるのに文字列のまま」のセルが無いか
         stragglers = []
         for name in book.sheetnames:

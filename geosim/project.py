@@ -59,10 +59,12 @@ RECEIVER_DIR = "rec%d"
 # 同じ所に置くと計算し直すたびに撮った画像が巻き添えで消える
 SCREENSHOT_DIR = os.path.join(FIGURE_DIR, "画面")
 
-# 材料条件表の既定名（`condition_table.CONDITION_FILE` と同じ）。
-# この名前のときは条件名を付けない（条件を分けていないということなので）
-DEFAULT_CONDITION_FILE = "材料条件表.csv"
-DEFAULT_CONDITION_STEM = "材料条件表"
+# 条件表の既定名（`condition_table` と合わせる）。**xlsx が本命**で、
+# 昔の CSV（`材料条件表.csv`）も置いてあれば読む。
+# この名前のときはファイル名を条件名にしない（条件はシート名で分けるため）
+DEFAULT_CONDITION_FILE = "条件表.xlsx"
+DEFAULT_CONDITION_STEMS = {"条件表", "材料条件表"}
+LEGACY_CONDITION_FILE = "材料条件表.csv"
 
 # 経路の幾何（吸音材を変えた再計算に使う）。**条件名は付けない**
 PATHS_FILE = "経路.npz"
@@ -130,10 +132,12 @@ DEFAULTS = {
     "dxf": "",
     "absorption_csv": "",
     "absorption_kind": None,       # 'normal' | 'random' | None（CSV の # kind: を見る）
-    # 材料条件表（レイヤー名 → 吸音材）の CSV。**条件名はこのファイル名から取る**。
-    # 同じフォルダに条件ごとのファイルを置いて選び替える使い方（2026-08-21 ユーザー要望）。
-    # 空なら既定名 `材料条件表.csv` を探す
+    # 条件表（レイヤー名 → 材料番号）のファイル。**xlsx なら条件はシートで分ける**。
+    # 空なら既定名 `条件表.xlsx`（無ければ昔の `材料条件表.csv`）を探す
     "condition_csv": "",
+    # 使う条件シートの名前（xlsx のとき）。**この名前が条件名になり結果に付く**。
+    # 空なら最初の条件シート（2026-08-21 ユーザー要望）
+    "condition_sheet": "",
     "assignment": None,            # レイヤ → 材料の対応（辞書。条件表が優先）
     "band_number": 6,
     "unit": None,                  # None なら DXF の $INSUNITS
@@ -223,9 +227,16 @@ class Project:
 
     @property
     def condition_label(self):
-        """**条件の名前**。材料条件表のファイル名から取る。既定名なら空。"""
+        """**条件の名前**。
+
+        ★シートの指定があれば**シート名**（条件表 xlsx は 1 シート 1 条件）。
+        無ければファイル名（拡張子なし）。ただし既定名（`条件表` /
+        `材料条件表`）は条件を分けていないということなので空にする。
+        """
+        if self.condition_sheet:
+            return safe_name(self.condition_sheet)
         stem = _stem(self.condition_csv)
-        return "" if not stem or stem == DEFAULT_CONDITION_STEM else safe_name(stem)
+        return "" if not stem or stem in DEFAULT_CONDITION_STEMS else safe_name(stem)
 
     @property
     def file_prefix(self):
@@ -254,20 +265,46 @@ class Project:
         return os.path.join(self.result_dir(shared=key in SHARED_RESULTS),
                             self._named(key, RESULT_FILES[key]))
 
+    def name_candidates(self, filename):
+        """**読むとき**に探すファイル名を順に返す。
+
+        ① 対象室名＋条件名（いまの名前）
+        ② 対象室名だけ（**条件表を用意する前に計算した結果**。条件名が付いていない）
+        ③ 頭なし（対象室＋条件名を付ける前に計算した結果）
+
+        ★②があるのが大事。条件表を作った瞬間に条件名が付くので、
+        それ以前の結果が読めなくなってしまう（`--redraw` が落ちる）。
+        """
+        names = [self.prefixed(filename)]
+        room = self.room_label
+        if room:
+            names.append(f"{room}_{filename}")
+        names.append(filename)
+        seen, unique = set(), []
+        for name in names:
+            if name not in seen:
+                seen.add(name)
+                unique.append(name)
+        return unique
+
     def result_candidates(self, key):
         """その結果として**読める名前**を、探す順に返す。
 
-        ① 対象室＋条件名の付いた今の名前
-        ② 頭の付いていない名前（頭を付ける前に計算したプロジェクト）
-        ③ さらに古い名前（`rt_statistical.csv` など。`LEGACY_RESULT_FILES`）
+        ① 対象室名＋条件名の付いた今の名前
+        ② 対象室名だけ（条件表を作る前に計算した結果）
+        ③ 頭の付いていない名前（頭を付ける前に計算したプロジェクト）
+        ④ さらに古い名前（`rt_statistical.csv` など。`LEGACY_RESULT_FILES`）
         """
         folder = self.result_dir(shared=key in SHARED_RESULTS)
         names = [RESULT_FILES[key]] + LEGACY_RESULT_FILES.get(key, [])
         paths = []
         for name in names:
-            paths.append(os.path.join(folder, self._named(key, name)))
-            if self.file_prefix:
+            if key in ROOM_SCOPED_RESULTS:
+                paths.append(os.path.join(folder, self._named(key, name)))
                 paths.append(os.path.join(folder, name))
+            else:
+                paths.extend(os.path.join(folder, candidate)
+                             for candidate in self.name_candidates(name))
         return paths
 
     def _named(self, key, filename):
@@ -331,8 +368,19 @@ class Project:
 
     @property
     def condition_path(self):
-        """材料条件表のパス。指定が無ければ既定名（`材料条件表.csv`）。"""
-        return self.resolve(self.condition_csv) or self.path(DEFAULT_CONDITION_FILE)
+        """条件表のパス。指定が無ければ既定名（`条件表.xlsx`）。
+
+        既定名の xlsx が無くて昔の CSV（`材料条件表.csv`）があればそちらを返す
+        （2026-08-21 の日中に作った条件表をそのまま使えるように）。
+        """
+        chosen = self.resolve(self.condition_csv)
+        if chosen:
+            return chosen
+        book = self.path(DEFAULT_CONDITION_FILE)
+        legacy = self.path(LEGACY_CONDITION_FILE)
+        if not os.path.exists(book) and os.path.exists(legacy):
+            return legacy
+        return book
 
     def paths_cache(self):
         """経路の幾何（`path_cache`）の置き場（`結果/recN/<室>_経路.npz`）。

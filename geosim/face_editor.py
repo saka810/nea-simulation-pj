@@ -908,12 +908,9 @@ def edit(project, model=None, off_screen=False, screenshot=None):
 
 
 def _library_for(project):
-    """吸音材の一覧（材料条件表の参考列に使う）。無ければ None。"""
-    if not project.absorption_path:
-        return None
-    import absorption as ab
-    return ab.MaterialLibrary.from_csv(project.absorption_path,
-                                       kind=project.absorption_kind)
+    """吸音材の一覧。**条件表の「吸音率」シートが最優先**（無ければ吸音率 CSV）。"""
+    import run_project
+    return run_project._library_for(project)
 
 
 def load_model_for(project, verbose=True):

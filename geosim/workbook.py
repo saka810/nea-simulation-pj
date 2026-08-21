@@ -137,8 +137,13 @@ def _as_number(text):
 
 
 def _summary_table(project, filename, text_columns):
-    rows = _read_rows(os.path.join(project.path(pj.RESULT_DIR),
-                                   project.prefixed(filename)))
+    """まとめ表の CSV を読む。**条件名の付く前の名前も探す**（`name_candidates`）。"""
+    folder = project.path(pj.RESULT_DIR)
+    rows = None
+    for name in project.name_candidates(filename):
+        rows = _read_rows(os.path.join(folder, name))
+        if rows is not None:
+            break
     return None if rows is None else _numeric(rows, text_columns)
 
 
@@ -153,7 +158,9 @@ def _overview(project):
             ["条件", project.condition_label or "（条件表なし）"],
             ["モデル（DXF）", project.dxf],
             ["吸音率表", f"{project.absorption_csv}（{kind}）"],
-            ["材料条件表", os.path.basename(project.condition_path)],
+            ["条件表", os.path.basename(project.condition_path)
+             + (f" / シート「{project.condition_sheet}」"
+                if project.condition_sheet else "")],
             ["周波数バンド", f"{project.band_number}（"
                              f"{ab.octave_bands(project.band_number)[0]:.0f}〜"
                              f"{ab.octave_bands(project.band_number)[-1]:.0f} Hz）"],
@@ -231,7 +238,9 @@ SHEET_LAYOUT = {
     SHEET_STI: {"text": 2, "chart": "bar", "first": 3},
     SHEET_COMPARISON: {"text": 2, "chart": "line", "first": 3},
     SHEET_ROOM: {"text": 2, "chart": "line", "first": 3},
-    SHEET_CONDITION: {"text": 3, "chart": None, "first": 5},
+    # 材料条件表は 区分／レイヤー名／材料番号／材料名 が名前の列（番号も識別子なので
+    # 文字のまま）、面数と面積が数値
+    SHEET_CONDITION: {"text": 4, "chart": None, "first": 5},
 }
 
 
@@ -266,14 +275,41 @@ def sheets(project, verbose=True):
         result.append((name, _numeric(comparison, layout(name)["text"]),
                        layout(name)["chart"], layout(name)["first"]))
 
-    condition = _read_rows(ct.path(project))
+    condition = _condition_rows(project)
     if condition is not None:
-        # `#` で始まる覚え書きの行は落とす（Excel では邪魔になる）
-        condition = [row for row in condition if not row[0].startswith("#")]
         name = SHEET_CONDITION
         result.append((name, _numeric(condition, layout(name)["text"]), None,
                        layout(name)["first"]))
     return result
+
+
+def _condition_rows(project):
+    """使った条件（レイヤー名 → 材料番号）を**記録として**並べる。
+
+    条件表そのものは xlsx（`条件表.xlsx`）だが、結果一式にも
+    「どの条件で計算したか」を残しておく。番号だけでは読めないので、
+    材料名は吸音率シート（または吸音率 CSV）から引いて**値として**入れる
+    （式は入れない。結果ファイルは読むためのものなので）。
+    """
+    import condition_table as ct
+    import run_project
+
+    path_ = ct.path(project)
+    if not os.path.exists(path_):
+        return None
+    sheet = project.condition_sheet or ct.sheet_of(project)
+    assignment, records = ct.read(path_, sheet)
+    if not records:
+        return None
+    try:
+        library = run_project._library_for(project)
+    except Exception:
+        library = None
+    rows = [["区分", "レイヤー名", "材料番号", "材料名", "面数", "面積_m2"]]
+    for section, layer, key, count, area in records:
+        rows.append([section, layer, key, ct.material_name(key, library),
+                     count, area])
+    return rows
 
 
 # ------------------------------------------------------------------------------

@@ -146,11 +146,11 @@ class SetupWindow:
             ("dxf", "モデル（DXF）", "file", "室形状。音源・受音点も src / rec レイヤから読みます"),
             ("absorption_csv", "吸音率（CSV）", "file",
              "1列目=材料名または ID。レイヤ名の先頭の数字でも引けます"),
-            # ★条件はファイルで選ぶ（同じフォルダに条件ごとの表を置ける）。
-            #   **このファイル名が条件名になり、結果ファイル名にも入る**
-            ("condition_csv", "材料条件表（CSV）", "file",
-             "レイヤー名 → 吸音材の対応表。**このファイル名が条件名**になります"
-             "（空欄なら 材料条件表.csv）"),
+            # ★条件はファイルで選ぶ。用意していなければ「条件表を作成」で作る。
+            #   xlsx なら**シート 1 枚が条件 1 つ**で、シート名が条件名になる
+            ("condition_csv", "条件表（xlsx）", "file",
+             "レイヤー名 → 材料番号の対応表。**シート 1 枚が条件 1 つ**です"
+             "（用意が無ければ下の「条件表を作成」で作れます）"),
         ]
         for row, (key, label, kind, hint) in enumerate(rows):
             ttk.Label(frame, text=label).grid(row=row * 2, column=0, sticky="w", pady=2)
@@ -162,6 +162,23 @@ class SetupWindow:
                 ttk.Button(frame, text="参照…", width=8,
                            command=lambda k=key, t=kind: self._browse(k, t)
                            ).grid(row=row * 2, column=2)
+            if key == "condition_csv":
+                # ★条件（シート）を選ぶ。xlsx はシート 1 枚が条件 1 つ
+                cell = ttk.Frame(frame)
+                cell.grid(row=row * 2 + 1, column=1, columnspan=2, sticky="w",
+                          padx=8)
+                ttk.Label(cell, text="条件（シート）").pack(side="left")
+                self.vars["condition_sheet"] = tk.StringVar()
+                self.sheet_box = ttk.Combobox(
+                    cell, textvariable=self.vars["condition_sheet"],
+                    width=24, state="readonly", values=[])
+                self.sheet_box.pack(side="left", padx=6)
+                ttk.Button(cell, text="条件表を作成", width=14,
+                           command=self._create_condition_table).pack(side="left",
+                                                                      padx=4)
+                ttk.Button(cell, text="開く", width=6,
+                           command=self._open_condition_table).pack(side="left")
+                continue        # 補足はこの行で使ったので下の Label は出さない
             ttk.Label(frame, text=hint, foreground="#666").grid(
                 row=row * 2 + 1, column=1, columnspan=2, sticky="w", padx=8)
 
@@ -180,12 +197,6 @@ class SetupWindow:
                 ttk.Button(cell, text="モデルから見積もる", width=18,
                            command=self._estimate_volume).pack(side="left",
                                                                padx=(0, 8))
-            if key == "source_power_db":
-                # ★材料条件表（レイヤー名 → 吸音材）を作って開く。
-                #   CAD を触らずに材料を差し替えるための入口（2026-08-21 ユーザー要望）
-                ttk.Button(cell, text="材料条件表を開く", width=18,
-                           command=self._open_condition_table).pack(side="left",
-                                                                    padx=(0, 8))
             if key == "rays":
                 # 音線がどう飛ぶかは**室形状と関係ない**ので、ここで先に見られるようにする
                 ttk.Button(cell, text="音線の飛び方を見る", width=18,
@@ -252,6 +263,7 @@ class SetupWindow:
         self.vars["absorption_csv"].set(p.absorption_path or "")
         self.vars["condition_csv"].set(p.condition_csv and
                                        (p.resolve(p.condition_csv) or "") or "")
+        self._refresh_sheets(p.condition_sheet or "")
         for key, _label, _type, _hint in NUMBER_FIELDS:
             value = getattr(p, key)
             self.vars[key].set("" if value is None else str(value))
@@ -296,8 +308,9 @@ class SetupWindow:
         self.project.absorption_csv = absorption
         # 対象室名。**空欄のままにする**（空なら DXF のファイル名が使われる）
         self.project.name = self.vars["name"].get().strip()
-        # 材料条件表。**このファイル名が条件名**になり、結果ファイル名にも入る
+        # 条件表と条件シート。**シート名が条件名**になり、結果ファイル名にも入る
         self.project.condition_csv = self.vars["condition_csv"].get().strip()
+        self.project.condition_sheet = self.vars["condition_sheet"].get().strip()
         for key, _label, cast, _hint in NUMBER_FIELDS:
             text = self.vars[key].get().strip()
             if not text:
@@ -347,12 +360,19 @@ class SetupWindow:
                     self.project = pj.Project.load(path)
                     self._load_into_widgets()
             return
-        patterns = ([("DXF", "*.dxf"), ("すべて", "*.*")] if key == "dxf"
-                    else [("CSV", "*.csv"), ("すべて", "*.*")])
+        if key == "dxf":
+            patterns = [("DXF", "*.dxf"), ("すべて", "*.*")]
+        elif key == "condition_csv":
+            # 条件表は xlsx が本命。昔の CSV も選べるようにしておく
+            patterns = [("条件表", "*.xlsx *.xlsm *.csv"), ("すべて", "*.*")]
+        else:
+            patterns = [("CSV", "*.csv"), ("すべて", "*.*")]
         path = filedialog.askopenfilename(title="ファイルを選ぶ", filetypes=patterns,
                                           initialdir=start or os.getcwd())
         if path:
             self.vars[key].set(os.path.normpath(path))
+            if key == "condition_csv":
+                self._refresh_sheets()      # 選んだ表の条件シートを並べ直す
 
     def _show_directions(self):
         """音線がどの向きへ飛ぶかを見る（室形状は関係ないので単体で開ける）。"""
@@ -450,43 +470,76 @@ class SetupWindow:
         self.action = "run_all"
         self.root.destroy()
 
-    def _open_condition_table(self):
-        """材料条件表（`材料条件表.csv`）を作って、既定のアプリで開く。
+    def _refresh_sheets(self, chosen=None):
+        """条件表の中の条件シートを読んで、コンボボックスに並べる。"""
+        import condition_table as ct
 
-        レイヤー名と吸音材の対応をここで決められるようにするためのもの。
-        表が無ければモデルを読んで作る（面数・面積・吸音率の参考列も入る）。
+        file_name = self.vars["condition_csv"].get().strip()
+        if not file_name:
+            file_name = self.project.condition_path
+        names = [n for n in ct.sheets(file_name) if n]
+        # ★先頭に空欄を置く。**選ばなければ結果ファイル名に条件名を付けない**
+        #   （条件表を作った瞬間に名前が変わって、前の結果と揃わなくなるのを防ぐ。
+        #     読むときは最初のシートの割り当てを使う）
+        self.sheet_box.configure(values=[""] + names)
+        current = (chosen if chosen is not None
+                   else self.vars["condition_sheet"].get()).strip()
+        self.vars["condition_sheet"].set(current if current in names else "")
+
+    def _create_condition_table(self):
+        """**DXF のレイヤから条件表（xlsx）を作る**（ユーザー要望 2026-08-21）。
+
+        「吸音率」シートに材料一覧、条件シートにレイヤーと材料番号の欄が入る。
+        既にあるファイルは上書きせず、面数・面積だけ更新する。
         """
         import condition_table as ct
+        import run_project
 
         problem = self._collect()
         if problem:
             messagebox.showwarning("条件を確認してください", problem)
             return
         try:
-            import absorption as ab
-            import read_dxffile as rd
-
-            library = (ab.MaterialLibrary.from_csv(self.project.absorption_path,
-                                                   kind=self.project.absorption_kind)
-                       if self.project.absorption_path else None)
-            assignment = ct.assignment_for(self.project)
-            table = (library.absorption_table(assignment,
-                                              band_number=self.project.band_number)
-                     if library else None)
-            model = rd.read_model(self.project.dxf_path, unit=self.project.unit,
-                                  absorption_table=table,
-                                  band_number=self.project.band_number,
-                                  verbose=False)
             self.project.save()
-            path = ct.update(self.project, model, library, assignment)
+            model = run_project._model_for(self.project)
+            library = run_project._library_for(self.project)
+            if library is None:
+                messagebox.showwarning(
+                    "吸音率の一覧がありません",
+                    "吸音率（CSV）を指定すると、その材料一覧を「吸音率」シートに"
+                    "書き込みます。指定しないまま作ると番号を手で書くことになります。")
+            path = ct.create(self.project, model, library)
         except Exception as e:
-            messagebox.showerror("材料条件表を作れませんでした",
+            messagebox.showerror("条件表を作れませんでした",
                                  f"{type(e).__name__}: {e}")
             return
+        self.vars["condition_csv"].set(path)
+        self._refresh_sheets()
+        layers = len(getattr(model, "layer_counts", {}) or {})
+        messagebox.showinfo(
+            "条件表を作りました",
+            f"{path}{chr(10)}{chr(10)}レイヤー {layers} 件を並べました。"
+            f"Excel で「材料番号」の列に番号を入れてください"
+            f"（材料名は隣に自動で出ます）。"
+            f"{chr(10)}条件を増やすときはシートを複製して名前を変えます。")
+        self._open_condition_table()
+
+    def _open_condition_table(self):
+        """条件表を既定のアプリ（Excel など）で開く。無ければ作る。"""
+        import condition_table as ct
+
+        problem = self._collect()
+        if problem:
+            messagebox.showwarning("条件を確認してください", problem)
+            return
+        path = ct.path(self.project)
+        if not os.path.exists(path):
+            self._create_condition_table()
+            return
         try:
-            os.startfile(path)      # Excel など既定のアプリで開く
+            os.startfile(path)
         except Exception:
-            messagebox.showinfo("材料条件表", f"作りました: {path}")
+            messagebox.showinfo("条件表", f"ここにあります: {path}")
 
     def _on_view(self):
         """計算し直さずに、保存済みの結果を開く。"""
