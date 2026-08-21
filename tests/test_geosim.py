@@ -1280,19 +1280,32 @@ def test_redraw():
 
     # まず本番と同じ手順で 1 回だけ計算し、結果 CSV を作る
     run_project.run(project, verbose=False, make_figures=True)
-    before = sorted(os.listdir(project.path(pj.FIGURE_DIR)))
+
+    # ★置き場の約束（2026-08-21 に変更）。受音点ごとは `結果/recN/` `図/recN/`、
+    #   受音点に依らないもの（統計残響式・材料別面積・音線軌跡）は `結果/` 直下
+    rec1_results = project.path(pj.RESULT_DIR, pj.RECEIVER_DIR % 1)
+    rec1_figures = project.path(pj.FIGURE_DIR, pj.RECEIVER_DIR % 1)
+    check("受音点ごとの結果は 結果/rec1/ に入る",
+          os.path.isfile(os.path.join(rec1_results, "rt.csv")))
+    check("受音点に依らない結果は 結果/ 直下に入る",
+          os.path.isfile(project.path(pj.RESULT_DIR, "rt_statistical.csv")))
+    check("受音点ごとの図は 図/rec1/ に入る", os.path.isdir(rec1_figures))
+    check("まとめ表が作られる",
+          os.path.isfile(project.path(pj.RESULT_DIR, "まとめ_残響時間.csv")))
+
+    before = sorted(os.listdir(rec1_figures))
     check("計算すると図が書き出される", len(before) > 0, f"{len(before)} 枚")
 
     # 図を全部消してから、**計算し直さずに**描き直せるか
     shutil.rmtree(project.path(pj.FIGURE_DIR))
-    stamps = {name: os.path.getmtime(project.path(pj.RESULT_DIR, name))
-              for name in os.listdir(project.path(pj.RESULT_DIR))}
+    stamps = {name: os.path.getmtime(os.path.join(rec1_results, name))
+              for name in os.listdir(rec1_results)}
     written = run_project.redraw(project, verbose=False)
-    after = sorted(os.listdir(project.path(pj.FIGURE_DIR)))
+    after = sorted(os.listdir(rec1_figures))
     check("描き直しで同じ図が揃う", after == before,
           f"{len(after)} 枚 / 足りない {sorted(set(before) - set(after))}")
     check("描き直しは結果 CSV を書き換えない",
-          all(os.path.getmtime(project.path(pj.RESULT_DIR, n)) == t
+          all(os.path.getmtime(os.path.join(rec1_results, n)) == t
               for n, t in stamps.items()),
           f"{len(stamps)} ファイル")
     check("書き出したファイルの一覧が返る", len(written) == len(after))

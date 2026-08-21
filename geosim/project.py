@@ -9,15 +9,27 @@ CSV にしてあるのは Excel でそのまま開けるようにするため。
       normals.json          法線の反転指定（面ごと。face_editor.py が書く）
       materials.json        面ごとの吸音材の割り当て（同上。レイヤで分けられないモデル用）
       結果/
-        pulses.csv          パルス列（反射回数・到来時刻・到来方向・バンド別エネルギー）
-        ir.csv              インパルス応答
-        rt.csv              残響指標 EDT / T20 / T30
+        まとめ_残響時間.csv   全受音点 ＋ 平均 ＋ 理論値（summary.py が書く）
+        まとめ_明瞭度.csv     全受音点 ＋ 平均
         rt_statistical.csv  統計残響式 Sabine / Eyring / Eyring-Knudsen
-        decay.csv           減衰曲線
         surface.csv         材料別の面積と吸音率（面ごとの割り当てが無ければレイヤ別）
         raylog.npz          音線軌跡（可視化用。可変長なので npz）
+        rec1/               ← **受音点ごと**
+          pulses.csv        パルス列（反射回数・到来時刻・到来方向・バンド別エネルギー）
+          ir.csv            インパルス応答
+          rt.csv            残響指標 EDT / T20 / T30
+          decay.csv         減衰曲線
+          clarity.csv       明瞭度 C50 / C80 / D50 / Ts
+        rec2/ …
       図/
-        *.png               正規化したインパルス応答・減衰曲線・残響時間 ほか
+        rec1/ *.png         正規化したインパルス応答・減衰曲線・残響時間 ほか
+        rec2/ …
+        画面/               画面から手で撮った画像・動画
+
+★**受音点ごとのものは `結果/recN/`、受音点に依らないものは `結果/` 直下**
+（2026-08-21 にこの形へ。それまでは 1 点目だけ `結果/` 直下、2 点目以降が
+`rec2/結果/` という不揃いな置き方で、ユーザー指摘で直した）。
+統計残響式・材料別面積・音線軌跡は受音点に依らないので 1 つだけ持つ。
 
 DXF や吸音率 CSV は**プロジェクトフォルダからの相対パスで持つ**（フォルダごと
 別の端末へ移してもそのまま開ける）。フォルダの外にある場合は絶対パスのままにする。
@@ -33,6 +45,8 @@ NORMALS_FILE = "normals.json"
 MATERIALS_FILE = "materials.json"
 RESULT_DIR = "結果"
 FIGURE_DIR = "図"
+# 受音点ごとのフォルダ名（`結果/rec1/` `図/rec1/`）
+RECEIVER_DIR = "rec%d"
 # 画面から手で撮った画像・動画の置き場。**`図/` の直下ではなく子フォルダにする。**
 # `clear_results()` が `図/` の PNG を消してしまうので、
 # 同じ所に置くと計算し直すたびに撮った画像が巻き添えで消える
@@ -48,6 +62,11 @@ RESULT_FILES = {
     "surface": "surface.csv",
     "raylog": "raylog.npz",
 }
+
+# **受音点に依らない**結果。受音点ごとのフォルダではなく `結果/` 直下に置く。
+#   統計残響式・材料別面積 … 室形状と材料だけで決まる
+#   音線軌跡             … 音源から出た音線の形。受音点をまたいで共有している（F-6）
+SHARED_RESULTS = {"statistical", "surface", "raylog"}
 
 # project.json に書き出す条件と既定値。
 # ここに無いキーは保存されないので、**新しい計算条件を足したらここにも足すこと**
@@ -97,18 +116,46 @@ class Project:
             setattr(self, key, values.get(key, default))
         if not self.name:
             self.name = os.path.basename(self.folder)
+        # いま何番目の受音点を扱っているか（1 始まり）。**保存する条件ではない**ので
+        # DEFAULTS には入れない。`結果/recN/` `図/recN/` の振り分けにだけ使う
+        self.receiver_index = values.get("receiver_index")
 
     # ---- パス ---------------------------------------------------------
 
     def path(self, *parts):
         return os.path.join(self.folder, *parts)
 
+    def result_dir(self, shared=False):
+        """結果の置き場。受音点が決まっていれば `結果/recN/`。
+
+        `shared=True` は受音点に依らないもの（統計残響式など）で、
+        受音点を扱っていても `結果/` 直下を返す。
+        """
+        if shared or self.receiver_index is None:
+            return self.path(RESULT_DIR)
+        return self.path(RESULT_DIR, RECEIVER_DIR % self.receiver_index)
+
     def result_path(self, key):
-        """結果ファイルのパス。`key` は RESULT_FILES のキー。"""
-        return self.path(RESULT_DIR, RESULT_FILES[key])
+        """結果ファイルのパス。`key` は RESULT_FILES のキー。
+
+        受音点に依らないもの（`SHARED_RESULTS`）は `結果/` 直下、
+        それ以外は `結果/recN/` に置く。
+        """
+        return os.path.join(self.result_dir(shared=key in SHARED_RESULTS),
+                            RESULT_FILES[key])
+
+    def clarity_path(self):
+        """明瞭度の CSV。`RESULT_FILES` に入れていないので別に持つ。"""
+        return os.path.join(self.result_dir(), "clarity.csv")
+
+    def figure_dir(self):
+        """図の置き場。受音点が決まっていれば `図/recN/`。"""
+        if self.receiver_index is None:
+            return self.path(FIGURE_DIR)
+        return self.path(FIGURE_DIR, RECEIVER_DIR % self.receiver_index)
 
     def figure_path(self, name):
-        return self.path(FIGURE_DIR, name)
+        return os.path.join(self.figure_dir(), name)
 
     def screenshot_dir(self):
         """画面から手で撮った画像・動画の置き場（`図/画面/`）。"""
@@ -144,8 +191,9 @@ class Project:
     # ---- 保存・読み込み ------------------------------------------------
 
     def ensure_dirs(self):
-        for sub in ("", RESULT_DIR, FIGURE_DIR):
-            os.makedirs(self.path(sub) if sub else self.folder, exist_ok=True)
+        for folder in (self.folder, self.path(RESULT_DIR), self.path(FIGURE_DIR),
+                       self.result_dir(), self.figure_dir()):
+            os.makedirs(folder, exist_ok=True)
         return self
 
     def clear_results(self, verbose=True):
@@ -160,17 +208,17 @@ class Project:
         利用者が置いた資料まで巻き添えにするので、名前を決め打ちにしてある。
         """
         removed = 0
+        # 受音点ごとのものと、受音点に依らないものの両方（result_path が振り分ける）
         for key in RESULT_FILES:
             path = self.result_path(key)
             if os.path.exists(path):
                 os.remove(path)
                 removed += 1
-        for name in ("clarity.csv",):
-            path = self.path(RESULT_DIR, name)
+        for path in (self.clarity_path(),):
             if os.path.exists(path):
                 os.remove(path)
                 removed += 1
-        figures = self.path(FIGURE_DIR)
+        figures = self.figure_dir()
         if os.path.isdir(figures):
             for name in os.listdir(figures):
                 if name.lower().endswith(".png"):

@@ -33,7 +33,7 @@ def _visualise(project, results=None):
     import project as pj
     import view_rays as vr
 
-    raylog = project.result_path("raylog")
+    raylog = project.result_path("raylog")     # 受音点に依らないので `結果/` 直下
     if not os.path.exists(raylog):
         print("[app] 音線軌跡が無いので可視化は開きません（先に計算してください）")
         return

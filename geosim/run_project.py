@@ -35,10 +35,15 @@ def run(project, verbose=True, make_figures=True, progress=None):
 
     receivers = _receivers(project)
     if len(receivers) <= 1:
-        return _run_one(project, receivers[0] if receivers else None,
-                        verbose=verbose, make_figures=make_figures,
-                        head_azimuth=project.head_azimuth_for(0),
-                        progress=progress)
+        # 1 点でも `結果/rec1/` に入れる（点数によって置き場が変わらないように）
+        result = _run_one(_sub_project(project, 0),
+                          receivers[0] if receivers else None,
+                          verbose=verbose, make_figures=make_figures,
+                          write_back=False,
+                          head_azimuth=project.head_azimuth_for(0),
+                          progress=progress)
+        _write_summaries(project, verbose=verbose)
+        return result
 
     # ★音線追跡は**受音点に依らない**ので 1 回だけ回し、受音点ごとに配る（F-6）。
     #   受音しても音線は打ち切られないため、受音球をいくつ置いても追跡は同じ。
@@ -56,17 +61,34 @@ def run(project, verbose=True, make_figures=True, progress=None):
                   f"{np.round(point, 3).tolist()} → {sub.folder}")
         # ★親（k=0）の project.json には受音点を書き戻さない。
         #   書き戻すと `receiver` が 1 点に固定され、**次回から 1 点目しか回らなくなる**
+        # ★project.json は 1 つだけなので受音点は書き戻さない。
+        #   書き戻すと `receiver` が 1 点に固定され、次回から 1 点しか回らなくなる
         results.append(_run_one(sub, point, verbose=verbose,
-                                make_figures=make_figures, write_back=(k > 0),
+                                make_figures=make_figures, write_back=False,
                                 head_azimuth=project.head_azimuth_for(k),
                                 traced_history=None if traced is None else traced[k],
                                 progress=_prefixed(progress,
                                                    f"受音点{k + 1}/{len(receivers)} ")))
-        if recorder is not None:
-            # 軌跡は受音点ごとに同じものを置く（形は同じで、受音の印は
-            # 「どれかの受音点に届いた」の意味になる）。`clear_results` のあとに置く
-            recorder.save_npz(sub.result_path("raylog"))
+    if recorder is not None:
+        # 軌跡は受音点に依らないので `結果/` 直下に 1 つだけ置く。
+        # `clear_results` のあとに置かないと消される
+        recorder.save_npz(project.result_path("raylog"))
+    _write_summaries(project, verbose=verbose)
     return {"receivers": receivers, "results": results, **results[0]}
+
+
+def _write_summaries(project, verbose=True):
+    """受音点をまたいだまとめ表を作る（`結果/まとめ_*.csv`）。
+
+    全測定点を 1 つのファイルで見たいという要望（2026-08-21）。
+    残響時間には理論値（統計残響式）も同じ表に入れる。
+    まとめだけ作り直したいときは `python summary.py <プロジェクト>`。
+    """
+    try:
+        import summary as sm
+        sm.write_all(project, verbose=verbose)
+    except Exception as error:      # まとめが作れなくても本体の結果は残す
+        print(f"[run] まとめ表を作れませんでした: {type(error).__name__}: {error}")
 
 
 def _trace_once(project, receivers, verbose=True, progress=None):
@@ -148,25 +170,22 @@ def _receivers(project):
 
 
 def _sub_project(project, index):
-    """受音点 `index` 番目の書き出し先。条件は同じで**フォルダだけ分ける**。
+    """受音点 `index` 番目（0 始まり）を扱う `Project` を返す。
 
-    ★**顔の向きだけは受音点ごとに違う**ので、その点のぶんを取り出して入れ直す
+    ★**フォルダは分けない。**`receiver_index` を立てるだけで、結果は
+    `結果/recN/`・図は `図/recN/` に入る（`Project.result_dir` が振り分ける）。
+    以前は 2 点目以降だけ `rec2/` という別フォルダを作っていたので、
+    1 点目だけ `結果/` 直下という不揃いな置き方になっていた（2026-08-21 に直した）。
+
+    顔の向きだけは受音点ごとに違うので、その点のぶんを取り出して入れ直す
     （`head_azimuth` は数値でもリストでもよい。`Project.head_azimuth_for` を参照）。
     """
-    if index == 0:
-        # ★親は**触らない**。ここで数値に置き換えると project.json のリストが消える
-        return project
-    azimuth = project.head_azimuth_for(index)
-    sub = pj.Project.load(project.folder)
-    sub.__dict__.update({k: getattr(project, k) for k in pj.DEFAULTS})
-    sub.head_azimuth = azimuth
-    sub.folder = os.path.join(project.folder, f"rec{index + 1}")
-    sub.name = f"{project.name} 受音点{index + 1}"
-    # DXF と吸音率は親フォルダのものをそのまま使う（絶対パスにしておく）
-    sub.dxf = project.dxf_path
-    sub.absorption_csv = project.absorption_path or ""
-    # ★ここではフォルダを作らない。実際に回す `_run_one` に任せる。
-    #   先に作ると、受音点が 1 つしかないのに空の rec2/ が残って紛らわしい
+    sub = pj.Project(project.folder,
+                     **{k: getattr(project, k) for k in pj.DEFAULTS})
+    sub.head_azimuth = project.head_azimuth_for(index)
+    sub.receiver_index = index + 1
+    sub.name = (project.name if index == 0
+                else f"{project.name} 受音点{index + 1}")
     return sub
 
 
@@ -215,7 +234,7 @@ def _run_one(project, receiver, verbose=True, make_figures=True,
         decay_filename=project.result_path("decay"),
         statistical_filename=project.result_path("statistical"),
         surface_filename=project.result_path("surface"),
-        clarity_filename=project.path(pj.RESULT_DIR, "clarity.csv"),
+        clarity_filename=project.clarity_path(),
         statistical=project.statistical,
         progress=progress,
     )
@@ -225,7 +244,7 @@ def _run_one(project, receiver, verbose=True, make_figures=True,
             progress("図を書き出し中", None)
         written = plots.save_all(project, results, verbose=verbose)
         if verbose:
-            print(f"[run] 図を {len(written)} 枚書き出しました → {project.path(pj.FIGURE_DIR)}")
+            print(f"[run] 図を {len(written)} 枚書き出しました → {project.figure_dir()}")
 
     # 実際に使った音源・受音点を project.json に残す（DXF から取った場合も分かるように）
     # ★顔の向きは**結果に持たせる**（受音点ごとに違うため）。
@@ -242,6 +261,9 @@ def _run_one(project, receiver, verbose=True, make_figures=True,
 def redraw(project, verbose=True):
     """**計算し直さずに**、保存済みの結果から図を一式描き直す。
 
+    受音点が複数あれば**全点ぶん**描き直す（`結果/recN/` を順に見る）。
+    顔の向きを直したあと伝搬方向の図だけ作り直したいときの入口。
+
     音線追跡（重い）はやり直さない。プロジェクトフォルダに残っている
     `pulses.csv` と `ir.csv` を読み、そこから先だけを計算して `図/` を作り直す。
     研修室（パルス 3901 本）で数秒。
@@ -254,6 +276,21 @@ def redraw(project, verbose=True):
       前回の計算結果と食い違うことはない。残響指標・明瞭度・統計残響式は
       本番と同じ関数で計算し直すため、CSV の読み方を別に書かずに済む。
     """
+    # 受音点が複数あるときは 1 点ずつ描き直す（`receiver_index` を立てて再帰）
+    if project.receiver_index is None:
+        import summary as sm
+        folders = [name for name, _ in sm.receiver_folders(project)
+                   if name.startswith("rec")]
+        indexes = [int(name[3:]) for name in folders
+                   if os.path.isdir(project.path(pj.RESULT_DIR, name))]
+        if indexes:
+            written = []
+            for k in indexes:
+                sub = _sub_project(project, k - 1)
+                written.extend(redraw(sub, verbose=verbose))
+            sm.write_all(project, verbose=verbose)
+            return written
+
     import read_dxffile as rd
     import reverberation as rv
     import absorption as ab
@@ -323,7 +360,7 @@ def redraw(project, verbose=True):
     written = plots.save_all(project, results, verbose=verbose)
     if verbose:
         print(f"[redraw] 図を {len(written)} 枚書き出しました "
-              f"→ {project.path(pj.FIGURE_DIR)}")
+              f"→ {project.figure_dir()}")
     return written
 
 
