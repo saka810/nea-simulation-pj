@@ -89,6 +89,13 @@ def _write_summaries(project, verbose=True):
         sm.write_all(project, verbose=verbose)
     except Exception as error:      # まとめが作れなくても本体の結果は残す
         print(f"[run] まとめ表を作れませんでした: {type(error).__name__}: {error}")
+    # 体裁を整える用の Excel（CSV とは役割を分ける。`workbook.py` 冒頭参照）
+    try:
+        import workbook as wb
+        wb.write(project, verbose=verbose)
+    except Exception as error:      # Excel が作れなくても CSV は残る
+        print(f"[run] 結果一式（Excel）を作れませんでした: "
+              f"{type(error).__name__}: {error}")
 
 
 def _trace_once(project, receivers, verbose=True, progress=None):
@@ -113,7 +120,7 @@ def _trace_once(project, receivers, verbose=True, progress=None):
         if project.absorption_path:
             library = ab.MaterialLibrary.from_csv(project.absorption_path,
                                                   kind=project.absorption_kind)
-            table = library.absorption_table(project.assignment,
+            table = library.absorption_table(_assignment_for(project),
                                              band_number=project.band_number)
         model = rd.read_model(project.dxf_path, unit=project.unit,
                               absorption_table=table,
@@ -214,7 +221,7 @@ def _run_one(project, receiver, verbose=True, make_figures=True,
         soundray_number=project.rays,
         absorption_csv=project.absorption_path,
         absorption_kind=project.absorption_kind,
-        layer_assignment=project.assignment,
+        layer_assignment=_assignment_for(project),
         band_number=project.band_number,
         unit=project.unit,
         orient_normals=project.orient_normals,
@@ -235,9 +242,17 @@ def _run_one(project, receiver, verbose=True, make_figures=True,
         decay_filename=project.result_path("decay"),
         room_filename=project.result_path("room"),
         clarity_filename=project.clarity_path(),
+        level_filename=project.result_path("spl"),
+        sti_filename=project.result_path("sti"),
+        source_power_db=project.source_power_db,
+        noise_level_db=project.noise_level_db,
         statistical=project.statistical,
         progress=progress,
     )
+
+    # 実際に使った条件を材料条件表に書き戻す（受音点ごとに繰り返さない）
+    if project.receiver_index in (None, 1) and results.get("model") is not None:
+        _update_condition_table(project, results["model"], verbose=verbose)
 
     if make_figures:
         if progress is not None:
@@ -288,7 +303,7 @@ def redraw(project, verbose=True):
             for k in indexes:
                 sub = _sub_project(project, k - 1)
                 written.extend(redraw(sub, verbose=verbose))
-            sm.write_all(project, verbose=verbose)
+            _write_summaries(project, verbose=verbose)
             return written
 
     import read_dxffile as rd
@@ -325,8 +340,8 @@ def redraw(project, verbose=True):
     if project.absorption_path:
         library = ab.MaterialLibrary.from_csv(project.absorption_path,
                                               kind=project.absorption_kind)
-        absorption_table = library.absorption_table(project.assignment,
-                                                    band_number=project.band_number)
+        absorption_table = library.absorption_table(
+            _assignment_for(project), band_number=project.band_number)
     model = rd.read_model(project.dxf_path, band_number=project.band_number,
                           absorption_table=absorption_table, unit=project.unit,
                           orient_normals=project.orient_normals,
@@ -335,7 +350,35 @@ def redraw(project, verbose=True):
 
     results = {"model": model, "pulses": pulses, "frequencies": frequencies,
                "atmosphere": atmosphere, "impulse": None,
-               "reverberation": None, "clarity": None, "statistical": None}
+               "reverberation": None, "clarity": None, "statistical": None,
+               "level": None, "sti": None}
+
+    # ---- 音圧レベルと STI（パルス列から出るので描き直しでも作れる）----
+    if len(pulses):
+        import sound_level as sl
+        source = (np.asarray(project.source, dtype=float)
+                  if project.source is not None else None)
+        receiver = (np.asarray(project.receiver, dtype=float)
+                    if project.receiver is not None else None)
+        distance = (float(np.linalg.norm(receiver - source))
+                    if source is not None and receiver is not None else None)
+        results["level"] = sl.band_levels(
+            pulses.time, pulses.energy, pulses.distance, atmosphere, frequencies,
+            source_power_db=project.source_power_db, source_distance=distance,
+            verbose=False)
+        results["sti"] = sl.speech_transmission_index(
+            pulses.time, pulses.energy, pulses.distance, atmosphere, frequencies,
+            source_power_db=project.source_power_db,
+            noise_level_db=project.noise_level_db, verbose=False)
+        # ★**すでにある CSV は書き換えない**（描き直しは図だけのはずなので）。
+        #   ただし**無いものは作る**。あとから足した指標（音圧レベル・STI）を
+        #   過去に計算したプロジェクトへ反映するには、これが唯一の道になる
+        for key, write in (("spl", sl.write_levels), ("sti", sl.write_sti)):
+            target = project.result_path(key)
+            if not os.path.exists(project.existing_result_path(key)):
+                write(target, results["level" if key == "spl" else "sti"])
+                if verbose:
+                    print(f"[redraw] 無かったので作りました: {target}")
 
     # ---- インパルス応答から先を計算し直す ----
     impulse = saved["ir"]
@@ -362,6 +405,38 @@ def redraw(project, verbose=True):
         print(f"[redraw] 図を {len(written)} 枚書き出しました "
               f"→ {project.figure_dir()}")
     return written
+
+
+def _assignment_for(project):
+    """レイヤ → 材料の対応。**材料条件表（CSV）が最優先**（依頼 2026-08-21）。
+
+    CAD のレイヤ名を書き換えずに材料を差し替えられるようにするための仕組み。
+    表が無ければ従来どおり `project.assignment`（project.json）を使う。
+    受音点ごとの子フォルダには置かないので、法線と同じ探し方をする。
+    """
+    import condition_table as ct
+    owner = _owner_of(project, lambda p: ct.exists(p) or None) or project
+    return ct.assignment_for(owner, verbose=False)
+
+
+def _update_condition_table(project, model, verbose=True):
+    """材料条件表を作る／更新する（面数・面積・吸音率の参考列を書き直す）。
+
+    ★**利用者が書いた「材料名」は上書きしない**（`condition_table.update`）。
+    計算のたびに更新するので、**そのとき実際に使った条件が表に残る**。
+    """
+    try:
+        import absorption as ab
+        import condition_table as ct
+        library = (ab.MaterialLibrary.from_csv(project.absorption_path,
+                                               kind=project.absorption_kind)
+                   if project.absorption_path else None)
+        return ct.update(project, model, library, _assignment_for(project),
+                         verbose=verbose)
+    except Exception as error:     # 表が作れなくても計算結果は残す
+        print(f"[run] 材料条件表を更新できませんでした: "
+              f"{type(error).__name__}: {error}")
+        return None
 
 
 def _flip_faces_for(project):

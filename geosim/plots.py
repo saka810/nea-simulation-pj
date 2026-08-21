@@ -283,6 +283,72 @@ def clarity(path, result):
     return _save(fig, path, axes[0])
 
 
+def sound_level(path, result):
+    """帯域別の音圧レベルと、自由音場（逆二乗）との比較（`sound_level.band_levels`）。
+
+    左：帯域別の Lp と成分（直接音・反射音）に**自由音場の理論値**を重ねる。
+    右：自由音場との差。**0 dB なら逆二乗どおり**で、上に外れた分が室の効き。
+    無響室のモデルでは左右とも理論値に張り付くので、実装の物差しになる。
+    """
+    frequencies = np.asarray(result["frequencies"], dtype=float)
+    x = np.arange(len(frequencies))
+    fig, axes = _figure(1, 2, figsize=(14, 5))
+
+    unit = "dB" if not result["relative"] else "dB（相対値）"
+    _style(axes[0], f"帯域別の音圧レベル（音源距離 {result['source_distance']:.2f} m）",
+           "周波数 [Hz]", f"Lp [{unit}]")
+    axes[0].plot(x, result["levels"], "o-", color=ACCENT, linewidth=2.0,
+                 markersize=6, label="合計")
+    axes[0].plot(x, result["direct"], "s--", color="#4cc9f0", linewidth=1.4,
+                 markersize=5, label="直接音")
+    axes[0].plot(x, result["reflected"], "^--", color="#f7b801", linewidth=1.4,
+                 markersize=5, label="反射音")
+    axes[0].plot(x, result["freefield"], ":", color="#e5484d", linewidth=1.6,
+                 label="自由音場（逆二乗）")
+    axes[0].legend(loc="best", fontsize=9)
+
+    _style(axes[1], "自由音場との差（0 dB = 逆二乗どおり）", "周波数 [Hz]",
+           "Lp − Lp,自由音場 [dB]")
+    axes[1].bar(x, result["excess"], color="#4cc38a")
+    axes[1].axhline(0, color="#e5484d", linestyle=":", linewidth=1.2)
+
+    for ax in axes:
+        ax.set_xticks(x)
+        ax.set_xticklabels([f"{f:.0f}" for f in frequencies])
+    return _save(fig, path, axes[0])
+
+
+def speech_transmission(path, result):
+    """STI と帯域別の MTI・変調伝達関数（`sound_level.speech_transmission_index`）。"""
+    bands = np.asarray(result["bands"], dtype=float)
+    x = np.arange(len(bands))
+    fig, axes = _figure(1, 2, figsize=(14, 5))
+
+    _style(axes[0], f"STI = {result['sti']:.3f}（{result['rating']}）",
+           "周波数 [Hz]", "MTI [-]")
+    axes[0].bar(x, np.nan_to_num(result["mti"]), color=ACCENT)
+    # 評価の境目（IEC 60268-16）。どのあたりに居るかが一目で分かるように
+    for limit, name in ((0.75, "優"), (0.60, "良"), (0.45, "可"), (0.30, "不可")):
+        axes[0].axhline(limit, color=GRID, linestyle=":", linewidth=1.0)
+        axes[0].text(len(bands) - 0.4, limit, f" {name}", color=TEXT, fontsize=8,
+                     va="bottom")
+    axes[0].axhline(result["sti"], color="#e5484d", linewidth=1.6,
+                    label=f"STI {result['sti']:.3f}")
+    axes[0].set_ylim(0, 1.05)
+    axes[0].legend(loc="lower left", fontsize=9)
+    axes[0].set_xticks(x)
+    axes[0].set_xticklabels([f"{f:.0f}" for f in bands])
+
+    _style(axes[1], "変調伝達関数 m(F)", "変調周波数 [Hz]", "m [-]")
+    modulation = np.asarray(result["modulation_frequencies"], dtype=float)
+    for i, band in enumerate(bands):
+        axes[1].semilogx(modulation, result["mtf"][i], "o-", color=_band_color(i),
+                         linewidth=1.4, markersize=4, label=f"{band:.0f} Hz")
+    axes[1].set_ylim(0, 1.05)
+    axes[1].legend(loc="lower left", fontsize=8, ncol=2)
+    return _save(fig, path, axes[0])
+
+
 def absorption(path, surface, frequencies):
     """レイヤ別の吸音率と面積（`reverberation.surface_summary()` の結果）。"""
     names = surface["names"]
@@ -985,6 +1051,14 @@ def save_all(project, results, verbose=True):
     stat = results.get("statistical")
     if stat is not None and "surface" in stat:
         emit("absorption.png", absorption, stat["surface"], stat["frequencies"])
+
+    # 音圧レベル（逆二乗との比較つき）と STI
+    level_result = results.get("level")
+    if level_result is not None:
+        emit("spl.png", sound_level, level_result)
+    sti_result = results.get("sti")
+    if sti_result is not None:
+        emit("sti.png", speech_transmission, sti_result)
 
     # ⑤ 伝搬方向。人の正面方向はプロジェクトが持つ（GUI で決める）
     if pulse_list is not None and len(pulse_list):

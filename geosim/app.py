@@ -140,6 +140,20 @@ def _report(project, results):
                   + "".join("       ---" if np.isnan(v) else f"{v:10.3f}"
                             for v in values))
 
+    # 音圧レベルと STI（帯域別の表は CSV に、ここでは代表値だけ）
+    level = results.get("level")
+    if level is not None:
+        kind = "相対値" if level["relative"] else "絶対値"
+        print("")
+        print(f"  音圧レベル（{kind}）: 帯域合成 {level['overall']:.1f} dB / "
+              f"A 特性 {level['overall_a']:.1f} dB(A)")
+        print(f"    自由音場（逆二乗）との差: "
+              + " / ".join(f"{f:.0f}Hz {d:+.1f}" for f, d
+                           in zip(level["frequencies"], level["excess"])))
+    sti = results.get("sti")
+    if sti is not None:
+        print(f"  STI: {sti['sti']:.3f}（{sti['rating']}）")
+
     if stat is None and project.statistical:
         print("\n  ※ 統計残響式（Sabine / Eyring-Knudsen）は計算できませんでした。")
         print("     このモデルは閉じていないので容積が自動で決まりません。")

@@ -65,7 +65,7 @@ pip install -r requirements.txt
 
 ```powershell
 python --version            # -> Python 3.10.11
-python -c "import numpy, scipy, matplotlib, pyvista; print('ok')"
+python -c "import numpy, scipy, matplotlib, pyvista, openpyxl; print('ok')"
 ```
 
 端末間で完全に同じ組み合わせにしたい場合は `requirements-lock.txt` を使う
@@ -81,6 +81,7 @@ python -c "import numpy, scipy, matplotlib, pyvista; print('ok')"
 | scipy | 帯域フィルタ・信号処理（E-6） |
 | matplotlib | 2D グラフ（インパルス応答・音響指標・モード分布） |
 | pyvista（+ vtk） | 3D 表示（`geosim/view_model_gui.py`） |
+| openpyxl | 結果一式の Excel 出力（`geosim/workbook.py`）。CSV 出力には不要 |
 
 ## 実行
 
@@ -117,16 +118,31 @@ python app.py "C:\...\プロジェクト" --run  入力ウィンドウを出さ�
 project.json          条件（次に開いたときそのまま復元される）
 normals.json          法線の反転指定
 materials.json        面ごとの吸音材の割り当て（レイヤで分けられないモデル用）
+材料条件表.csv        レイヤー名 → 吸音材（★CAD を触らずに材料を変える入力）
 結果/                 ← 受音点に依らないものは直下
+  研修室_条件A_結果一式.xlsx          ★体裁用（全部入り・グラフ付き）
   研修室_条件A_まとめ_残響時間.csv    全受音点 ＋ 平均 ＋ 理論値
   研修室_条件A_まとめ_明瞭度.csv      全受音点 ＋ 平均
+  研修室_条件A_まとめ_音圧レベル.csv  帯域別 Lp と自由音場（逆二乗）との差
+  研修室_条件A_まとめ_STI.csv         STI と帯域別 MTI
   研修室_条件A_吸音率と理論値.csv     材料別の吸音率 → 平均吸音率 → 残響時間理論値
   研修室_条件A_raylog.npz             可視化用の音線軌跡
-  rec1/ rec2/ …       受音点ごとに pulses / ir / rt / decay / clarity の CSV
+  rec1/ rec2/ …       受音点ごとに pulses / ir / rt / decay / clarity / spl / sti の CSV
 図/
   rec1/ rec2/ …       受音点ごとの PNG
   画面/               画面から手で撮った画像・動画（計算し直しても消えない）
 ```
+
+**CSV と Excel は役割が違う。** CSV はプログラムが読む（描き直し・まとめ表・他ソフト）、
+Excel は人が読む（報告書・打ち合わせ）。Excel はまとめ表の CSV を並べ直したもので、
+グラフが付いている。会社の雛形に流し込むこともできる:
+
+```powershell
+.\.venv\Scripts\python geosim\workbook.py "<プロジェクト>" --template 雛形.xlsx
+```
+
+**吸音材を変えるときは CAD を触らない。** `材料条件表.csv` の「材料名」の列を
+書き換えて計算し直すだけ（条件入力の「材料条件表を開く」で作れる）。
 
 **ファイル名の頭には「対象室＋条件名」（プロジェクト名）が付く。**
 報告書やメールでフォルダの外へ出したときに、どの室・どの条件のものか
@@ -206,6 +222,8 @@ python procedure.py ..\test.dxf --absorption ..\absorption.csv --absorption-kind
 | `*_rt.csv` | 残響指標 **EDT / T20 / T30**（オクターブバンド別）と曲率 |
 | `*_吸音率と理論値.csv` | 材料別の吸音率 → **平均吸音率** → **残響時間理論値**（Sabine / Eyring / Eyring-Knudsen）。閉じた室のみ |
 | `*_decay.csv` | 減衰曲線 |
+| `*_spl.csv` | **帯域別の音圧レベル**と自由音場（逆二乗）との差。PWL 未入力なら相対値 |
+| `*_sti.csv` | **STI**（音声伝送指数・IEC 60268-16）と帯域別 MTI・変調伝達関数 |
 
 （`app.py` / `run_project.py` から回した場合は、プロジェクトフォルダの
 `結果/recN/` に受音点ごとの CSV、`結果/` 直下に受音点に依らないものが入り、
@@ -217,7 +235,7 @@ python procedure.py ..\test.dxf --absorption ..\absorption.csv --absorption-kind
 .\.venv\Scripts\python tests\test_geosim.py
 ```
 
-**323 項目**（2026-08-21 時点）。解析的に答えが分かる問題（直方体の虚音源距離、
+**391 項目**（2026-08-21 時点）。解析的に答えが分かる問題（直方体の虚音源距離、
 減衰率が既知の応答など）で数式レベルの正しさを確かめる。
 **数式に関わるコードを変更したら必ず走らせること。**
 

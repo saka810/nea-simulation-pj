@@ -98,6 +98,23 @@ def sound_velocity(temperature=REFERENCE_TEMPERATURE, humidity=REFERENCE_HUMIDIT
     return float(np.sqrt(gamma * GAS_CONSTANT * t_kelvin / molar_mass))
 
 
+def density(temperature=REFERENCE_TEMPERATURE, humidity=REFERENCE_HUMIDITY,
+            pressure=REFERENCE_PRESSURE):
+    """湿り空気の密度 ρ [kg/m³]。
+
+        ρ = p M / (R T)      M は湿り空気の平均モル質量
+
+    音圧レベルの絶対値に要る（`sound_level.level_constant` の `10 log10(ρc/400)`）。
+    20℃ / 湿度 40% / 101.325 kPa で 1.199 kg/m³。**湿るほど軽くなる**
+    （水蒸気のモル質量 18.0 g/mol は乾燥空気 28.96 g/mol より小さい）。
+    """
+    t_kelvin = np.asarray(temperature, dtype=float) + KELVIN
+    x_water = water_vapour_mole_fraction(temperature, humidity, pressure)
+    molar_mass = (1.0 - x_water) * MOLAR_MASS_DRY + x_water * MOLAR_MASS_WATER
+    return float(np.asarray(pressure, dtype=float) * 1000.0 * molar_mass
+                 / (GAS_CONSTANT * t_kelvin))
+
+
 def absorption_coefficient(frequency, temperature=REFERENCE_TEMPERATURE,
                            humidity=REFERENCE_HUMIDITY, pressure=REFERENCE_PRESSURE):
     """空気吸収によるエネルギー減衰係数 m [1/m]。**ISO 9613-1**。
@@ -184,6 +201,16 @@ class Atmosphere:
     @property
     def sound_velocity(self):
         return sound_velocity(self.temperature, self.humidity, self.pressure)
+
+    @property
+    def density(self):
+        """湿り空気の密度 [kg/m³]。音圧レベルの絶対値に要る"""
+        return density(self.temperature, self.humidity, self.pressure)
+
+    @property
+    def impedance(self):
+        """空気の特性インピーダンス ρc [N·s/m³]。20℃ で約 412"""
+        return self.density * self.sound_velocity
 
     def absorption_coefficient(self, frequency):
         return absorption_coefficient(frequency, self.temperature,

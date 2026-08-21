@@ -1920,6 +1920,354 @@ def test_result_naming():
     shutil.rmtree(folder, ignore_errors=True)
 
 
+# ------------------------------------------------ 音圧レベル（依頼 2026-08-21）
+def test_sound_level():
+    print("\n[31] 帯域別の音圧レベルと逆二乗則")
+    import sound_level as sl
+
+    air = at.Atmosphere()
+    f = np.array([1000.0])
+
+    # ---- 定数項 ----
+    check("空気の密度 20℃ で 1.20 kg/m3", np.isclose(air.density, 1.2, atol=0.005),
+          f"{air.density:.4f} kg/m3")
+    check("特性インピーダンス rho*c が 412 前後", 405 < air.impedance < 420,
+          f"{air.impedance:.1f} N s/m3")
+    check("補正項 10log10(rho*c/400) が +0.13 dB 前後",
+          np.isclose(sl.level_constant(air), 0.13, atol=0.02),
+          f"{sl.level_constant(air):+.3f} dB")
+
+    # ---- ★自由音場の理論値が教科書の Lp = Lw - 20log10 r - 11 と一致するか ----
+    # 空気吸収を切って比べる（教科書の式には入っていない）
+    # 教科書の「-11」は 10log10(4pi) = 10.992 dB を丸めた値なので、
+    # 厳密には 10log10(4 pi r^2) で比べる（丸めの 0.008 dB を誤差扱いしないため）
+    for distance in (1.0, 2.0, 10.0):
+        got = float(sl.freefield_level(distance, 100.0, air, frequencies=f,
+                                       air_absorption=False)[0])
+        want = (100.0 - 10.0 * np.log10(4.0 * np.pi * distance ** 2)
+                + sl.level_constant(air))
+        check(f"自由音場 {distance:g} m が Lw-10log10(4 pi r^2) と一致",
+              np.isclose(got, want), f"{got:.4f} dB（式 {want:.4f}）")
+        rounded = 100.0 - 20.0 * np.log10(distance) - 11.0 + sl.level_constant(air)
+        check(f"教科書の Lw-20log10r-11 とも 0.01 dB 以内",
+              abs(got - rounded) < 0.01, f"差 {got - rounded:+.4f} dB")
+
+    # ---- ★逆二乗則（直接音だけ＝無響）----
+    # 反射が無ければ計算結果は自由音場の理論値に厳密に一致するはず
+    errors, levels = [], []
+    for distance in (1.0, 2.0, 4.0, 8.0, 16.0):
+        result = sl.band_levels([distance / air.sound_velocity], [[1.0]],
+                                [distance], air, f, source_power_db=100.0,
+                                verbose=False)
+        errors.append(abs(float(result["excess"][0])))
+        levels.append(float(result["levels"][0]))
+    check("★無響（直接音だけ）なら自由音場の理論値と一致",
+          max(errors) < 1e-9, f"最大差 {max(errors):.2e} dB")
+    drops = -np.diff(levels)
+    check("★距離 2 倍で 6 dB 下がる（逆二乗則）",
+          np.allclose(drops, 6.02, atol=0.05),
+          " / ".join(f"{d:.2f}" for d in drops))
+
+    # ---- PWL を変えるとそのぶん平行移動する（相対値でも形は同じ）----
+    args = ([1.0 / air.sound_velocity], [[1.0]], [1.0], air, f)
+    absolute = sl.band_levels(*args, source_power_db=94.0, verbose=False)
+    relative = sl.band_levels(*args, verbose=False)
+    check("PWL 未入力なら相対値（Lw=0 dB）",
+          relative["relative"] and not absolute["relative"])
+    check("PWL のぶんだけ平行移動する",
+          np.isclose(absolute["levels"][0] - relative["levels"][0], 94.0),
+          f"{absolute['levels'][0] - relative['levels'][0]:.3f} dB")
+
+    # ---- エネルギーの足し合わせ（同じ音が 2 つ来れば +3 dB）----
+    one = sl.band_levels([0.01], [[1.0]], [3.43], air, f, verbose=False)
+    two = sl.band_levels([0.01, 0.01], [[1.0], [1.0]], [3.43, 3.43], air, f,
+                         verbose=False)
+    check("同じ音が 2 つ来ると +3.01 dB",
+          np.isclose(two["levels"][0] - one["levels"][0], 3.0103, atol=1e-6),
+          f"{two['levels'][0] - one['levels'][0]:.4f} dB")
+
+    # ---- 空気吸収が距離とともに効く ----
+    high = np.array([8000.0])
+    near = sl.band_levels([1.0 / air.sound_velocity], [[1.0]], [1.0], air, high,
+                          verbose=False)
+    far = sl.band_levels([50.0 / air.sound_velocity], [[1.0]], [50.0], air, high,
+                         verbose=False)
+    spreading = 20.0 * np.log10(50.0)
+    check("8 kHz は 50 m で逆二乗より余分に減る（空気吸収）",
+          (near["levels"][0] - far["levels"][0]) > spreading + 1.0,
+          f"減衰 {near['levels'][0] - far['levels'][0]:.2f} dB"
+          f"（逆二乗だけなら {spreading:.2f}）")
+
+    # ---- A 特性 ----
+    check("A 特性 1 kHz は 0 dB", np.isclose(sl.a_weighting([1000.0])[0], 0.0))
+    check("A 特性 125 Hz は -16.1 dB",
+          np.isclose(sl.a_weighting([125.0])[0], -16.1))
+
+    # ---- CSV ----
+    import tempfile
+    import table as tb
+    result = sl.band_levels([0.01, 0.02], [[1.0, 0.5], [0.4, 0.2]], [3.43, 6.86],
+                            air, [500.0, 1000.0], source_power_db=90.0,
+                            verbose=False)
+    path = os.path.join(tempfile.mkdtemp(prefix="geosim_spl_"), "spl.csv")
+    sl.write_levels(path, result)
+    back = tb.read_sectioned_table(path)
+    check("spl.csv が区分付きの表で書ける",
+          back is not None and back["labels"] == ("区分", "項目", "総合"),
+          str(None if back is None else back["labels"]))
+    check("Lp が書き戻せる",
+          np.allclose(back["rows"]["Lp_dB"], result["levels"], atol=1e-4))
+    check("総合値（帯域合成）も入る",
+          np.isclose(float(back["values"]["Lp_dB"]), result["overall"], atol=1e-3),
+          back["values"]["Lp_dB"])
+
+
+# ------------------------------------------------------- STI（依頼 2026-08-21）
+def test_speech_transmission_index():
+    print("\n[32] STI（音声伝送指数・IEC 60268-16）")
+    import sound_level as sl
+
+    # ---- ★変調伝達関数が解析解と一致するか ----
+    # 指数減衰 h^2(t) = exp(-13.8 t/T) の MTF は m(F) = 1/sqrt(1+(2 pi F T/13.8)^2)
+    for T in (0.5, 1.0, 2.0):
+        time = np.arange(1e-4, 12.0 * T, 1e-4)
+        energy = np.exp(-13.8 * time / T)[:, None]
+        m = sl.modulation_transfer(time, energy)[0]
+        exact = 1.0 / np.sqrt(1.0 + (2.0 * np.pi * sl.MODULATION_FREQUENCIES
+                                     * T / 13.8) ** 2)
+        check(f"★MTF が解析解と一致（T={T:g} s）",
+              np.allclose(m, exact, atol=1e-5),
+              f"最大差 {np.max(np.abs(m - exact)):.2e}")
+
+    # ---- 重みの合計が 1 になるか（IEC の alpha と beta の関係）----
+    for sex in ("male", "female"):
+        w = sl.STI_WEIGHTS[sex]
+        check(f"{sex} の重み sum(alpha) - sum(beta) = 1",
+              np.isclose(w["alpha"].sum() - w["beta"].sum(), 1.0),
+              f"{w['alpha'].sum() - w['beta'].sum():.4f}")
+        check(f"{sex} の重みは 7 帯域ぶん",
+              len(w["alpha"]) == len(sl.STI_BANDS) and len(w["beta"]) == 6)
+
+    # ---- 反射が無ければ STI は 1 に近い ----
+    air = at.Atmosphere()
+    bands = ab.octave_bands(8)
+    direct = sl.speech_transmission_index([0.01], [np.ones(8)], [3.43], air, bands,
+                                          verbose=False)
+    check("直接音だけなら STI = 1 に近い（変調がそのまま通る）",
+          direct["sti"] > 0.99, f"{direct['sti']:.4f}")
+    check("評価は「優」", direct["rating"].startswith("優"), direct["rating"])
+
+    # ---- 残響が長くなると STI が下がる（単調）----
+    values = []
+    for T in (0.3, 0.6, 1.0, 2.0):
+        time = np.arange(1e-3, 10.0, 2e-3)
+        # 距離を一定にして減衰だけ変える（received_energy の 1/d^2 を効かせない）
+        energy = np.tile(np.exp(-13.8 * time / T)[:, None], (1, 8))
+        result = sl.speech_transmission_index(time, energy, np.full(len(time), 3.43),
+                                              air, bands, verbose=False)
+        values.append(result["sti"])
+    check("残響が長いほど STI が下がる", all(np.diff(values) < 0),
+          " -> ".join(f"{v:.3f}" for v in values))
+    # 純粋な指数減衰・騒音なしの STI は文献値と合う（T=1 s で 0.59 前後）
+    check("T=1 s の STI が文献値 0.59 前後",
+          abs(values[2] - 0.59) < 0.03, f"{values[2]:.3f}")
+
+    # ---- 背景騒音を入れると下がる ----
+    time = np.arange(1e-3, 10.0, 2e-3)
+    energy = np.tile(np.exp(-13.8 * time / 0.6)[:, None], (1, 8))
+    quiet = sl.speech_transmission_index(time, energy, np.full(len(time), 3.43),
+                                         air, bands, source_power_db=90.0,
+                                         verbose=False)
+    noisy = sl.speech_transmission_index(time, energy, np.full(len(time), 3.43),
+                                         air, bands, source_power_db=90.0,
+                                         noise_level_db=60.0, verbose=False)
+    check("騒音を入れると STI が下がる", noisy["sti"] < quiet["sti"],
+          f"静か {quiet['sti']:.3f} -> 騒音 60 dB {noisy['sti']:.3f}")
+    check("騒音を使ったかどうかが分かる",
+          noisy["noise_used"] and not quiet["noise_used"])
+
+    # ---- 6 バンド（125〜4k）では 8 kHz が無いので重みを直す ----
+    six = sl.speech_transmission_index([0.01], [np.ones(6)], [3.43], air,
+                                       ab.octave_bands(6), verbose=False)
+    check("6 バンドでも計算できる（8 kHz の重みを外して正規化）",
+          0.99 < six["sti"] <= 1.0 and "8000 Hz" in six["weights_note"],
+          f"{six['sti']:.4f} / {six['weights_note'][:24]}")
+
+    # ---- 評価区分 ----
+    for value, want in ((0.80, "優"), (0.65, "良"), (0.50, "可"),
+                        (0.35, "不可"), (0.10, "劣")):
+        check(f"STI {value} の評価が「{want}」",
+              sl.sti_rating(value).startswith(want), sl.sti_rating(value))
+
+    # ---- CSV ----
+    import tempfile
+    import table as tb
+    path = os.path.join(tempfile.mkdtemp(prefix="geosim_sti_"), "sti.csv")
+    sl.write_sti(path, direct)
+    back = tb.read_sectioned_table(path)
+    check("sti.csv の総合値が 3 列目に入る",
+          np.isclose(float(back["values"]["STI"]), direct["sti"], atol=1e-3),
+          back["values"]["STI"])
+    check("帯域別 MTI が書き戻せる",
+          np.allclose(back["rows"]["MTI"], direct["mti"], atol=1e-4,
+                      equal_nan=True))
+    check("変調伝達関数も残る（14 行）",
+          sum(1 for s, _ in back["order"] if s == "変調伝達関数") == 14)
+
+
+# ----------------------------------------------- 材料条件表（依頼 2026-08-21）
+def test_condition_table():
+    print("\n[33] 材料条件表（レイヤー名 → 吸音材）")
+    import re
+    import shutil
+    import tempfile
+
+    import condition_table as ct
+    import project as pj
+
+    folder = tempfile.mkdtemp(prefix="geosim_cond_")
+    project = pj.Project(folder, name="条件表テスト", dxf=TEST_DXF, band_number=6)
+    project.ensure_dirs()
+
+    library = ab.MaterialLibrary()
+    library.add("コンクリート", [0.02] * 6)
+    library.add("吸音板", [0.6] * 6)
+    library.add_alias("1", "コンクリート")
+
+    model = rd.read_model(TEST_DXF, band_number=6, verbose=False)
+    check("条件表は最初は無い", not ct.exists(project))
+
+    path = ct.update(project, model, library, verbose=False)
+    check("材料条件表が作られる", os.path.isfile(path), os.path.basename(path))
+    check("置き場はプロジェクト直下（結果ではなく入力なので）",
+          os.path.dirname(path) == project.folder)
+
+    assignment, records = ct.read(path)
+    layers = [r for r in records if r[0] == ct.SECTION_LAYER]
+    check("DXF のレイヤが全部並ぶ", len(layers) == len(model.layer_counts),
+          f"{len(layers)} 行 / レイヤ {len(model.layer_counts)}")
+    check("面数と面積が参考として入る",
+          all(r[3] and r[4] for r in layers), str(layers[0]))
+    check("先頭の番号で引ける材料は自動で入る",
+          assignment.get("1") == "コンクリート", str(assignment))
+
+    # ---- ★利用者が書いた材料名は上書きされない ----
+    body = open(path, encoding="utf-8-sig").read()
+    body = re.sub(r"レイヤ,2,[^,]*,", "レイヤ,2,吸音板,", body)
+    open(path, "w", encoding="utf-8-sig").write(body)
+    assignment, _ = ct.read(path)
+    check("書き換えた材料名が読める", assignment.get("2") == "吸音板", str(assignment))
+
+    ct.update(project, model, library, verbose=False)
+    assignment, _ = ct.read(path)
+    check("★更新しても利用者の材料名は残る（面積などだけ書き直す）",
+          assignment.get("2") == "吸音板", str(assignment))
+
+    # ---- 条件表が project.json より優先される ----
+    project.assignment = {"2": "コンクリート"}
+    check("★条件表があればそちらを使う",
+          ct.assignment_for(project, verbose=False).get("2") == "吸音板")
+    os.remove(path)
+    check("条件表が無ければ project.json の指定に戻る",
+          ct.assignment_for(project, verbose=False).get("2") == "コンクリート")
+
+    # ---- 吸音率テーブルに効いているか（レイヤ 2 が吸音板になる）----
+    table = library.absorption_table({"2": "吸音板"}, band_number=6, warn=False)
+    changed = rd.read_model(TEST_DXF, band_number=6, absorption_table=table,
+                            verbose=False)
+    alpha = {m.material: float(np.max(m.absorption_coefficient))
+             for m in changed.mesh}
+    check("条件表の割り当てが実際の吸音率に反映される",
+          any(v > 0.3 for v in alpha.values()), str(alpha))
+
+    # ---- モデルから消えたレイヤも記録として残る ----
+    ct.update(project, model, library, assignment={"消えたレイヤ": "吸音板"},
+              verbose=False)
+    body = open(ct.path(project), encoding="utf-8-sig").read()
+    body = body.replace("レイヤ,1,", "レイヤ,消えたレイヤ,")
+    open(ct.path(project), "w", encoding="utf-8-sig").write(body)
+    ct.update(project, model, library, verbose=False)
+    _, records = ct.read(ct.path(project))
+    check("モデルに無いレイヤは（モデルに無し）として残す",
+          any(r[0] == ct.SECTION_GONE and r[1] == "消えたレイヤ" for r in records),
+          str([r[:2] for r in records]))
+
+    shutil.rmtree(folder, ignore_errors=True)
+
+
+# --------------------------------------------- 結果一式 Excel（依頼 2026-08-21）
+def test_workbook():
+    print("\n[34] 結果一式の Excel（CSV とは役割を分ける）")
+    import shutil
+    import tempfile
+
+    import project as pj
+    import run_project
+    import workbook as wb
+
+    try:
+        from openpyxl import load_workbook
+    except ImportError:
+        check("openpyxl が入っている（Excel 出力に要る）", False,
+              "pip install -r requirements.txt")
+        return
+
+    folder = tempfile.mkdtemp(prefix="geosim_xlsx_")
+    project = pj.Project(folder, name="エクセル室_条件A", dxf=TEST_DXF,
+                         band_number=6, rays=2000, nref=6, radius=0.3,
+                         max_time=0.5, statistical=True, volume=6.0,
+                         source_power_db=90.0)
+    if os.path.exists(ABSORPTION):
+        project.absorption_csv = ABSORPTION
+        project.absorption_kind = "random"
+    project.ensure_dirs()
+    run_project.run(project, verbose=False, make_figures=False)
+
+    path = wb.path(project)
+    check("結果一式の xlsx が作られる", os.path.isfile(path), os.path.basename(path))
+    check("名前に対象室＋条件名が入る",
+          os.path.basename(path).startswith("エクセル室_条件A_"))
+
+    book = load_workbook(path)
+    for name in (wb.SHEET_OVERVIEW, wb.SHEET_REVERBERATION, wb.SHEET_CLARITY,
+                 wb.SHEET_LEVEL, wb.SHEET_STI, wb.SHEET_ROOM):
+        check(f"シート『{name}』がある", name in book.sheetnames,
+              str(book.sheetnames))
+    charts = sum(len(book[n]._charts) for n in book.sheetnames)
+    check("グラフが入っている（Excel 側で作り直さなくてよい）", charts >= 4,
+          f"{charts} 個")
+
+    sheet = book[wb.SHEET_REVERBERATION]
+    check("周波数が横に並ぶ（表の共通ルールのまま）",
+          [c.value for c in sheet[1]][:2] == ["受音点", "項目"]
+          and float(sheet.cell(row=1, column=3).value) == 125.0,
+          str([c.value for c in sheet[1]]))
+    check("数値は数値として入る（Excel でグラフにできる）",
+          isinstance(sheet.cell(row=2, column=3).value, float),
+          str(type(sheet.cell(row=2, column=3).value)))
+
+    # ---- ★CSV は残っている（役割を分ける）----
+    rec1 = project.path(pj.RESULT_DIR, pj.RECEIVER_DIR % 1)
+    check("★CSV は今のまま残す（逐次読み込み・描き直しに使う）",
+          os.path.isfile(os.path.join(rec1, "エクセル室_条件A_rt.csv"))
+          and os.path.isfile(os.path.join(rec1, "エクセル室_条件A_spl.csv")),
+          str(sorted(os.listdir(rec1))))
+
+    # ---- 雛形に流し込む（体裁を残す）----
+    template = os.path.join(folder, "雛形.xlsx")
+    book2 = load_workbook(path)
+    book2[wb.SHEET_OVERVIEW]["E1"] = "会社の雛形（この書式は残ること）"
+    book2.save(template)
+    wb.write(project, template=template, verbose=False)
+    filled = load_workbook(wb.path(project))
+    check("★雛形の書式（余白のセル）が残る",
+          filled[wb.SHEET_OVERVIEW]["E1"].value == "会社の雛形（この書式は残ること）",
+          str(filled[wb.SHEET_OVERVIEW]["E1"].value))
+    check("雛形に値が入る",
+          filled[wb.SHEET_REVERBERATION].cell(row=1, column=1).value == "受音点")
+
+    shutil.rmtree(folder, ignore_errors=True)
+
 def main():
     print("geosim 数値検証")
     print(f"  Python {sys.version.split()[0]} / numpy {np.__version__}")
@@ -1936,7 +2284,9 @@ def main():
                test_reflection_vectorised, test_face_groups,
                test_ray_filter, test_area_and_volume,
                test_patch_collision, test_shared_trace_and_batch_backtrace,
-               test_result_naming):
+               test_result_naming, test_sound_level,
+               test_speech_transmission_index, test_condition_table,
+               test_workbook):
         fn()
 
     failed = [name for name, ok in _results if not ok]

@@ -45,6 +45,11 @@ NUMBER_FIELDS = [
     ("pressure", "気圧 [kPa]", float, "既定 101.325"),
     ("volume", "室容積 [m³]", float,
      "統計残響式に使う。空欄なら閉じた形状から自動算出（開いた形状では要指定）"),
+    # 音圧レベルの絶対値・STI の SNR に要る（2026-08-21 ユーザー要望）
+    ("source_power_db", "音源 PWL [dB]", float,
+     "点音源のパワーレベル。空欄なら音圧レベルは相対値（Lw=0 dB）で出る"),
+    ("noise_level_db", "背景騒音 [dB]", float,
+     "STI の SNR に使う。空欄なら騒音なし（理想）で計算。PWL と両方要る"),
 ]
 
 
@@ -171,6 +176,12 @@ class SetupWindow:
                 ttk.Button(cell, text="モデルから見積もる", width=18,
                            command=self._estimate_volume).pack(side="left",
                                                                padx=(0, 8))
+            if key == "source_power_db":
+                # ★材料条件表（レイヤー名 → 吸音材）を作って開く。
+                #   CAD を触らずに材料を差し替えるための入口（2026-08-21 ユーザー要望）
+                ttk.Button(cell, text="材料条件表を開く", width=18,
+                           command=self._open_condition_table).pack(side="left",
+                                                                    padx=(0, 8))
             if key == "rays":
                 # 音線がどう飛ぶかは**室形状と関係ない**ので、ここで先に見られるようにする
                 ttk.Button(cell, text="音線の飛び方を見る", width=18,
@@ -279,8 +290,10 @@ class SetupWindow:
         for key, _label, cast, _hint in NUMBER_FIELDS:
             text = self.vars[key].get().strip()
             if not text:
-                setattr(self.project, key, None if key == "volume" else
-                        pj.DEFAULTS[key])
+                # 空欄を「未入力（None）」として扱う条件。既定値に戻してはいけない
+                # （PWL は None のとき相対値、0 dB のときは絶対値 0 dB を意味する）
+                setattr(self.project, key,
+                        None if pj.DEFAULTS[key] is None else pj.DEFAULTS[key])
                 continue
             try:
                 setattr(self.project, key, cast(float(text)) if cast is int
@@ -398,6 +411,44 @@ class SetupWindow:
         self.project.save()
         self.action = "normals"
         self.root.destroy()
+
+    def _open_condition_table(self):
+        """材料条件表（`材料条件表.csv`）を作って、既定のアプリで開く。
+
+        レイヤー名と吸音材の対応をここで決められるようにするためのもの。
+        表が無ければモデルを読んで作る（面数・面積・吸音率の参考列も入る）。
+        """
+        import condition_table as ct
+
+        problem = self._collect()
+        if problem:
+            messagebox.showwarning("条件を確認してください", problem)
+            return
+        try:
+            import absorption as ab
+            import read_dxffile as rd
+
+            library = (ab.MaterialLibrary.from_csv(self.project.absorption_path,
+                                                   kind=self.project.absorption_kind)
+                       if self.project.absorption_path else None)
+            assignment = ct.assignment_for(self.project)
+            table = (library.absorption_table(assignment,
+                                              band_number=self.project.band_number)
+                     if library else None)
+            model = rd.read_model(self.project.dxf_path, unit=self.project.unit,
+                                  absorption_table=table,
+                                  band_number=self.project.band_number,
+                                  verbose=False)
+            self.project.save()
+            path = ct.update(self.project, model, library, assignment)
+        except Exception as e:
+            messagebox.showerror("材料条件表を作れませんでした",
+                                 f"{type(e).__name__}: {e}")
+            return
+        try:
+            os.startfile(path)      # Excel など既定のアプリで開く
+        except Exception:
+            messagebox.showinfo("材料条件表", f"作りました: {path}")
 
     def _on_view(self):
         """計算し直さずに、保存済みの結果を開く。"""

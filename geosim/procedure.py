@@ -49,6 +49,8 @@ def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref
             reverberation_filename=None, decay_filename=None,
             room_filename=None, statistical=True,
             clarity=True, clarity_filename=None,
+            source_power_db=None, noise_level_db=None,
+            level_filename=None, sti_filename=None,
             flip_faces=None, face_materials=None, traced_history=None,
             progress=None):
     """
@@ -128,6 +130,15 @@ def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref
         「初期の音が後から来る音に対してどれだけ強いか」を見る。会議室・教室で効く。
     clarity_filename : str | None
         明瞭度の指標の CSV 出力先。
+    source_power_db : float | list | None
+        点音源のパワーレベル PWL [dB]（数値なら全帯域同じ、リストなら帯域ごと）。
+        **音圧レベルの絶対値に要る。None なら Lw = 0 dB として相対値で出す**
+        （帯域ごとの相対関係と距離依存性はそのまま読めるので逆二乗の確認には足りる）。
+    noise_level_db : float | list | None
+        背景騒音の音圧レベル [dB]。STI の SNR に使う。
+        **PWL と両方そろっていないと使えない**（絶対値が要る）。
+    level_filename / sti_filename : str | None
+        帯域別の音圧レベル／STI の CSV 出力先（`sound_level.py`）。
     flip_faces : iterable[int] | None
         法線を反転する面インデックス（`face_editor.py` で目で見て直したぶん）。
         自動判定のあとに重ねて適用される。
@@ -146,6 +157,7 @@ def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref
 
     戻り値:
         dict … 'model' / 'pulses' / 'impulse' / 'reverberation' / 'statistical'
+               / 'clarity' / 'level'（音圧レベル）/ 'sti'
                （計算しなかったものは None）
     """
     def report(stage, fraction=None):
@@ -315,6 +327,29 @@ def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref
             rv.write_clarity_measures(clarity_filename, clarity_result)
             print(f"[procedure] 明瞭度の指標を書き出しました: {clarity_filename}")
 
+    # 音圧レベル（帯域別）と STI。**インパルス応答ではなくパルス列から出す。**
+    # どちらも「受音点で受け取るエネルギー」から決まるので、
+    # 帯域フィルタを通した波形を積分するより素直で速い（`sound_level.py` 参照）
+    level_result, sti_result = None, None
+    if len(pulses):
+        import sound_level as sl
+        report("音圧レベルと STI")
+        source_distance = float(np.linalg.norm(
+            np.asarray(receiver_point, dtype=float)
+            - np.asarray(soundsource_point, dtype=float)))
+        level_result = sl.band_levels(
+            pulses.time, pulses.energy, pulses.distance, atmosphere, frequencies,
+            source_power_db=source_power_db, source_distance=source_distance)
+        if level_filename is not None:
+            sl.write_levels(level_filename, level_result)
+            print(f"[procedure] 音圧レベルを書き出しました: {level_filename}")
+        sti_result = sl.speech_transmission_index(
+            pulses.time, pulses.energy, pulses.distance, atmosphere, frequencies,
+            source_power_db=source_power_db, noise_level_db=noise_level_db)
+        if sti_filename is not None:
+            sl.write_sti(sti_filename, sti_result)
+            print(f"[procedure] STI を書き出しました: {sti_filename}")
+
     # 統計残響式との突き合わせ。**どちらが正しいという話ではない**。
     # 統計式は拡散音場を前提にした平均像、シミュレーションは特定の受音点での実際の減衰。
     # 大きく食い違うときは、音場が拡散していないか設定に問題があるかの手がかりになる
@@ -337,7 +372,8 @@ def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref
 
     return {"model": model, "pulses": pulses, "impulse": impulse,
             "reverberation": reverberation, "statistical": statistical_result,
-            "clarity": clarity_result, "frequencies": frequencies,
+            "clarity": clarity_result, "level": level_result, "sti": sti_result,
+            "frequencies": frequencies,
             "atmosphere": atmosphere,
             "soundsource_point": np.asarray(soundsource_point, dtype=float),
             "receiver_point": np.asarray(receiver_point, dtype=float)}
@@ -388,6 +424,9 @@ def main():
                    help="受音点座標 [m]。省略すると DXF の rec レイヤから取る")
     p.add_argument("--no-impulse", action="store_true",
                    help="インパルス応答・残響時間を計算しない（音線追跡だけ見たいとき）")
+    p.add_argument("--source-power", type=float, default=None,
+                   help="点音源のパワーレベル PWL [dB]。"
+                        "省略すると音圧レベルは相対値（Lw=0 dB）で出る")
     p.add_argument("--no-statistical", action="store_true",
                    help="Sabine / Eyring-Knudsen の統計残響式を計算しない")
     a = p.parse_args()
@@ -417,7 +456,10 @@ def main():
             reverberation_filename=None if a.no_impulse else out("rt.csv"),
             decay_filename=None if a.no_impulse else out("decay.csv"),
             statistical=not a.no_statistical,
-            room_filename=None if a.no_statistical else out("吸音率と理論値.csv"))
+            room_filename=None if a.no_statistical else out("吸音率と理論値.csv"),
+            source_power_db=a.source_power,
+            level_filename=None if a.no_impulse else out("spl.csv"),
+            sti_filename=None if a.no_impulse else out("sti.csv"))
 
 
 if __name__ == "__main__":

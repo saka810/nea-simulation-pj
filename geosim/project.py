@@ -67,6 +67,8 @@ RESULT_FILES = {
     "rt": "rt.csv",
     "decay": "decay.csv",
     "clarity": "clarity.csv",
+    "spl": "spl.csv",
+    "sti": "sti.csv",
     "room": "吸音率と理論値.csv",
     "raylog": "raylog.npz",
 }
@@ -92,6 +94,7 @@ def safe_name(text):
     for character in UNSAFE_CHARACTERS:
         text = text.replace(character, "_")
     return "_".join(text.split())
+
 
 # project.json に書き出す条件と既定値。
 # ここに無いキーは保存されないので、**新しい計算条件を足したらここにも足すこと**
@@ -126,6 +129,13 @@ DEFAULTS = {
     "head_azimuth": 0.0,
     "raylog_max_rays": 2000,
     "statistical": True,
+    # 点音源のパワーレベル PWL [dB]。数値なら全帯域同じ、リストなら帯域ごと。
+    # **None なら相対値**（Lw = 0 dB として計算し、出力にそう書く）。
+    # 絶対値の音圧レベルを出すのに要る（`sound_level.py`）
+    "source_power_db": None,
+    # 背景騒音の音圧レベル [dB]（帯域ごと。数値なら全帯域同じ）。
+    # STI の SNR に使う。**PWL と両方そろっていないと使えない**（絶対値が要る）
+    "noise_level_db": None,
 }
 
 
@@ -389,6 +399,26 @@ class Project:
         """`index` 番目の受音点の正面方向 [度]。"""
         return self.head_azimuth_list(index + 1)[index]
 
+    # ---- 帯域ごとの値（音源パワーレベル・背景騒音）--------------------
+
+    def band_values(self, key, band_number=None):
+        """`source_power_db` のような「数値でもリストでもよい」条件を配列で返す。
+
+        数値なら全帯域に同じ値、リストなら帯域ごと（足りない分は最後の値で伸ばす）。
+        未設定なら None。**None と 0 は意味が違う**（未入力か 0 dB か）ので、
+        呼ぶ側は None を「未入力」として扱うこと。
+        """
+        value = getattr(self, key)
+        if value is None:
+            return None
+        count = band_number or self.band_number
+        if np.isscalar(value):
+            return np.full(count, float(value))
+        values = [float(v) for v in value]
+        if not values:
+            return None
+        return np.array((values + [values[-1]] * count)[:count])
+
     # ---- 面ごとの吸音材（materials.json） --------------------------------
     #
     # レイヤで吸音材を分けられないモデル（1 つの 3DSOLID で出来ていて面ごとの
@@ -496,41 +526,29 @@ def write_room_csv(filename, statistical, frequencies=None):
         残響時間理論値,eyring_s,,…
         残響時間理論値,eyring_knudsen_s,,…
 
-    **周波数は横**（`table.py` の共通ルール）。1 行の意味が区分ごとに変わるので
-    `table.write_frequency_table` は使わず、1 列目に区分を立てて書く。
+    **周波数は横**（`table.py` の共通ルール。「区分付きの表」の形）。
 
     引数:
         statistical … `reverberation.statistical_reverberation()` の戻り値
                       （`['surface']` に材料別の面積・吸音率が入っている）
     """
-    import csv as _csv
+    import table as tb
 
-    os.makedirs(os.path.dirname(os.path.abspath(filename)) or ".", exist_ok=True)
     if frequencies is None:
         frequencies = statistical["frequencies"]
-    frequencies = np.asarray(frequencies, dtype=float).ravel()
     surface = statistical["surface"]
 
-    def cells(values):
-        return ["" if np.isnan(v) else "%.6g" % v
-                for v in np.asarray(values, dtype=float).ravel()]
-
-    with open(filename, "w", encoding="utf-8-sig", newline="") as f:
-        writer = _csv.writer(f)
-        writer.writerow(["区分", "項目", "面積_m2"]
-                        + [f"{v:.0f}" for v in frequencies])
-        # ① 材料別の吸音率（面積も添える。どの材料が効いているかは面積次第）
-        for name, area, alpha in zip(surface["names"], surface["areas"],
-                                     surface["absorption"]):
-            writer.writerow([ROOM_SECTIONS[0], name, "%.6f" % area] + cells(alpha))
-        # ② 平均吸音率（面積の欄は総表面積）
-        for label, key in ROOM_MEAN_ROWS:
-            area = ("%.6f" % surface["total_area"]) if key == "mean_absorption" else ""
-            writer.writerow([ROOM_SECTIONS[1], label, area] + cells(statistical[key]))
-        # ③ 残響時間理論値
-        for label, key in ROOM_STATISTICAL_ROWS:
-            writer.writerow([ROOM_SECTIONS[2], label, ""] + cells(statistical[key]))
-    return filename
+    rows = [(ROOM_SECTIONS[0], name, area, alpha)
+            for name, area, alpha in zip(surface["names"], surface["areas"],
+                                         surface["absorption"])]
+    for label, key in ROOM_MEAN_ROWS:
+        # 面積の欄は平均吸音率の行だけ埋める（総表面積）。他は帯域の値だけ
+        area = surface["total_area"] if key == "mean_absorption" else None
+        rows.append((ROOM_SECTIONS[1], label, area, statistical[key]))
+    for label, key in ROOM_STATISTICAL_ROWS:
+        rows.append((ROOM_SECTIONS[2], label, None, statistical[key]))
+    return tb.write_sectioned_table(filename, frequencies, rows,
+                                    value_label="面積_m2")
 
 
 def read_room_csv(path):
@@ -543,42 +561,36 @@ def read_room_csv(path):
         'rows'     … 区分を除いた {項目: (nf,)}（`平均吸音率` / `sabine_s` …）
         'sections' … {区分: {項目: (nf,)}}
     """
-    import csv as _csv
+    import table as tb
 
-    if not path or not os.path.exists(path):
-        return None
-    with open(path, encoding="utf-8-sig", newline="") as f:
-        table = [row for row in _csv.reader(f) if row and any(c.strip() for c in row)]
-    if len(table) < 2 or table[0][0].strip() != "区分":
+    table = tb.read_sectioned_table(path)
+    if table is None or table["labels"][0] != "区分":
         return None
 
-    def number(text):
-        text = (text or "").strip()
-        try:
-            return float(text)
-        except ValueError:
-            return np.nan
-
-    frequencies = np.array([number(c) for c in table[0][3:]])
-    sections, rows = {}, {}
     names, areas, alphas = [], [], []
-    for row in table[1:]:
-        section, label = row[0].strip(), row[1].strip()
-        values = np.array([number(c) for c in row[3:3 + len(frequencies)]])
-        sections.setdefault(section, {})[label] = values
-        rows[label] = values
-        if section == ROOM_SECTIONS[0]:
-            names.append(label)
-            areas.append(number(row[2]))
-            alphas.append(values)
+    for section, item in table["order"]:
+        if section != ROOM_SECTIONS[0]:
+            continue
+        names.append(item)
+        try:
+            areas.append(float(table["values"][item]))
+        except ValueError:
+            areas.append(np.nan)
+        alphas.append(table["sections"][section][item])
 
-    surface = {"names": names, "areas": np.array(areas),
-               "absorption": np.array(alphas) if alphas else np.zeros((0, len(frequencies))),
-               "total_area": float(np.nansum(areas)) if areas else 0.0,
-               "materials": {n: {"area": a, "absorption": v}
-                             for n, a, v in zip(names, areas, alphas)}}
-    return {"frequencies": frequencies, "surface": surface,
-            "rows": rows, "sections": sections}
+    surface = _surface_dict(names, areas, alphas, len(table["frequencies"]))
+    return {"frequencies": table["frequencies"], "surface": surface,
+            "rows": table["rows"], "sections": table["sections"]}
+
+
+def _surface_dict(names, areas, alphas, band_number):
+    """`reverberation.surface_summary()` と同じ形の dict を作る。"""
+    return {"names": list(names), "areas": np.array(areas, dtype=float),
+            "absorption": (np.array(alphas, dtype=float) if len(alphas)
+                           else np.zeros((0, band_number))),
+            "total_area": float(np.nansum(areas)) if len(areas) else 0.0,
+            "materials": {n: {"area": a, "absorption": np.asarray(v)}
+                          for n, a, v in zip(names, areas, alphas)}}
 
 
 def _read_csv(path):
@@ -660,12 +672,7 @@ def _load_legacy_room(project):
         if frequencies is None:
             frequencies = np.array([float(header[i].split("_")[1].rstrip("Hz"))
                                     for i in columns])
-    surface = {"names": names, "areas": np.array(areas),
-               "absorption": np.array(alphas) if alphas
-               else np.zeros((0, len(frequencies))),
-               "total_area": float(np.nansum(areas)) if areas else 0.0,
-               "materials": {n: {"area": a, "absorption": np.asarray(v)}
-                             for n, a, v in zip(names, areas, alphas)}}
+    surface = _surface_dict(names, areas, alphas, len(frequencies))
     return {"frequencies": frequencies, "surface": surface,
             "rows": rows, "sections": {}}
 

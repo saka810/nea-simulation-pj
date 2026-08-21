@@ -894,9 +894,26 @@ def edit(project, model=None, off_screen=False, screenshot=None):
             print(f"[face_editor] 受音点の向きを保存しました: "
                   + " / ".join(f"{k + 1}点目 {v:.0f}°"
                                for k, v in enumerate(editor.head_azimuth)))
+        # ★画面で貼った吸音材を**材料条件表にも記録する**（依頼 2026-08-21）。
+        #   「ソフト上で吸音材を変えたら、その記録が残って見返せる」ようにするため
+        try:
+            import condition_table as ct
+            ct.update(project, model, _library_for(project))
+        except Exception as error:
+            print(f"[face_editor] 材料条件表を更新できませんでした: "
+                  f"{type(error).__name__}: {error}")
     else:
         print("[face_editor] 保存せずに閉じました（前回の指定のままです）")
     return saved, editor.flipped
+
+
+def _library_for(project):
+    """吸音材の一覧（材料条件表の参考列に使う）。無ければ None。"""
+    if not project.absorption_path:
+        return None
+    import absorption as ab
+    return ab.MaterialLibrary.from_csv(project.absorption_path,
+                                       kind=project.absorption_kind)
 
 
 def load_model_for(project, verbose=True):

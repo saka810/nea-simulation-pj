@@ -9,6 +9,8 @@
     <対象室_条件>_まとめ_残響時間.csv   EDT / T20 / T30 を受音点ごと ＋ 平均 ＋ **理論値**
                                        （Sabine / Eyring / Eyring-Knudsen）
     <対象室_条件>_まとめ_明瞭度.csv     C50 / C80 / D50 / Ts を受音点ごと ＋ 平均
+    <対象室_条件>_まとめ_音圧レベル.csv  帯域別の Lp と**自由音場（逆二乗）との差**
+    <対象室_条件>_まとめ_STI.csv         STI と帯域別 MTI
 
 **周波数は横**（`table.py` の共通ルール）。1 列目が「受音点」、2 列目が「項目」で、
 3 列目以降が周波数。受音点ごとの CSV（`rt.csv` など）はそのまま残す。
@@ -28,6 +30,15 @@ import project as pj
 # まとめ表のファイル名
 REVERBERATION_FILE = "まとめ_残響時間.csv"
 CLARITY_FILE = "まとめ_明瞭度.csv"
+LEVEL_FILE = "まとめ_音圧レベル.csv"
+STI_FILE = "まとめ_STI.csv"
+
+# 音圧レベルのまとめに載せる行（`spl.csv` の項目名）。
+# **自由音場との差を必ず入れる**（逆二乗がどれだけ成り立っているかを見るため）
+LEVEL_ROWS = ["Lp_dB", "直接音_dB", "反射音_dB", "自由音場_dB", "自由音場との差_dB"]
+
+# レベルの平均は**エネルギー平均**で取る（dB をそのまま平均してはいけない）
+LEVEL_ENERGY_AVERAGE = True
 
 # `rt.csv` / `clarity.csv` から拾う行と、まとめ表での並び順
 REVERBERATION_ROWS = ["EDT_s", "T20_s", "T30_s"]
@@ -92,19 +103,35 @@ def _read(path):
     return frequencies, values
 
 
-def _write(filename, frequencies, records):
+def _write(filename, frequencies, records, extra_label=None):
     """1 列目「受音点」・2 列目「項目」・3 列目以降が周波数の CSV を書く。
 
     `table.write_frequency_table` は 1 列目が 1 つだけなので、受音点と項目の
     2 段になるここでは使わずに書く（周波数を横に並べる約束は同じ）。
     """
     os.makedirs(os.path.dirname(os.path.abspath(filename)) or ".", exist_ok=True)
+
+    def cell(value):
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        return "" if np.isnan(value) else "%.12g" % value
+
     with open(filename, "w", encoding="utf-8-sig", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["受音点", "項目"] + [f"{v:.0f}" for v in frequencies])
-        for who, what, values in records:
-            writer.writerow([who, what] + ["" if v is None or np.isnan(v)
-                                           else "%.12g" % v for v in values])
+        head = ["受音点", "項目"] + ([extra_label] if extra_label else [])
+        writer.writerow(head + [f"{v:.0f}" for v in frequencies])
+        for record in records:
+            if extra_label:
+                who, what, extra, values = record
+                lead = [who, what, cell(extra)]
+            else:
+                who, what, values = record
+                lead = [who, what]
+            band = ([""] * len(frequencies) if values is None
+                    else [cell(v) for v in values])
+            writer.writerow(lead + band)
     return filename
 
 
@@ -200,10 +227,106 @@ def write_clarity_summary(project, verbose=True):
     return path
 
 
+def _read_sectioned(project, folder, filename):
+    """区分付きの表（`spl.csv` / `sti.csv`）を読む。無ければ None。"""
+    import table as tb
+    return tb.read_sectioned_table(_find(project, folder, filename))
+
+
+def _level_average(values):
+    """レベルの平均。**dB をそのまま平均せずエネルギーで平均する。**
+
+    3 dB 違う 2 点の平均は 1.5 dB ではなく約 1.8 dB。
+    測定点をまたいだ代表値を出すときはこちらが正しい。
+    """
+    block = np.array(values, dtype=float)
+    with np.errstate(invalid="ignore"):
+        return 10.0 * np.log10(np.nanmean(10.0 ** (block / 10.0), axis=0))
+
+
+def write_level_summary(project, verbose=True):
+    """音圧レベルのまとめ表。受音点ごと ＋ 平均（エネルギー平均）。
+
+    3 列目に**音源距離**を入れてある。距離と Lp を並べれば
+    そのまま逆二乗（6 dB/倍距離）の確認に使える（依頼 2026-08-21）。
+    """
+    folders = receiver_folders(project)
+    frequencies, records, gathered = None, [], {k: [] for k in LEVEL_ROWS}
+
+    for name, folder in folders:
+        table = _read_sectioned(project, folder, "spl.csv")
+        if table is None:
+            continue
+        frequencies = frequencies if frequencies is not None else table["frequencies"]
+        distance = table["values"].get("自由音場_dB", "")
+        for key in LEVEL_ROWS:
+            if key in table["rows"]:
+                records.append((name, key, distance if key == "Lp_dB" else None,
+                                table["rows"][key]))
+                gathered[key].append(table["rows"][key])
+    if frequencies is None:
+        return None
+
+    for key in LEVEL_ROWS:
+        if gathered[key]:
+            average = (_level_average(gathered[key]) if LEVEL_ENERGY_AVERAGE
+                       else np.nanmean(np.array(gathered[key]), axis=0))
+            records.append(("平均", key, None, average))
+
+    path = os.path.join(project.folder, pj.RESULT_DIR,
+                        project.prefixed(LEVEL_FILE))
+    _write(path, frequencies, records, extra_label="音源距離_m")
+    if verbose:
+        print(f"[まとめ] 音圧レベル（{len(folders)} 点 ＋ 平均）: {path}")
+    return path
+
+
+def write_sti_summary(project, verbose=True):
+    """STI のまとめ表。受音点ごと（総合値 ＋ 帯域別 MTI）＋ 平均。"""
+    folders = receiver_folders(project)
+    frequencies, records, values, band_values = None, [], [], []
+
+    for name, folder in folders:
+        table = _read_sectioned(project, folder, "sti.csv")
+        if table is None:
+            continue
+        frequencies = frequencies if frequencies is not None else table["frequencies"]
+        sti = table["values"].get("STI", "")
+        records.append((name, "STI", sti, table["rows"].get("MTI")))
+        records.append((name, "評価", table["values"].get("評価", ""), None))
+        try:
+            values.append(float(sti))
+        except ValueError:
+            pass
+        if "MTI" in table["rows"]:
+            band_values.append(table["rows"]["MTI"])
+    if frequencies is None:
+        return None
+
+    if values:
+        import sound_level as sl
+        mean = float(np.mean(values))
+        records.append(("平均", "STI", "%.3f" % mean,
+                        np.nanmean(np.array(band_values), axis=0)
+                        if band_values else None))
+        records.append(("平均", "評価", sl.sti_rating(mean), None))
+        if len(values) > 1:
+            records.append(("ばらつき", "STI",
+                            "%.3f" % (max(values) - min(values)), None))
+
+    path = os.path.join(project.folder, pj.RESULT_DIR, project.prefixed(STI_FILE))
+    _write(path, frequencies, records, extra_label="総合")
+    if verbose:
+        print(f"[まとめ] STI（{len(folders)} 点 ＋ 平均）: {path}")
+    return path
+
+
 def write_all(project, verbose=True):
     """まとめ表をすべて書く。書けたファイルのパスのリストを返す。"""
     written = [write_reverberation_summary(project, verbose=verbose),
-               write_clarity_summary(project, verbose=verbose)]
+               write_clarity_summary(project, verbose=verbose),
+               write_level_summary(project, verbose=verbose),
+               write_sti_summary(project, verbose=verbose)]
     return [p for p in written if p]
 
 
