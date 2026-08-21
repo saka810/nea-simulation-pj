@@ -9,8 +9,9 @@
     <対象室_条件>_まとめ_残響時間.csv   EDT / T20 / T30 を受音点ごと ＋ 平均 ＋ **理論値**
                                        （Sabine / Eyring / Eyring-Knudsen）
     <対象室_条件>_まとめ_明瞭度.csv     C50 / C80 / D50 / Ts を受音点ごと ＋ 平均
-    <対象室_条件>_まとめ_音圧レベル.csv  帯域別の Lp と**自由音場（逆二乗）との差**
+    <対象室_条件>_まとめ_音圧レベル.csv  帯域別の Lp（合計・A 特性・直接音・反射音）
     <対象室_条件>_まとめ_STI.csv         STI と帯域別 MTI
+    <対象室>_まとめ_条件比較.csv         **条件を横に並べた比較**（一括計算のとき）
 
 **周波数は横**（`table.py` の共通ルール）。1 列目が「受音点」、2 列目が「項目」で、
 3 列目以降が周波数。受音点ごとの CSV（`rt.csv` など）はそのまま残す。
@@ -32,10 +33,12 @@ REVERBERATION_FILE = "まとめ_残響時間.csv"
 CLARITY_FILE = "まとめ_明瞭度.csv"
 LEVEL_FILE = "まとめ_音圧レベル.csv"
 STI_FILE = "まとめ_STI.csv"
+# 条件（材料条件表）を横に並べた比較表。**条件名を頭に付けない**（条件をまたぐので）
+CONDITION_FILE = "まとめ_条件比較.csv"
 
 # 音圧レベルのまとめに載せる行（`spl.csv` の項目名）。
-# **自由音場との差を必ず入れる**（逆二乗がどれだけ成り立っているかを見るため）
-LEVEL_ROWS = ["Lp_dB", "直接音_dB", "反射音_dB", "自由音場_dB", "自由音場との差_dB"]
+# 自由音場（逆二乗）との比較は**入れない**（2026-08-21 ユーザー判断）
+LEVEL_ROWS = ["Lp_dB", "Lp_A_dB", "直接音_dB", "反射音_dB"]
 
 # レベルの平均は**エネルギー平均**で取る（dB をそのまま平均してはいけない）
 LEVEL_ENERGY_AVERAGE = True
@@ -103,7 +106,8 @@ def _read(path):
     return frequencies, values
 
 
-def _write(filename, frequencies, records, extra_label=None):
+def _write(filename, frequencies, records, extra_label=None,
+           first_label="受音点"):
     """1 列目「受音点」・2 列目「項目」・3 列目以降が周波数の CSV を書く。
 
     `table.write_frequency_table` は 1 列目が 1 つだけなので、受音点と項目の
@@ -120,7 +124,7 @@ def _write(filename, frequencies, records, extra_label=None):
 
     with open(filename, "w", encoding="utf-8-sig", newline="") as f:
         writer = csv.writer(f)
-        head = ["受音点", "項目"] + ([extra_label] if extra_label else [])
+        head = [first_label, "項目"] + ([extra_label] if extra_label else [])
         writer.writerow(head + [f"{v:.0f}" for v in frequencies])
         for record in records:
             if extra_label:
@@ -258,7 +262,7 @@ def write_level_summary(project, verbose=True):
         if table is None:
             continue
         frequencies = frequencies if frequencies is not None else table["frequencies"]
-        distance = table["values"].get("自由音場_dB", "")
+        distance = table["values"].get("音源パワーレベル_dB", "")
         for key in LEVEL_ROWS:
             if key in table["rows"]:
                 records.append((name, key, distance if key == "Lp_dB" else None,
@@ -319,6 +323,95 @@ def write_sti_summary(project, verbose=True):
     if verbose:
         print(f"[まとめ] STI（{len(folders)} 点 ＋ 平均）: {path}")
     return path
+
+
+def write_condition_summary(project, conditions=None, verbose=True):
+    """**条件（材料条件表）を横に並べた比較表**（依頼 2026-08-21 の一括計算用）。
+
+    1 行が「条件 × 指標」、列が周波数。どの条件がいちばん良いかを 1 枚で見る。
+    載せるのは全受音点の**平均**（点ごとの値は条件別のまとめ表にある）。
+
+        条件,項目,総合,63,125,…
+        現状,T30_s,,1.282,1.027,…
+        現状,STI,0.852,0.651,…
+        吸音追加案,T30_s,,0.951,0.804,…
+
+    `conditions` は条件表のパスのリスト。None ならフォルダの条件表を全部。
+    結果が無い条件は飛ばす。
+    """
+    import condition_table as ct
+
+    if conditions is None:
+        conditions = ct.discover(project.folder)
+    records, frequencies = [], None
+
+    for condition in conditions:
+        sub = pj.Project(project.folder,
+                         **{k: getattr(project, k) for k in pj.DEFAULTS})
+        sub.condition_csv = condition
+        label = sub.condition_label or "（既定）"
+
+        for filename, keys, skip in (
+                (REVERBERATION_FILE, ("EDT_s", "T30_s"), 2),
+                (CLARITY_FILE, ("C50_db", "D50"), 2),
+                (LEVEL_FILE, ("Lp_dB",), 3)):
+            rows = _read_summary(sub, filename, skip)
+            if rows is None:
+                continue
+            frequencies = frequencies if frequencies is not None else rows[0]
+            for key in keys:
+                if ("平均", key) in rows[1]:
+                    records.append((label, key, None, rows[1][("平均", key)]))
+
+        sti = _read_summary(sub, STI_FILE, 3)
+        if sti is not None and ("平均", "STI") in sti[1]:
+            records.append((label, "STI", sti[2].get(("平均", "STI"), ""),
+                            sti[1][("平均", "STI")]))
+            records.append((label, "評価", sti[2].get(("平均", "評価"), ""), None))
+
+    if frequencies is None or not records:
+        if verbose:
+            print("[まとめ] 条件の比較表は作れません（条件ごとの結果がまだありません）")
+        return None
+
+    room = project.room_label
+    name = f"{room}_{CONDITION_FILE}" if room else CONDITION_FILE
+    path = os.path.join(project.folder, pj.RESULT_DIR, name)
+    _write(path, frequencies, records, extra_label="総合", first_label="条件")
+    if verbose:
+        conditions_found = len({r[0] for r in records})
+        print(f"[まとめ] 条件の比較（{conditions_found} 条件）: {path}")
+    return path
+
+
+def _read_summary(project, filename, skip):
+    """まとめ表を読む。戻り値 (周波数, {(受音点, 項目): 値}, {(受音点, 項目): 3 列目})。
+
+    まとめ表は 1 列目が受音点、2 列目が項目で、`skip` が 3 なら 3 列目に
+    周波数に依らない値が入る（`_write` と対応）。読めなければ None。
+    """
+    path = os.path.join(project.folder, pj.RESULT_DIR,
+                        project.prefixed(filename))
+    if not os.path.exists(path):
+        return None
+    with open(path, encoding="utf-8-sig", newline="") as f:
+        table = [row for row in csv.reader(f) if row and any(c.strip() for c in row)]
+    if len(table) < 2:
+        return None
+
+    def number(text):
+        try:
+            return float((text or "").strip())
+        except ValueError:
+            return np.nan
+
+    frequencies = np.array([number(c) for c in table[0][skip:]])
+    values, extras = {}, {}
+    for row in table[1:]:
+        key = (row[0].strip(), row[1].strip())
+        values[key] = np.array([number(c) for c in row[skip:skip + len(frequencies)]])
+        extras[key] = row[2].strip() if skip >= 3 and len(row) > 2 else ""
+    return frequencies, values, extras
 
 
 def write_all(project, verbose=True):

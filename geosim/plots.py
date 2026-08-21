@@ -284,17 +284,18 @@ def clarity(path, result):
 
 
 def sound_level(path, result):
-    """帯域別の音圧レベルと、自由音場（逆二乗）との比較（`sound_level.band_levels`）。
+    """帯域別の音圧レベル（`sound_level.band_levels` の結果）。
 
-    左：帯域別の Lp と成分（直接音・反射音）に**自由音場の理論値**を重ねる。
-    右：自由音場との差。**0 dB なら逆二乗どおり**で、上に外れた分が室の効き。
-    無響室のモデルでは左右とも理論値に張り付くので、実装の物差しになる。
+    左：合計と成分（直接音・反射音）。右：初期（50 ms まで）と後期。
+
+    ★**自由音場（逆二乗）との比較は描かない**（2026-08-21 ユーザー判断。
+    「そういう場合もある、というだけ」）。逆二乗則そのものはテストで押さえている。
     """
     frequencies = np.asarray(result["frequencies"], dtype=float)
     x = np.arange(len(frequencies))
     fig, axes = _figure(1, 2, figsize=(14, 5))
 
-    unit = "dB" if not result["relative"] else "dB（相対値）"
+    unit = "dB（相対値）" if result["relative"] else "dB"
     _style(axes[0], f"帯域別の音圧レベル（音源距離 {result['source_distance']:.2f} m）",
            "周波数 [Hz]", f"Lp [{unit}]")
     axes[0].plot(x, result["levels"], "o-", color=ACCENT, linewidth=2.0,
@@ -303,14 +304,12 @@ def sound_level(path, result):
                  markersize=5, label="直接音")
     axes[0].plot(x, result["reflected"], "^--", color="#f7b801", linewidth=1.4,
                  markersize=5, label="反射音")
-    axes[0].plot(x, result["freefield"], ":", color="#e5484d", linewidth=1.6,
-                 label="自由音場（逆二乗）")
     axes[0].legend(loc="best", fontsize=9)
 
-    _style(axes[1], "自由音場との差（0 dB = 逆二乗どおり）", "周波数 [Hz]",
-           "Lp − Lp,自由音場 [dB]")
-    axes[1].bar(x, result["excess"], color="#4cc38a")
-    axes[1].axhline(0, color="#e5484d", linestyle=":", linewidth=1.2)
+    _style(axes[1], "初期（〜50 ms）と後期", "周波数 [Hz]", f"Lp [{unit}]")
+    axes[1].bar(x - 0.2, result["early"], width=0.4, color="#4cc38a", label="初期")
+    axes[1].bar(x + 0.2, result["late"], width=0.4, color="#b5179e", label="後期")
+    axes[1].legend(loc="best", fontsize=9)
 
     for ax in axes:
         ax.set_xticks(x)

@@ -18,7 +18,8 @@ import project as pj
 from atmosphere import Atmosphere
 
 
-def run(project, verbose=True, make_figures=True, progress=None):
+def run(project, verbose=True, make_figures=True, progress=None,
+        reuse_paths=True):
     """プロジェクトの条件で計算し、結果 CSV と図を書き出す。
 
     受音点が複数あるときは、**音線追跡を 1 回で済ませて**受音判定だけ点ごとに行う
@@ -41,9 +42,28 @@ def run(project, verbose=True, make_figures=True, progress=None):
                           verbose=verbose, make_figures=make_figures,
                           write_back=False,
                           head_azimuth=project.head_azimuth_for(0),
-                          progress=progress)
+                          reuse_paths=reuse_paths, progress=progress)
         _write_summaries(project, verbose=verbose)
         return result
+
+    # ★保存した経路が全受音点ぶんそろっていれば、音線追跡そのものを省く（F-9）。
+    #   吸音材だけ変えた計算はここで終わり（あとはエネルギーの掛け算だけ）
+    if reuse_paths and _paths_ready(project, receivers, verbose=verbose):
+        results = []
+        for k, point in enumerate(receivers):
+            sub = _sub_project(project, k)
+            if verbose:
+                print("")
+                print(f"[run] ── 受音点 {k + 1}/{len(receivers)}"
+                      f"（保存した経路から再開）")
+            results.append(_run_one(sub, point, verbose=verbose,
+                                    make_figures=make_figures, write_back=False,
+                                    head_azimuth=project.head_azimuth_for(k),
+                                    reuse_paths=True,
+                                    progress=_prefixed(progress,
+                                                       f"受音点{k + 1}/{len(receivers)} ")))
+        _write_summaries(project, verbose=verbose)
+        return {"receivers": receivers, "results": results, **results[0]}
 
     # ★音線追跡は**受音点に依らない**ので 1 回だけ回し、受音点ごとに配る（F-6）。
     #   受音しても音線は打ち切られないため、受音球をいくつ置いても追跡は同じ。
@@ -67,6 +87,7 @@ def run(project, verbose=True, make_figures=True, progress=None):
                                 make_figures=make_figures, write_back=False,
                                 head_azimuth=project.head_azimuth_for(k),
                                 traced_history=None if traced is None else traced[k],
+                                reuse_paths=False,
                                 progress=_prefixed(progress,
                                                    f"受音点{k + 1}/{len(receivers)} ")))
     if recorder is not None:
@@ -75,6 +96,152 @@ def run(project, verbose=True, make_figures=True, progress=None):
         recorder.save_npz(project.result_path("raylog"))
     _write_summaries(project, verbose=verbose)
     return {"receivers": receivers, "results": results, **results[0]}
+
+
+def _paths_ready(project, receivers, verbose=True):
+    """保存した経路が**全受音点ぶん**使えるかを、計算に入る前に確かめる。
+
+    ★ここで確かめてから音線追跡を省く。1 点でも使えなければ
+    従来どおり「1 回の追跡を全受音点で共有」する（F-6）ほうが速いので、
+    **部分的な使い回しはしない**（点ごとに追跡し直すと共有の利点が消える）。
+
+    指紋（モデルの形・法線・パッチの分け方・音源・受音点・音線数・
+    最大反射回数・受音球）が全部合ったときだけ True。
+    """
+    import mesh_method as mm
+    import path_cache as pc
+
+    try:
+        for index in range(len(receivers)):
+            sub = _sub_project(project, index)
+            if not os.path.exists(sub.paths_cache()):
+                if verbose:
+                    print(f"[run] 受音点 {index + 1} の経路が無いので"
+                          f"音線追跡から回します")
+                return False
+        model = _model_for(project)
+        source = _source_of(project, model)
+        if source is None:
+            return False
+        faces = mm.collision_arrays(model.mesh, two_sided=project.two_sided)
+        for index, point in enumerate(receivers):
+            sub = _sub_project(project, index)
+            mark = pc.fingerprint(model.mesh, faces, source, point, project.rays,
+                                  project.nref, project.radius, project.two_sided)
+            if pc.load(sub.paths_cache(), mark, verbose=False) is None:
+                if verbose:
+                    # 理由は `pc.compare` が出す。もう一度呼んで表示させる
+                    pc.load(sub.paths_cache(), mark, verbose=True)
+                return False
+    except Exception as error:      # 判定に失敗したら安全側（追跡からやり直す）
+        print(f"[run] 経路の使い回しを判定できませんでした: "
+              f"{type(error).__name__}: {error}")
+        return False
+    if verbose:
+        print(f"[run] ★保存した経路を使います（{len(receivers)} 点ぶん）。"
+              f"音線追跡とバックトレースの幾何は省いて、吸音率だけ当て直します")
+    return True
+
+
+def _model_for(project, verbose=False):
+    """プロジェクトの設定で DXF を読む（吸音率・法線・面ごとの材料まで反映）。"""
+    import absorption as ab
+    import read_dxffile as rd
+
+    table = None
+    if project.absorption_path:
+        library = ab.MaterialLibrary.from_csv(project.absorption_path,
+                                              kind=project.absorption_kind)
+        table = library.absorption_table(_assignment_for(project),
+                                         band_number=project.band_number,
+                                         warn=verbose)
+    return rd.read_model(project.dxf_path, unit=project.unit,
+                         absorption_table=table,
+                         orient_normals=project.orient_normals,
+                         band_number=project.band_number,
+                         flip_faces=_flip_faces_for(project),
+                         face_materials=_face_materials_for(project),
+                         verbose=verbose)
+
+
+def _source_of(project, model):
+    if project.source is not None:
+        return np.asarray(project.source, dtype=float)
+    if model.source_points:
+        return np.asarray(model.source_points[0], dtype=float)
+    return None
+
+
+def run_conditions(project, conditions=None, verbose=True, make_figures=True,
+                   progress=None):
+    """**複数の条件（材料条件表）をまとめて回す**（依頼 2026-08-21）。
+
+    > 複数条件やる場合、一括で回せると嬉しいです。
+
+    経路（反射面の並びと入射角）は吸音に依らないので、**1 つ目の条件で
+    音線追跡まで済ませれば、2 つ目以降はエネルギーの掛け算だけ**で終わる（F-9）。
+    実測（研修室・受音点 5 点）で 1 条件目 10 分 → 2 条件目以降 数十秒。
+
+    引数:
+        conditions : 条件表のパスのリスト。None ならプロジェクトフォルダの
+                     条件表を全部（`condition_table.discover`）
+
+    結果は条件ごとに別のファイル名で並ぶ（頭が「対象室名_条件名」になる）。
+    最後に**条件を横に並べた比較表**を作る（`summary.write_condition_summary`）。
+    """
+    import condition_table as ct
+    import summary as sm
+
+    if conditions is None:
+        conditions = ct.discover(project.folder, verbose=verbose)
+    if not conditions:
+        if verbose:
+            print(f"[run] 条件表が見つかりません。1 条件として回します")
+        return {"conditions": [], "results": [run(project, verbose=verbose,
+                                                  make_figures=make_figures,
+                                                  progress=progress)]}
+
+    results, done = [], []
+    for i, condition in enumerate(conditions):
+        sub = pj.Project(project.folder,
+                         **{k: getattr(project, k) for k in pj.DEFAULTS})
+        sub.condition_csv = condition
+        if verbose:
+            print("\n" + "=" * 70)
+            print(f"[run] 条件 {i + 1}/{len(conditions)}: "
+                  f"{os.path.basename(condition)} → 結果の頭 "
+                  f"{sub.file_prefix!r}")
+            print("=" * 70)
+        stage = _prefixed(progress, f"条件{i + 1}/{len(conditions)} ")
+        results.append(run(sub, verbose=verbose, make_figures=make_figures,
+                           progress=stage))
+        done.append(condition)
+
+    # 条件を横に並べた比較表。**全条件が終わってから**でないと作れない
+    comparison = None
+    try:
+        comparison = sm.write_condition_summary(project, done, verbose=verbose)
+    except Exception as error:
+        print(f"[run] 条件の比較表を作れませんでした: "
+              f"{type(error).__name__}: {error}")
+
+    # 比較表ができたので、条件ごとの Excel を作り直して比較シートを入れる
+    # （条件ごとの Excel は計算の途中で書いているので、まだ比較表が無かった）
+    if comparison is not None:
+        try:
+            import workbook as wb
+            for condition in done:
+                sub = pj.Project(project.folder,
+                                 **{k: getattr(project, k) for k in pj.DEFAULTS})
+                sub.condition_csv = condition
+                wb.write(sub, verbose=False)
+            if verbose:
+                print(f"[run] 条件ごとの Excel に比較シートを入れました"
+                      f"（{len(done)} 件）")
+        except Exception as error:
+            print(f"[run] 結果一式（Excel）を作れませんでした: "
+                  f"{type(error).__name__}: {error}")
+    return {"conditions": done, "results": results, "comparison": comparison}
 
 
 def _write_summaries(project, verbose=True):
@@ -198,11 +365,14 @@ def _sub_project(project, index):
 
 
 def _run_one(project, receiver, verbose=True, make_figures=True,
-             write_back=True, head_azimuth=None, traced_history=None, progress=None):
+             write_back=True, head_azimuth=None, traced_history=None,
+             reuse_paths=True, progress=None):
     project.ensure_dirs()
     # 前回の結果を消してから回す。条件を変えたときに古いファイルが残っていると、
-    # 今回の条件の値だと思って読んでしまう
-    project.clear_results(verbose=verbose)
+    # 今回の条件の値だと思って読んでしまう。
+    # ★経路を使い回すときは音線軌跡も作り直さないので消さない（`keep`）
+    project.clear_results(verbose=verbose,
+                          keep=("raylog",) if reuse_paths else ())
     dxf = project.dxf_path
 
     # 法線・吸音材の手動指定。面数が合わないときは project 側が警告して空を返す
@@ -244,6 +414,8 @@ def _run_one(project, receiver, verbose=True, make_figures=True,
         clarity_filename=project.clarity_path(),
         level_filename=project.result_path("spl"),
         sti_filename=project.result_path("sti"),
+        paths_filename=project.paths_cache(),
+        reuse_paths=reuse_paths,
         source_power_db=project.source_power_db,
         noise_level_db=project.noise_level_db,
         statistical=project.statistical,
@@ -484,6 +656,11 @@ def main():
     p.add_argument("--no-figures", action="store_true", help="図を書き出さない")
     p.add_argument("--redraw", action="store_true",
                    help="計算し直さず、保存済みの結果から図だけ作り直す")
+    p.add_argument("--conditions", nargs="*", default=None, metavar="CSV",
+                   help="材料条件表を指定して**一括で回す**。"
+                        "ファイル名を並べるか、値なしでフォルダ内の条件表を全部")
+    p.add_argument("--no-reuse", action="store_true",
+                   help="保存した経路を使わず、音線追跡からやり直す")
     a = p.parse_args()
 
     project = pj.Project.load(a.folder)
@@ -493,7 +670,11 @@ def main():
     if a.redraw:
         redraw(project)
         return
-    run(project, make_figures=not a.no_figures)
+    if a.conditions is not None:
+        run_conditions(project, a.conditions or None,
+                       make_figures=not a.no_figures)
+        return
+    run(project, make_figures=not a.no_figures, reuse_paths=not a.no_reuse)
 
 
 if __name__ == "__main__":

@@ -407,6 +407,9 @@ class MaterialLibrary:
               → ID も別名として登録するので、DXF のレイヤ名がどちらでも引ける
           (B) 材料名 + 吸音率
                 コンクリート,0.02,0.02,...
+          (C) 上記の後ろに種類や備考の列が付いたもの（`to_csv()` が書く形）
+                コンクリート,0.02,0.02,...,normal,備考
+              → **数値でないセルが出たらそこまでを吸音率として読む**
 
         **吸音率の種類**は次の順で決まる。
 
@@ -457,6 +460,10 @@ class MaterialLibrary:
             else:
                 continue
 
+            # ★数値でないセルが出たら**そこで打ち切る**（行は捨てない）。
+            #   `to_csv()` は吸音率のあとに `kind` と `note` の列を書くので、
+            #   捨てる作りだと**自分が書いた CSV を読み戻せなかった**
+            #   （GUI で材料を足して保存 → 読み直しで消える。2026-08-21 に発見）
             values = []
             for cell in raw:
                 if cell == "":
@@ -464,10 +471,9 @@ class MaterialLibrary:
                 try:
                     values.append(float(cell))
                 except ValueError:
-                    values = []
                     break
-            if not values:
-                continue      # ヘッダ行など
+            if len(values) < 3:
+                continue      # ヘッダ行や説明行（バンドは 6 か 8 なので 3 未満は無い）
             # ヘッダ行の見出しが数値（`material,63,125,250,...` のように
             # 中心周波数を列名にしている場合）だと材料として取り込まれてしまう。
             # 吸音率が 2 を超えることはないので、それで弾く

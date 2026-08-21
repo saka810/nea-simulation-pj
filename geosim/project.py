@@ -59,6 +59,14 @@ RECEIVER_DIR = "rec%d"
 # 同じ所に置くと計算し直すたびに撮った画像が巻き添えで消える
 SCREENSHOT_DIR = os.path.join(FIGURE_DIR, "画面")
 
+# 材料条件表の既定名（`condition_table.CONDITION_FILE` と同じ）。
+# この名前のときは条件名を付けない（条件を分けていないということなので）
+DEFAULT_CONDITION_FILE = "材料条件表.csv"
+DEFAULT_CONDITION_STEM = "材料条件表"
+
+# 経路の幾何（吸音材を変えた再計算に使う）。**条件名は付けない**
+PATHS_FILE = "経路.npz"
+
 # 結果ファイルの名前。**キーはコード側の呼び名**で、値が実ファイル名。
 # 実際のファイル名にはプロジェクト名（対象室＋条件名）が頭に付く（`Project.prefixed`）
 RESULT_FILES = {
@@ -71,12 +79,23 @@ RESULT_FILES = {
     "sti": "sti.csv",
     "room": "吸音率と理論値.csv",
     "raylog": "raylog.npz",
+    # 経路の幾何（反射面の並びと入射角）。**吸音材を変えた再計算に使う**（F-9）
+    "paths": PATHS_FILE,
 }
 
 # **受音点に依らない**結果。受音点ごとのフォルダではなく `結果/` 直下に置く。
 #   室の吸音と理論値 … 室形状と材料だけで決まる
 #   音線軌跡         … 音源から出た音線の形。受音点をまたいで共有している（F-6）
 SHARED_RESULTS = {"room", "raylog"}
+
+# **条件（吸音材）に依らない**結果。ファイル名に条件名を付けず、対象室名だけにする。
+#   経路の幾何 … 吸音に依らない（それを使い回すのがこの仕組みの目的）
+#   音線軌跡   … 形は吸音に依らない（色分けに使うエネルギーだけ条件に依る）
+ROOM_SCOPED_RESULTS = {"paths", "raylog"}
+
+# `clear_results()` で**消さない**結果。作り直すのが高くつき、
+# かつ中身が古いかどうかを自分で判定できるもの（経路は指紋を突き合わせる）
+KEEP_ON_CLEAR = {"paths"}
 
 # 昔の名前。**読むときだけ**探す（作り直す前のプロジェクトを開けるように）。
 # `clear_results()` はこちらも消す（古い条件のファイルが残って混ざらないように）
@@ -86,6 +105,14 @@ LEGACY_RESULT_FILES = {
 
 # ファイル名に使えない文字（Windows）。対象室・条件名から作るので置き換える
 UNSAFE_CHARACTERS = '\\/:*?"<>|'
+
+
+def _stem(path_or_name):
+    """パスから拡張子なしのファイル名を取り出す（空なら ""）。"""
+    if not path_or_name:
+        return ""
+    name = str(path_or_name).replace(chr(92), "/")
+    return os.path.splitext(os.path.basename(name))[0]
 
 
 def safe_name(text):
@@ -103,7 +130,11 @@ DEFAULTS = {
     "dxf": "",
     "absorption_csv": "",
     "absorption_kind": None,       # 'normal' | 'random' | None（CSV の # kind: を見る）
-    "assignment": None,            # レイヤ → 材料の対応（辞書）
+    # 材料条件表（レイヤー名 → 吸音材）の CSV。**条件名はこのファイル名から取る**。
+    # 同じフォルダに条件ごとのファイルを置いて選び替える使い方（2026-08-21 ユーザー要望）。
+    # 空なら既定名 `材料条件表.csv` を探す
+    "condition_csv": "",
+    "assignment": None,            # レイヤ → 材料の対応（辞書。条件表が優先）
     "band_number": 6,
     "unit": None,                  # None なら DXF の $INSUNITS
     "orient_normals": "auto",
@@ -149,8 +180,9 @@ class Project:
         self.folder = os.path.abspath(folder)
         for key, default in DEFAULTS.items():
             setattr(self, key, values.get(key, default))
-        if not self.name:
-            self.name = os.path.basename(self.folder)
+        # ★`name` は**空のままにしておく**（既定はフォルダ名ではない）。
+        #   空なら DXF のファイル名を対象室の名前として使う（2026-08-21 ユーザー要望。
+        #   「DXF のファイル名は物件名や部屋名、条件表のファイル名は条件名にする」）
         # いま何番目の受音点を扱っているか（1 始まり）。**保存する条件ではない**ので
         # DEFAULTS には入れない。`結果/recN/` `図/recN/` の振り分けにだけ使う
         self.receiver_index = values.get("receiver_index")
@@ -176,9 +208,37 @@ class Project:
     # どの室・どの条件のものか分かるようにする（2026-08-21 ユーザー要望）
 
     @property
+    def display_name(self):
+        """画面やログに出す名前。`name` が空なら DXF 名、それも無ければフォルダ名。"""
+        return (self.name or _stem(self.dxf) or os.path.basename(self.folder))
+
+    @property
+    def room_label(self):
+        """**対象室の名前**。`name` の指定が最優先、無ければ DXF のファイル名。
+
+        条件をまたいで共通なので、条件に依らない置き場（経路のキャッシュ）に使う。
+        """
+        return safe_name(self.name or _stem(self.dxf)
+                         or os.path.basename(self.folder))
+
+    @property
+    def condition_label(self):
+        """**条件の名前**。材料条件表のファイル名から取る。既定名なら空。"""
+        stem = _stem(self.condition_csv)
+        return "" if not stem or stem == DEFAULT_CONDITION_STEM else safe_name(stem)
+
+    @property
     def file_prefix(self):
-        """結果ファイル名の頭。プロジェクト名（対象室＋条件名）から作る。"""
-        return safe_name(self.name)
+        """結果ファイル名の頭 ＝ 対象室名 ＋ 条件名。
+
+        ★**DXF のファイル名（物件名・部屋名）と条件表のファイル名（条件名）を
+        そのまま使う**（2026-08-21 ユーザー要望）。同じフォルダに条件ごとの
+        結果を並べても混ざらない。
+        """
+        room, condition = self.room_label, self.condition_label
+        if room and condition:
+            return f"{room}_{condition}"
+        return room or condition
 
     def prefixed(self, filename):
         """`rt.csv` → `研修室_条件A_rt.csv`。名前が空なら元のまま。"""
@@ -192,7 +252,7 @@ class Project:
         それ以外は `結果/recN/` に置く。名前には対象室＋条件名が頭に付く。
         """
         return os.path.join(self.result_dir(shared=key in SHARED_RESULTS),
-                            self.prefixed(RESULT_FILES[key]))
+                            self._named(key, RESULT_FILES[key]))
 
     def result_candidates(self, key):
         """その結果として**読める名前**を、探す順に返す。
@@ -205,10 +265,17 @@ class Project:
         names = [RESULT_FILES[key]] + LEGACY_RESULT_FILES.get(key, [])
         paths = []
         for name in names:
-            paths.append(os.path.join(folder, self.prefixed(name)))
+            paths.append(os.path.join(folder, self._named(key, name)))
             if self.file_prefix:
                 paths.append(os.path.join(folder, name))
         return paths
+
+    def _named(self, key, filename):
+        """結果ファイル名。**条件に依らないものは対象室名だけ**を頭に付ける。"""
+        if key in ROOM_SCOPED_RESULTS:
+            room = self.room_label
+            return f"{room}_{filename}" if room else filename
+        return self.prefixed(filename)
 
     def existing_result_path(self, key):
         """**読むため**のパス。無ければ昔の名前も探す。全部無ければ今の名前を返す。"""
@@ -262,6 +329,19 @@ class Project:
     def absorption_path(self):
         return self.resolve(self.absorption_csv)
 
+    @property
+    def condition_path(self):
+        """材料条件表のパス。指定が無ければ既定名（`材料条件表.csv`）。"""
+        return self.resolve(self.condition_csv) or self.path(DEFAULT_CONDITION_FILE)
+
+    def paths_cache(self):
+        """経路の幾何（`path_cache`）の置き場（`結果/recN/<室>_経路.npz`）。
+
+        ★**条件名を付けない。**条件（吸音材）が違っても経路は同じなので、
+        条件をまたいで共有する（それがこの仕組みの目的）。
+        """
+        return self.result_path("paths")
+
     # ---- 保存・読み込み ------------------------------------------------
 
     def ensure_dirs(self):
@@ -270,7 +350,7 @@ class Project:
             os.makedirs(folder, exist_ok=True)
         return self
 
-    def clear_results(self, verbose=True):
+    def clear_results(self, verbose=True, keep=()):
         """前回の計算結果と図を消す。
 
         条件を変えて回し直したとき、**前回の条件で作ったファイルが残っていると
@@ -283,10 +363,17 @@ class Project:
 
         ★**昔の名前のファイルも消す**（`result_candidates`）。名前を変える前の
         `rt.csv` や `rt_statistical.csv` が残っていると、今回の結果と並んでしまう。
+
+        ★**経路の幾何（`経路.npz`）は消さない**（`KEEP_ON_CLEAR`）。
+        作り直すのに音線追跡が丸ごと要るうえ、古いかどうかは指紋で判定できるため。
+        `keep` に鍵を足せば他のものも残せる（経路を使い回すときの音線軌跡など）。
         """
         removed = 0
+        skip = set(KEEP_ON_CLEAR) | set(keep)
         # 受音点ごとのものと、受音点に依らないものの両方（result_path が振り分ける）
         for key in RESULT_FILES:
+            if key in skip:
+                continue
             for path in self.result_candidates(key):
                 if os.path.exists(path):
                     os.remove(path)
@@ -306,6 +393,8 @@ class Project:
         data = {key: getattr(self, key) for key in DEFAULTS}
         data["dxf"] = self._relative(self.dxf_path)
         data["absorption_csv"] = self._relative(self.absorption_path)
+        if self.condition_csv:
+            data["condition_csv"] = self._relative(self.resolve(self.condition_csv))
         for key in ("source", "receiver"):
             value = data[key]
             if value is not None:
@@ -478,7 +567,8 @@ class Project:
         #   （`name` は結果ファイル名の頭に付くので、受音点ごとに変わると
         #     ファイル名が受音点ごとに違ってしまう）
         who = "" if self.receiver_index is None else f"（受音点 {self.receiver_index}）"
-        return (f"プロジェクト『{self.name}』{who}\n"
+        condition = f" / 条件『{self.condition_label}』" if self.condition_label else ""
+        return (f"プロジェクト『{self.display_name}』{condition}{who}\n"
                 f"  フォルダ  {self.folder}\n"
                 f"  モデル    {self.dxf}\n"
                 f"  吸音率    {self.absorption_csv}"

@@ -51,6 +51,7 @@ def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref
             clarity=True, clarity_filename=None,
             source_power_db=None, noise_level_db=None,
             level_filename=None, sti_filename=None,
+            paths_filename=None, reuse_paths=True,
             flip_faces=None, face_materials=None, traced_history=None,
             progress=None):
     """
@@ -139,6 +140,14 @@ def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref
         **PWL と両方そろっていないと使えない**（絶対値が要る）。
     level_filename / sti_filename : str | None
         帯域別の音圧レベル／STI の CSV 出力先（`sound_level.py`）。
+    paths_filename : str | None
+        **経路の幾何**（反射面の並びと入射角）を保存する npz のパス（`path_cache.py`）。
+        経路は吸音に依らないので、**吸音材だけ変えた再計算はここから再開できる**（F-9）。
+    reuse_paths : bool
+        `paths_filename` に使える経路があれば**音線追跡とバックトレースを省く**か
+        （既定 True）。指紋（モデル形状・パッチの分け方・音源・受音点・音線数・
+        反射回数・受音球）が合わないときは自動でやり直すので、
+        黙って古い経路を使うことはない。
     flip_faces : iterable[int] | None
         法線を反転する面インデックス（`face_editor.py` で目で見て直したぶん）。
         自動判定のあとに重ねて適用される。
@@ -226,7 +235,31 @@ def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref
             pj.write_room_csv(room_filename, statistical_result, frequencies)
             print(f"[統計残響] 材料別の吸音率・平均吸音率・理論値: {room_filename}")
 
-    if traced_history is None:
+    # ★吸音材だけ変えた計算は、保存した経路から再開できる（F-9）。
+    #   経路（反射面の並びと入射角）は吸音に依らないので、
+    #   ここでエネルギーを当て直すだけで①〜③を丸ごと省ける
+    import mesh_method as mm
+    import path_cache as pc
+
+    reused = None
+    mark = None
+    if paths_filename is not None or reuse_paths:
+        faces_for_mark = mm.collision_arrays(mesh, two_sided=two_sided)
+        mark = pc.fingerprint(mesh, faces_for_mark, soundsource_point,
+                              receiver_point, soundray_number, nref,
+                              sphere_radius, two_sided)
+    if reuse_paths and paths_filename is not None and traced_history is None:
+        reused = pc.reuse(paths_filename, mesh, mark, len(frequencies),
+                          sound_velocity)
+
+    if reused is not None:
+        report("保存した経路から再開")
+        pulses = reused
+        recorder = None
+        if pulse_filename is not None:
+            pulses.save_csv(pulse_filename)
+            print(f"[procedure] パルス列を書き出しました: {pulse_filename}")
+    elif traced_history is None:
         # 音線ベクトルを作成
         report("音線を生成中")
         soundray_list = sr.soundray_generator(soundray_number)
@@ -255,18 +288,23 @@ def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref
         report("音線追跡（済み・受音点間で共有）", 1.0)
         reflection_history = traced_history
 
-    # 重複経路の削除
-    # 元コード721行目に対応
-    report("重複経路の削除")
-    reflection_history = ld.delete(reflection_history)
+    if reused is None:
+        # 重複経路の削除
+        # 元コード721行目に対応
+        report("重複経路の削除")
+        reflection_history = ld.delete(reflection_history)
 
-    # 非重複経路　バックトレース（虚音源法）
-    # 元コード876行目に対応。
-    # 吸音率は Mesh が面ごとに持っているので、ここで別途渡す必要はない。
-    pulses = ln.loop(soundsource_point, receiver_point, reflection_history, mesh,
-                     sound_velocity=sound_velocity, band_number=len(frequencies),
-                     filename=pulse_filename, two_sided=two_sided,
-                     progress=lambda f: report("バックトレース", f))
+        # 非重複経路　バックトレース（虚音源法）
+        # 元コード876行目に対応。
+        # 吸音率は Mesh が面ごとに持っているので、ここで別途渡す必要はない。
+        pulses = ln.loop(soundsource_point, receiver_point, reflection_history, mesh,
+                         sound_velocity=sound_velocity, band_number=len(frequencies),
+                         filename=pulse_filename, two_sided=two_sided,
+                         progress=lambda f: report("バックトレース", f))
+
+        # ★経路の幾何を保存する。**吸音材だけ変えた次の計算はここから再開できる**（F-9）
+        if paths_filename is not None and len(pulses):
+            pc.save(paths_filename, pulses, mark)
 
     # 後部残響が nref で切れていないかの確認。
     # 残響時間は「エネルギーが 35 dB 減衰するまで」を見るので、

@@ -67,10 +67,37 @@ def _run_with_progress(project):
     import run_project
 
     return progress_window.run_with_progress(
-        f"{project.name} を計算中",
+        f"{project.display_name} を計算中",
         lambda progress: run_project.run(project, progress=progress),
         subtitle=(f"音線 {project.rays} 本 / 最大反射 {project.nref} 回 / "
                   f"受音球 {project.radius} m"))
+
+
+def _run_all_with_progress(project):
+    """全条件の一括計算を、進捗ウィンドウを出しながら回す。"""
+    import progress_window
+    import run_project
+
+    return progress_window.run_with_progress(
+        f"{project.display_name} の全条件を計算中",
+        lambda progress: run_project.run_conditions(project, progress=progress),
+        subtitle="材料条件表を順に当てます（2 件目以降は経路を使い回すので速い）")
+
+
+def _report_conditions(project, outcome):
+    """一括計算のあとの要約。**条件ごとの代表値を並べる**。"""
+    import os
+
+    print(chr(10) + "=" * 70)
+    print(f"全条件の計算が終わりました → {project.folder}")
+    print("=" * 70)
+    conditions = (outcome or {}).get("conditions") or []
+    for condition in conditions:
+        print(f"  ・{os.path.basename(condition)}")
+    comparison = (outcome or {}).get("comparison")
+    if comparison:
+        print(f"{chr(10)}  条件の比較表: {comparison}")
+    print(f"  結果 CSV / Excel : {project.path('結果')}")
 
 
 def _report_saved(project):
@@ -170,6 +197,8 @@ def main():
     p.add_argument("--run", action="store_true",
                    help="条件入力ウィンドウを出さずにすぐ計算する")
     p.add_argument("--no-view", action="store_true", help="計算後に可視化を開かない")
+    p.add_argument("--all-conditions", action="store_true",
+                   help="フォルダ内の材料条件表を全部回す（--run と併用）")
     a = p.parse_args()
 
     import face_editor
@@ -183,6 +212,12 @@ def main():
         if not project.dxf:
             raise SystemExit(f"{project.folder} に project.json がありません。"
                              f"先に条件を入力してください（--run を外す）")
+        if a.all_conditions:
+            outcome = run_project.run_conditions(project)
+            _report_conditions(project, outcome)
+            if not a.no_view:
+                _visualise(project)
+            return
         results = run_project.run(project)
         _report(project, results)
         if not a.no_view:
@@ -216,6 +251,19 @@ def main():
                 _visualise(project)
             continue
         break
+
+    # 全条件の一括計算（材料条件表を順に当てて回す。経路は使い回す）
+    if action == "run_all":
+        try:
+            outcome = _run_all_with_progress(project)
+        except Exception:
+            print("[app] 一括計算でエラーが起きました:")
+            traceback.print_exc()
+            return
+        _report_conditions(project, outcome)
+        if not a.no_view:
+            _visualise(project)
+        return
 
     try:
         results = _run_with_progress(project)

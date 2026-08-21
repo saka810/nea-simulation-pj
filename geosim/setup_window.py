@@ -98,8 +98,8 @@ def estimate_volume(dxf_path, unit=None):
 class SetupWindow:
     """条件入力のウィンドウ。`run()` が (Project, 押されたボタン) を返す。
 
-    ボタンは 'run'（計算する）/ 'normals'（面を確認する。法線と吸音材）/
-    'view'（前回の結果を見る）/ None（閉じた）。
+    ボタンは 'run'（計算する）/ 'run_all'（**全条件を一括**）/
+    'normals'（面を確認する。法線と吸音材）/ 'view'（前回の結果を見る）/ None（閉じた）。
     """
 
     def __init__(self, project=None, folder=None):
@@ -139,14 +139,18 @@ class SetupWindow:
         rows = [
             ("folder", "プロジェクトフォルダ", "dir",
              "結果と図をここに保存します。既存フォルダを選ぶと前回の条件を読み込みます"),
-            # ★この名前が**結果ファイル名の頭**になる（2026-08-21 ユーザー要望）。
-            #   報告書に出したときにどの室・どの条件か分かるようにするため
-            ("name", "対象室・条件名", "text",
-             "結果ファイル名の頭に付きます（例「研修室_吸音追加案」→ 研修室_吸音追加案_rt.csv）。"
-             "空欄ならフォルダ名"),
+            # ★対象室の名前。**空欄なら DXF のファイル名を使う**（2026-08-21 ユーザー要望。
+            #   「DXF のファイル名は物件名や部屋名」）。結果ファイル名の頭になる
+            ("name", "対象室名（任意）", "text",
+             "結果ファイル名の頭に付きます。**空欄なら DXF のファイル名**を使います"),
             ("dxf", "モデル（DXF）", "file", "室形状。音源・受音点も src / rec レイヤから読みます"),
             ("absorption_csv", "吸音率（CSV）", "file",
              "1列目=材料名または ID。レイヤ名の先頭の数字でも引けます"),
+            # ★条件はファイルで選ぶ（同じフォルダに条件ごとの表を置ける）。
+            #   **このファイル名が条件名になり、結果ファイル名にも入る**
+            ("condition_csv", "材料条件表（CSV）", "file",
+             "レイヤー名 → 吸音材の対応表。**このファイル名が条件名**になります"
+             "（空欄なら 材料条件表.csv）"),
         ]
         for row, (key, label, kind, hint) in enumerate(rows):
             ttk.Label(frame, text=label).grid(row=row * 2, column=0, sticky="w", pady=2)
@@ -225,6 +229,10 @@ class SetupWindow:
 
         ttk.Button(frame, text="閉じる", command=self._close).pack(side="right", padx=4)
         ttk.Button(frame, text="計算する ▶", command=self._on_run).pack(side="right", padx=4)
+        # ★同じフォルダの条件表を全部回す（2026-08-21 ユーザー要望）。
+        #   経路は吸音に依らないので 2 件目以降は一瞬で終わる（F-9）
+        ttk.Button(frame, text="全条件を一括 ▶▶",
+                   command=self._on_run_all).pack(side="right", padx=4)
         # 既存プロジェクトを開いたときは、計算し直さずに前回の結果を見たいことがある
         self.view_button = ttk.Button(frame, text="前回の結果を見る",
                                       command=self._on_view)
@@ -242,6 +250,8 @@ class SetupWindow:
         self.vars["name"].set(p.name or "")
         self.vars["dxf"].set(p.dxf_path or "")
         self.vars["absorption_csv"].set(p.absorption_path or "")
+        self.vars["condition_csv"].set(p.condition_csv and
+                                       (p.resolve(p.condition_csv) or "") or "")
         for key, _label, _type, _hint in NUMBER_FIELDS:
             value = getattr(p, key)
             self.vars[key].set("" if value is None else str(value))
@@ -284,9 +294,10 @@ class SetupWindow:
 
         self.project.dxf = dxf
         self.project.absorption_csv = absorption
-        # 対象室・条件名。空欄ならフォルダ名（`Project.__init__` と同じ扱い）
-        self.project.name = (self.vars["name"].get().strip()
-                             or os.path.basename(self.project.folder))
+        # 対象室名。**空欄のままにする**（空なら DXF のファイル名が使われる）
+        self.project.name = self.vars["name"].get().strip()
+        # 材料条件表。**このファイル名が条件名**になり、結果ファイル名にも入る
+        self.project.condition_csv = self.vars["condition_csv"].get().strip()
         for key, _label, cast, _hint in NUMBER_FIELDS:
             text = self.vars[key].get().strip()
             if not text:
@@ -410,6 +421,33 @@ class SetupWindow:
             return
         self.project.save()
         self.action = "normals"
+        self.root.destroy()
+
+    def _on_run_all(self):
+        """同じフォルダの材料条件表を**全部**回す（一括計算）。"""
+        import condition_table as ct
+
+        problem = self._collect()
+        if problem:
+            messagebox.showwarning("条件を確認してください", problem)
+            return
+        found = ct.discover(self.project.folder)
+        if not found:
+            messagebox.showinfo(
+                "条件表がありません",
+                f"{self.project.folder} に材料条件表が見つかりません。"
+                f"「材料条件表を開く」で作ってから、条件ごとに名前を付けて"
+                f"保存してください。")
+            return
+        names = chr(10).join("  ・" + os.path.basename(f) for f in found)
+        if not messagebox.askokcancel(
+                "全条件を一括計算",
+                f"{len(found)} 条件を続けて計算します。{chr(10)}{chr(10)}{names}{chr(10)}{chr(10)}"
+                f"音線追跡は 1 回だけで、2 件目以降は吸音率を当て直すだけなので"
+                f"すぐ終わります。"):
+            return
+        self.project.save()
+        self.action = "run_all"
         self.root.destroy()
 
     def _open_condition_table(self):

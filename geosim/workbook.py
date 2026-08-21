@@ -29,9 +29,10 @@ Excel 側は「CSV を読んで並べ直すだけ」なので、計算はやり�
 | `概要` | 計算条件と主要な結果（代表値） | — |
 | `残響時間` | 全受音点 ＋ 平均 ＋ ばらつき ＋ 理論値 | 折れ線 |
 | `明瞭度` | C50 / C80 / D50 / Ts | 折れ線 |
-| `音圧レベル` | 帯域別 Lp と**自由音場（逆二乗）との差** | 折れ線 |
+| `音圧レベル` | 帯域別 Lp（合計・A 特性・直接音・反射音） | 折れ線 |
 | `STI` | STI と帯域別 MTI | 棒 |
 | `吸音率と理論値` | 材料別の吸音率 → 平均吸音率 → 残響時間理論値 | 折れ線 |
+| `条件比較` | **条件（材料条件表）を横に並べた比較**（一括計算したとき） | 折れ線 |
 | `材料条件表` | レイヤー名と吸音材の対応（入力の記録） | — |
 
 ## テンプレートに流し込む
@@ -63,6 +64,7 @@ SHEET_LEVEL = "音圧レベル"
 SHEET_STI = "STI"
 SHEET_ROOM = "吸音率と理論値"
 SHEET_CONDITION = "材料条件表"
+SHEET_COMPARISON = "条件比較"
 
 HEADER_FILL = "FFEFF3F8"
 TITLE_FONT_SIZE = 11
@@ -97,28 +99,47 @@ def _read_rows(path_):
     return rows or None
 
 
-def _numeric(rows, skip_columns):
-    """文字列の表を、数値になるセルだけ数値に直す（Excel でグラフにできるように）。"""
+def _numeric(rows, text_columns):
+    """文字列の表を、数値になるセルだけ数値に直す（Excel でグラフにできるように）。
+
+    ★`text_columns` は**名前の列の数**（区分・項目・材料名など）。
+    そこより右は数値に直す。**周波数に依らない列（面積・総合・音源距離）も
+    数値に直すこと**（2026-08-21 ユーザー指摘。面積が文字列のままだった）。
+    見出し行（1 行目）は周波数の並びなので文字のままにする
+    （グラフの項目軸に使うため。数値にすると等間隔にならない）。
+    """
     out = []
     for i, row in enumerate(rows):
         cells = []
         for j, value in enumerate(row):
             text = (value or "").strip()
-            if i == 0 or j < skip_columns or not text:
+            if i == 0 or j < text_columns or not text:
                 cells.append(text)
                 continue
-            try:
-                cells.append(float(text))
-            except ValueError:
-                cells.append(text)
+            cells.append(_as_number(text))
         out.append(cells)
     return out
 
 
-def _summary_table(project, filename, skip_columns):
+def _as_number(text):
+    """数値になるなら数値、ならなければ文字のまま返す。
+
+    `nan` や `inf` は Excel が扱えないので文字のままにする
+    （`-inf` はレベルがゼロのときに出る）。
+    """
+    try:
+        value = float(text)
+    except ValueError:
+        return text
+    if not np.isfinite(value):
+        return text
+    return int(value) if value == int(value) and abs(value) < 1e15 else value
+
+
+def _summary_table(project, filename, text_columns):
     rows = _read_rows(os.path.join(project.path(pj.RESULT_DIR),
                                    project.prefixed(filename)))
-    return None if rows is None else _numeric(rows, skip_columns)
+    return None if rows is None else _numeric(rows, text_columns)
 
 
 def _overview(project):
@@ -128,9 +149,11 @@ def _overview(project):
     kind = {"normal": "垂直入射", "random": "残響室法"}.get(project.absorption_kind,
                                                             "未指定")
     rows = [["項目", "値"],
-            ["対象室・条件名", project.name],
+            ["対象室", project.room_label],
+            ["条件", project.condition_label or "（条件表なし）"],
             ["モデル（DXF）", project.dxf],
             ["吸音率表", f"{project.absorption_csv}（{kind}）"],
+            ["材料条件表", os.path.basename(project.condition_path)],
             ["周波数バンド", f"{project.band_number}（"
                              f"{ab.octave_bands(project.band_number)[0]:.0f}〜"
                              f"{ab.octave_bands(project.band_number)[-1]:.0f} Hz）"],
@@ -183,41 +206,73 @@ def _overview(project):
         if found is not None:
             rows.append([f"{label}（{found[1]:.0f} Hz）", found[0]])
 
-    sti = _summary_table(project, sm.STI_FILE, 3)
+    sti = _summary_table(project, sm.STI_FILE, 2)
     if sti is not None:
         for row in sti[1:]:
             if row[0] == "平均" and row[1] in ("STI", "評価"):
-                rows.append([f"STI（平均）" if row[1] == "STI" else "STI の評価",
+                rows.append(["STI（平均）" if row[1] == "STI" else "STI の評価",
                              row[2]])
-    return rows
+    # ★値の列も数値にする（`_numeric` を通さないシートなので自分で直す。
+    #   2026-08-21 ユーザー指摘「数値判定されていないのがある」）
+    return [[cell[0], _as_number(cell[1]) if isinstance(cell[1], str) else cell[1]]
+            for cell in rows]
+
+
+# シートごとの決めごと。
+#   text  … 名前の列の数（ここより右は数値に直す）
+#   chart … グラフの種類
+#   first … グラフの横軸（周波数）が始まる列。**text とは別**。
+#           音圧レベルは 3 列目が音源距離なので、text=2 でも first=3 になる
+SHEET_LAYOUT = {
+    SHEET_OVERVIEW: {"text": 1, "chart": None, "first": 1},
+    SHEET_REVERBERATION: {"text": 2, "chart": "line", "first": 2},
+    SHEET_CLARITY: {"text": 2, "chart": "line", "first": 2},
+    SHEET_LEVEL: {"text": 2, "chart": "line", "first": 3},
+    SHEET_STI: {"text": 2, "chart": "bar", "first": 3},
+    SHEET_COMPARISON: {"text": 2, "chart": "line", "first": 3},
+    SHEET_ROOM: {"text": 2, "chart": "line", "first": 3},
+    SHEET_CONDITION: {"text": 3, "chart": None, "first": 5},
+}
 
 
 def sheets(project, verbose=True):
-    """書き出すシートを [(シート名, 行の list, グラフの種類, 見出しの列数), …] で返す。
-
-    グラフの種類は 'line' / 'bar' / None。見出しの列数は
-    「凡例に使う左側の列がいくつあるか」（`受音点,項目` なら 2）。
-    """
+    """書き出すシートを [(シート名, 行の list, グラフの種類, 横軸の開始列), …] で返す。"""
     import condition_table as ct
 
-    result = [(SHEET_OVERVIEW, _overview(project), None, 1)]
-    for name, filename, chart, skip in (
-            (SHEET_REVERBERATION, sm.REVERBERATION_FILE, "line", 2),
-            (SHEET_CLARITY, sm.CLARITY_FILE, "line", 2),
-            (SHEET_LEVEL, sm.LEVEL_FILE, "line", 3),
-            (SHEET_STI, sm.STI_FILE, "bar", 3),
-            (SHEET_ROOM, pj.RESULT_FILES["room"], "line", 3)):
-        rows = _summary_table(project, filename, skip)
+    def layout(name):
+        return SHEET_LAYOUT[name]
+
+    result = [(SHEET_OVERVIEW, _overview(project), None,
+               layout(SHEET_OVERVIEW)["first"])]
+    for name, filename in ((SHEET_REVERBERATION, sm.REVERBERATION_FILE),
+                           (SHEET_CLARITY, sm.CLARITY_FILE),
+                           (SHEET_LEVEL, sm.LEVEL_FILE),
+                           (SHEET_STI, sm.STI_FILE),
+                           (SHEET_ROOM, pj.RESULT_FILES["room"])):
+        rows = _summary_table(project, filename, layout(name)["text"])
         if rows is not None:
-            result.append((name, rows, chart, skip))
+            result.append((name, rows, layout(name)["chart"],
+                           layout(name)["first"]))
         elif verbose:
             print(f"[Excel] {filename} が無いので『{name}』は飛ばします")
+
+    # 条件を横に並べた比較（一括計算したときだけできる。条件名は頭に付かない）
+    room = project.room_label
+    comparison = _read_rows(os.path.join(
+        project.path(pj.RESULT_DIR),
+        f"{room}_{sm.CONDITION_FILE}" if room else sm.CONDITION_FILE))
+    if comparison is not None:
+        name = SHEET_COMPARISON
+        result.append((name, _numeric(comparison, layout(name)["text"]),
+                       layout(name)["chart"], layout(name)["first"]))
 
     condition = _read_rows(ct.path(project))
     if condition is not None:
         # `#` で始まる覚え書きの行は落とす（Excel では邪魔になる）
         condition = [row for row in condition if not row[0].startswith("#")]
-        result.append((SHEET_CONDITION, _numeric(condition, 3), None, 3))
+        name = SHEET_CONDITION
+        result.append((name, _numeric(condition, layout(name)["text"]), None,
+                       layout(name)["first"]))
     return result
 
 
@@ -290,10 +345,13 @@ def _decorate(sheet, rows, skip):
     # 見出しと左側の項目名を固定して、右へスクロールしても読めるようにする
     sheet.freeze_panes = sheet.cell(row=2, column=skip + 1)
 
-    for row in sheet.iter_rows(min_row=2, min_col=skip + 1):
+    # 整数（面数など）に "0.000" を付けると読みにくいので分ける
+    for row in sheet.iter_rows(min_row=2):
         for cell in row:
-            if isinstance(cell.value, (int, float)):
-                cell.number_format = "0.000"
+            if isinstance(cell.value, bool) or not isinstance(cell.value,
+                                                              (int, float)):
+                continue
+            cell.number_format = "General" if float(cell.value).is_integer()                 else "0.000"
 
 
 def _add_chart(sheet, name, rows, kind, skip):

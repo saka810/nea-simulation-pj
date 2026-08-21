@@ -47,6 +47,8 @@ class PulseList:
 
     属性:
         reflection_count : (n,)  int   反射回数（元 ktmp）
+        walls            : (n,K) int   反射面の並び（-1 詰め）。**吸音率の差し替え用**
+        cos_theta        : (n,K) float 各反射の |cosθ|（同上）
         time             : (n,)  float 到来時刻 [s]（元 rtime）
         distance         : (n,)  float 経路長 [m]（= time * 音速）
         direction        : (n,3) float 到来方向の単位ベクトル（受音点 → 虚音源）
@@ -61,6 +63,10 @@ class PulseList:
         self.distance = np.zeros(0)
         self.direction = np.zeros((0, 3))
         self.energy = np.zeros((0, band_number))
+        # 反射の幾何。**吸音率を変えるだけなら再計算に使える**（`energy_from_geometry`）。
+        # 古い CSV から読み戻した場合は空のまま（幾何は CSV に入らない）
+        self.walls = np.zeros((0, 0), dtype=np.int32)
+        self.cos_theta = np.zeros((0, 0))
 
     def __len__(self):
         return len(self.time)
@@ -75,6 +81,26 @@ class PulseList:
         self.distance = np.array([r["distance"] for r in records], dtype=float)
         self.direction = np.array([r["direction"] for r in records], dtype=float)
         self.energy = np.array([r["energy"] for r in records], dtype=float)
+        self.walls, self.cos_theta = _geometry_arrays(records)
+        return self
+
+    def has_geometry(self):
+        """反射の幾何を持っているか（吸音率の差し替えができるか）。"""
+        return len(self.walls) == len(self.time) and self.walls.size >= 0             and len(self.walls) == len(self.time)
+
+    def recompute_energy(self, mesh, band_number=None):
+        """**吸音率だけ差し替えてエネルギーを計算し直す。**
+
+        音線追跡もバックトレースもやり直さない（`energy_from_geometry`）。
+        材料条件表を変えて回すときの本体（F-9）。
+        """
+        absorption = np.array([np.atleast_1d(m.absorption_coefficient)
+                               for m in mesh], dtype=float)
+        if band_number is not None and absorption.shape[1] != band_number:
+            raise ValueError(f"吸音率のバンド数 {absorption.shape[1]} が "
+                             f"{band_number} と違います")
+        self.band_number = absorption.shape[1]
+        self.energy = energy_from_geometry(self.walls, self.cos_theta, absorption)
         return self
 
     def sort_by_time(self):
@@ -89,6 +115,9 @@ class PulseList:
         self.distance = self.distance[order]
         self.direction = self.direction[order]
         self.energy = self.energy[order]
+        if len(self.walls) == len(order):
+            self.walls = self.walls[order]
+            self.cos_theta = self.cos_theta[order]
         return self
 
     def save_csv(self, filename):
@@ -118,6 +147,21 @@ class PulseList:
                 f"到来時刻 {self.time.min() * 1000.0:.2f}〜{self.time.max() * 1000.0:.2f} ms / "
                 f"反射回数 0〜{int(self.reflection_count.max())} 回 / "
                 f"バンド別エネルギー合計 {np.array2string(total, precision=4)}")
+
+
+def _geometry_arrays(records):
+    """記録から (反射面 (n,K), cosθ (n,K)) を作る。K は最大反射回数。"""
+    if not records or "cos_theta" not in records[0]:
+        return np.zeros((len(records), 0), dtype=np.int32),                np.zeros((len(records), 0))
+    kmax = max(len(r["wall_ids"]) for r in records)
+    walls = np.full((len(records), kmax), -1, dtype=np.int32)
+    cosines = np.zeros((len(records), kmax))
+    for i, r in enumerate(records):
+        n = len(r["wall_ids"])
+        if n:
+            walls[i, :n] = r["wall_ids"]
+            cosines[i, :n] = r["cos_theta"]
+    return walls, cosines
 
 
 def image_sources(soundsource_point, wall_ids, mesh):
@@ -308,6 +352,48 @@ def _energy_decay_batch(vray, normal, absorption, energy):
     return energy * reflection * reflection
 
 
+def energy_from_geometry(walls, cosines, absorption, energy=None):
+    """**反射の幾何（面と入射角）からエネルギーを計算し直す。**
+
+    バックトレースで求まる経路の形（どの面に、どの角度で当たったか）は
+    **吸音率に依らない**。だから幾何だけ残しておけば、吸音材を変えたときに
+    音線追跡もバックトレースもやり直さず、ここだけ回せば済む（F-9）。
+
+        E = Π_k |R(cosθ_k, α_{面_k})|²
+
+    `R` は書籍 式(2.64) の斜入射反射係数で、`sound_ray.energy_decay` と同じ式。
+    掛ける順番が逆（経路の先頭から）になるが、積なので結果は同じ（丸めのみ差）。
+
+    引数:
+        walls    (P, K) int   反射面のインデックス。**-1 は「反射なし」**の詰め物
+        cosines  (P, K) float 各反射での |cosθ|
+        absorption (面数, b)  面ごとの垂直入射吸音率
+        energy   (P, b) | None  初期エネルギー（既定は 1）
+
+    戻り値: (P, b)
+    """
+    walls = np.atleast_2d(np.asarray(walls))
+    cosines = np.atleast_2d(np.asarray(cosines, dtype=float))
+    absorption = np.asarray(absorption, dtype=float)
+    n_path, kmax = walls.shape
+    band_number = absorption.shape[1]
+    result = (np.ones((n_path, band_number)) if energy is None
+              else np.array(energy, dtype=float))
+
+    for k in range(kmax):
+        active = walls[:, k] >= 0
+        if not np.any(active):
+            continue
+        wall = walls[active, k]
+        coefficient = cosines[active, k][:, None]
+        root = np.sqrt(1.0 - absorption[wall])
+        reflection = ((1.0 + root) * coefficient - (1.0 - root))
+        reflection = reflection / ((1.0 + root) * coefficient + (1.0 - root))
+        reflection = np.abs(reflection)
+        result[active] *= reflection * reflection
+    return result
+
+
 def backtrace_batch(soundsource_point, receiver_point, histories, mesh, faces,
                     band_number, sound_velocity=SOUND_VELOCITY):
     """経路の束をまとめてバックトレースする。戻り値は `backtrace_path` と同じ dict のリスト。
@@ -333,6 +419,10 @@ def backtrace_batch(soundsource_point, receiver_point, histories, mesh, faces,
     origin = np.repeat(receiver[None, :], n_path, axis=0)
     ray = np.zeros((n_path, 3))
     energy = np.ones((n_path, band_number))
+    # ★反射ごとの入射角の余弦を残す。**吸音率を変えるだけならここから
+    #   エネルギーを計算し直せる**（`energy_from_geometry`）ので、
+    #   条件を変えて回すときに音線追跡とバックトレースを省ける（F-9）
+    cosines = np.zeros((n_path, max(kmax, 1)))
     last_face = np.full(n_path, -1, dtype=np.int64)
     alive = np.zeros(n_path, dtype=bool)        # すでに入ってきて、まだ却下されていない
     done = np.zeros(n_path, dtype=bool)         # 受音成立
@@ -377,6 +467,8 @@ def backtrace_batch(soundsource_point, receiver_point, histories, mesh, faces,
         local = np.nonzero(good)[0]
 
         wall = want[good]
+        cosines[keep, k - 1] = np.abs(np.einsum("ij,ij->i", ray[keep],
+                                                faces.normal[wall]))
         energy[keep] = _energy_decay_batch(ray[keep], faces.normal[wall],
                                            absorption[wall], energy[keep])
         last_face[keep] = wall
@@ -400,6 +492,8 @@ def backtrace_batch(soundsource_point, receiver_point, histories, mesh, faces,
             "direction": (-vtgt) / distance,
             "energy": energy[i].copy(),
             "wall_ids": list(histories[i]),
+            # 吸音率を変えたときに再利用する材料（`energy_from_geometry`）
+            "cos_theta": cosines[i, :lengths[i]].copy(),
         })
     return records
 

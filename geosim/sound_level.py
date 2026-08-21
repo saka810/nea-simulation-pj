@@ -36,8 +36,11 @@
 となり、**教科書の `Lp = Lw − 20 log10 r − 11` にそのまま一致する**。
 つまり逆二乗則は式の上では厳密に成り立つので、無響室のモデルで確認すると
 **幾何音響の実装が正しいかどうかの物差しになる**（反射面が無ければ直接音だけ、
-反射面があればそのぶん上に外れる）。`freefield_level()` がその理論値を返し、
-`spl.csv` に「自由音場との差」として並べる。
+反射面があればそのぶん上に外れる）。`freefield_level()` がその理論値を返す。
+
+★**出力（`spl.csv`・図）には自由音場の値と差を入れない**
+（2026-08-21 ユーザー判断。「そういう場合もある、というだけ」）。
+逆二乗則そのものは `tests/test_geosim.py` [31] で押さえてある。
 
 PWL 未入力なら **Lw = 0 dB として計算する**（＝相対値。W = 1 pW 基準）。
 帯域ごとの相対関係と距離依存性はそのまま読めるので、逆二乗の確認には足りる。
@@ -291,8 +294,7 @@ def band_levels(times, energies, distances=None, atmosphere=None,
         print(f"[音圧レベル] {kind} / 音源距離 {source_distance:.3f} m / "
               f"パルス {len(times)} 本")
         tb_rows = [("Lp[dB]", levels), ("直接音", result["direct"]),
-                   ("反射音", result["reflected"]),
-                   ("自由音場", freefield), ("差", result["excess"])]
+                   ("反射音", result["reflected"])]
         print("[音圧レベル] " + " " * 12 + "".join(f"{f:>10.0f}" for f in frequencies))
         for name, values in tb_rows:
             print(f"[音圧レベル] {name:>12}"
@@ -305,6 +307,9 @@ def band_levels(times, energies, distances=None, atmosphere=None,
 
 def write_levels(filename, result):
     """音圧レベルを CSV に保存する。**周波数は横**（区分付きの表）。"""
+    # ★自由音場（逆二乗）の値と差は**出さない**（2026-08-21 ユーザー判断。
+    #   「そういう場合もある、というだけ」）。計算はできるので
+    #   `freefield_level()` は残してあり、逆二乗則の検算にテストで使っている
     rows = [
         ("音圧レベル", "Lp_dB", result["overall"], result["levels"]),
         ("音圧レベル", "Lp_A_dB", result["overall_a"], result["a_weighted"]),
@@ -312,9 +317,8 @@ def write_levels(filename, result):
         ("内訳", "反射音_dB", None, result["reflected"]),
         ("内訳", "初期_50ms_dB", None, result["early"]),
         ("内訳", "後期_dB", None, result["late"]),
-        ("参考", "自由音場_dB", result["source_distance"], result["freefield"]),
-        ("参考", "自由音場との差_dB", None, result["excess"]),
-        ("参考", "音源パワーレベル_dB", None, result["source_power"]),
+        ("参考", "音源パワーレベル_dB", result["source_distance"],
+         result["source_power"]),
     ]
     return tb.write_sectioned_table(filename, result["frequencies"], rows,
                                     value_label="総合")

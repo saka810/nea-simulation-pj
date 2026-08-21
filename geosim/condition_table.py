@@ -68,12 +68,49 @@ HEADER = ["区分", "レイヤー名", "材料名", "面数", "面積_m2"]
 
 
 def path(project):
-    """材料条件表のパス。**プロジェクトフォルダ直下**（`normals.json` と同じ扱い）。
+    """使う材料条件表のパス。
 
-    対象室・条件名の頭は付けない。これは結果ではなく**入力**で、
-    プロジェクトを名前変更してもそのまま使えるほうがよいため。
+    `project.condition_csv` の指定があればそれ、無ければ既定名
+    （`材料条件表.csv`）。**条件名はこのファイル名から取る**ので、
+    同じフォルダに `吸音追加案.csv` `現状.csv` のように条件ごとに置いて
+    選び替える（2026-08-21 ユーザー要望）。結果ファイル名にも入る。
     """
-    return project.path(CONDITION_FILE)
+    return project.condition_path
+
+
+def discover(folder, verbose=False):
+    """フォルダの中の材料条件表を探して、パスのリストを返す（名前順）。
+
+    **中身を見て判別する**（1 行目が `区分,レイヤー名,…` か）。
+    吸音率表や結果の CSV を間違って拾わないため。一括計算の入力になる。
+    """
+    found = []
+    for name in sorted(os.listdir(folder)):
+        if not name.lower().endswith(".csv"):
+            continue
+        candidate = os.path.join(folder, name)
+        if is_condition_table(candidate):
+            found.append(candidate)
+    if verbose:
+        print(f"[条件表] {folder} に条件表が {len(found)} 件: "
+              + " / ".join(os.path.basename(f) for f in found))
+    return found
+
+
+def is_condition_table(file_name):
+    """その CSV が材料条件表かどうか（見出し行で判別する）。"""
+    if not os.path.isfile(file_name):
+        return False
+    try:
+        with open(file_name, encoding="utf-8-sig", newline="") as f:
+            for line in f:
+                if not line.strip() or line.startswith("#"):
+                    continue
+                cells = [c.strip() for c in line.split(",")]
+                return cells[:2] == HEADER[:2]
+    except (OSError, UnicodeDecodeError):
+        return False
+    return False
 
 
 def exists(project):
@@ -117,11 +154,14 @@ def assignment_for(project, verbose=True):
     **表があればそちらを優先する**（利用者が触るのは表のほうなので）。
     """
     if not exists(project):
+        if project.condition_csv:
+            print(f"[条件表] 指定された条件表が見つかりません: "
+                  f"{project.condition_csv}（レイヤー名で吸音材を引きます）")
         return project.assignment
     assignment, _ = read(path(project))
     if verbose:
-        print(f"[条件表] {CONDITION_FILE} から {len(assignment)} レイヤの"
-              f"材料割り当てを読みました")
+        print(f"[条件表] {os.path.basename(path(project))} から {len(assignment)} "
+              f"レイヤの材料割り当てを読みました")
     if project.assignment and verbose:
         print(f"[条件表] 注意: project.json 側の割り当ては使いません"
               f"（条件表を優先します）")
@@ -240,7 +280,9 @@ def _write(file_name, rows, frequencies, project, model):
                                                             "種類未指定")
     with open(file_name, "w", encoding="utf-8-sig", newline="") as f:
         f.write("# 材料条件表 — レイヤー名と吸音材の対応\n")
-        f.write(f"# 対象室・条件名: {project.name}\n")
+        f.write(f"# 対象室: {project.room_label}"
+                + (f" / 条件: {project.condition_label}"
+                   if project.condition_label else "") + "\n")
         f.write(f"# モデル: {project.dxf}\n")
         f.write(f"# 吸音率表: {project.absorption_csv}（{kind}）\n")
         f.write("# ★書き換えるのは「材料名」の列だけ。"

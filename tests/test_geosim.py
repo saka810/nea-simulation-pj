@@ -2268,6 +2268,302 @@ def test_workbook():
 
     shutil.rmtree(folder, ignore_errors=True)
 
+# ------------------------------- 経路の使い回しと一括計算（依頼 2026-08-21）
+def test_path_reuse():
+    print("\n[35] 経路の使い回し（吸音材だけ変えた再計算）")
+    import shutil
+    import tempfile
+
+    import mesh_method as mm
+    import path_cache as pc
+    import project as pj
+
+    model, source, receiver = load_test_room(6)
+    mesh = model.mesh
+    rays = sr.soundray_generator(3000)
+    history = lr.loop(np.asarray(source, float), np.asarray(receiver, float),
+                      rays, 8, mesh, 0.3)
+    unique = ld.delete(history)
+    pulses = ln.loop(np.asarray(source, float), np.asarray(receiver, float),
+                     unique, mesh, band_number=6, verbose=False)
+
+    # ---- ★経路の幾何が残っていること ----
+    check("パルス列が反射の幾何を持つ",
+          pulses.walls.shape[0] == len(pulses) and pulses.cos_theta.shape
+          == pulses.walls.shape, f"{pulses.walls.shape}")
+    check("反射なしの区間は -1 で詰める",
+          np.all(pulses.walls[pulses.reflection_count == 0] < 0)
+          if np.any(pulses.reflection_count == 0) else True)
+    lengths = (pulses.walls >= 0).sum(axis=1)
+    check("反射面の本数が反射回数と一致",
+          np.array_equal(lengths, pulses.reflection_count),
+          f"{lengths[:5]} / {pulses.reflection_count[:5]}")
+    check("cosθ が 0〜1 に入る",
+          np.all((pulses.cos_theta >= 0.0) & (pulses.cos_theta <= 1.0 + 1e-12)))
+
+    # ---- ★幾何からエネルギーを作り直すと一致する ----
+    original = pulses.energy.copy()
+    pulses.recompute_energy(mesh)
+    error = np.max(np.abs(pulses.energy - original)
+                   / np.maximum(original, 1e-300))
+    check("★幾何から作り直したエネルギーが元と一致（丸めのみ）",
+          error < 1e-12, f"最大相対差 {error:.2e}")
+
+    # ---- 吸音率を変えるとエネルギーが変わる（下がる）----
+    absorption = np.array([np.atleast_1d(m.absorption_coefficient) for m in mesh])
+    more = ln.energy_from_geometry(pulses.walls, pulses.cos_theta,
+                                   np.minimum(absorption * 4.0, 0.95))
+    reflected = pulses.reflection_count > 0
+    check("吸音率を上げると反射した経路のエネルギーが下がる",
+          np.all(more[reflected].sum(axis=1) < original[reflected].sum(axis=1)),
+          f"合計 {more.sum():.3g} < {original.sum():.3g}")
+    check("直接音（反射 0 回）は吸音率に依らない",
+          np.allclose(more[~reflected], original[~reflected])
+          if np.any(~reflected) else True)
+
+    # ---- 保存して読み戻す ----
+    folder = tempfile.mkdtemp(prefix="geosim_paths_")
+    project = pj.Project(folder, dxf=TEST_DXF, band_number=6, rays=3000,
+                         nref=8, radius=0.3)
+    project.receiver_index = 1
+    project.ensure_dirs()
+    faces = mm.collision_arrays(mesh)
+    mark = pc.fingerprint(mesh, faces, source, receiver, 3000, 8, 0.3, False)
+    path = pc.save(project.paths_cache(), pulses, mark, verbose=False)
+    check("経路の npz が書ける", path and os.path.isfile(path),
+          os.path.basename(path or ""))
+    check("★ファイル名に条件名を付けない（条件をまたいで使うから）",
+          "経路" in os.path.basename(path)
+          and project.condition_label not in os.path.basename(path)
+          if project.condition_label else True)
+
+    back = pc.reuse(path, mesh, mark, 6, ln.SOUND_VELOCITY, verbose=False)
+    check("読み戻せる", back is not None and len(back) == len(pulses),
+          f"{0 if back is None else len(back)} / {len(pulses)} 本")
+    order = np.argsort(pulses.time, kind="stable")
+    check("到来時刻が一致", np.allclose(back.time, pulses.time[order]))
+    check("到来方向が一致", np.allclose(back.direction, pulses.direction[order]))
+    check("★エネルギーが一致（吸音率を当て直したもの）",
+          np.allclose(back.energy, pulses.energy[order], rtol=1e-10),
+          f"最大差 {np.max(np.abs(back.energy - pulses.energy[order])):.2e}")
+
+    # ---- ★指紋が違えば使わない ----
+    for key, changed, why in (("nref", 16, "反射回数"),
+                              ("rays", 5000, "音線数"),
+                              ("radius", 0.5, "受音球")):
+        other = dict(mark)
+        other[key] = changed
+        check(f"{why}が違えば使わない",
+              pc.load(path, other, verbose=False) is None)
+    moved = dict(mark)
+    moved["receiver"] = [1.0, 1.0, 1.0]
+    check("受音点が違えば使わない", pc.load(path, moved, verbose=False) is None)
+    warped = dict(mark)
+    warped["geometry"] = "0" * 40
+    check("モデルの形が違えば使わない", pc.load(path, warped, verbose=False) is None)
+
+    # ★材料の割り当て方を変えるとパッチが変わるので使えない、という判定
+    patched = dict(mark)
+    patched["patches"] = "0" * 40
+    reason = pc.compare(patched, mark)
+    check("★パッチの切れ目が動いたら理由を告げて使わない",
+          reason is not None and "パッチ" in reason, str(reason))
+
+    check("吸音率の値そのものは指紋に入れない（変えても経路は同じ）",
+          "absorption" not in pc.FINGERPRINT_KEYS
+          and set(pc.FINGERPRINT_KEYS) == {"geometry", "patches", "source",
+                                           "receiver", "rays", "nref", "radius",
+                                           "two_sided"},
+          str(pc.FINGERPRINT_KEYS))
+
+    shutil.rmtree(folder, ignore_errors=True)
+
+
+def test_conditions_batch():
+    print("\n[36] 条件の選択と一括計算")
+    import shutil
+    import tempfile
+
+    import condition_table as ct
+    import project as pj
+    import run_project
+    import summary as sm
+
+    folder = tempfile.mkdtemp(prefix="geosim_batch_")
+    shutil.copy(TEST_DXF, os.path.join(folder, "テスト室.dxf"))
+    project = pj.Project(folder, dxf="テスト室.dxf", band_number=6, rays=2000,
+                         nref=6, radius=0.3, max_time=0.5, volume=6.0)
+    project.ensure_dirs()
+
+    # ---- 名前の作り方（DXF 名＝部屋名／条件表名＝条件名）----
+    check("対象室名は DXF のファイル名から取る", project.room_label == "テスト室",
+          project.room_label)
+    check("条件表を指定しなければ条件名は付かない",
+          project.condition_label == "" and project.file_prefix == "テスト室",
+          project.file_prefix)
+    project.condition_csv = "吸音追加案.csv"
+    check("★結果ファイル名が「部屋名_条件名」になる",
+          project.file_prefix == "テスト室_吸音追加案"
+          and os.path.basename(project.result_path("rt"))
+          == "テスト室_吸音追加案_rt.csv",
+          os.path.basename(project.result_path("rt")))
+    check("★経路のキャッシュには条件名を付けない",
+          os.path.basename(project.paths_cache()) == "テスト室_経路.npz",
+          os.path.basename(project.paths_cache()))
+    check("音線軌跡も条件に依らない（条件ごとに作り直さない）",
+          os.path.basename(project.result_path("raylog")) == "テスト室_raylog.npz",
+          os.path.basename(project.result_path("raylog")))
+    project.name = "研修室A"
+    check("対象室名を書けばそちらが優先", project.room_label == "研修室A")
+    project.name = ""
+    project.condition_csv = ""
+
+    # ---- 条件表を 2 つ作る（吸音率だけ違う＝パッチの分け方は同じ）----
+    library = ab.MaterialLibrary()
+    library.add("硬い壁", [0.02] * 6)
+    library.add("吸音板", [0.7] * 6)
+    # 吸音率表もフォルダに置く（これが無いと材料名から吸音率を引けない）
+    project.absorption_csv = library.to_csv(os.path.join(folder, "吸音率.csv"))
+    project.absorption_kind = "normal"
+    project.save()
+
+    # ★書いた CSV を読み戻せること。`to_csv` は吸音率のあとに kind / note の列を
+    #   書くので、そこで行を捨てる作りだと**自分が書いた表が読めなかった**
+    #   （2026-08-21 に発見して直した）
+    back = ab.MaterialLibrary.from_csv(project.absorption_csv, kind="normal")
+    check("★材料表を書いて読み戻せる（kind / note の列があっても）",
+          set(back.names()) == {"硬い壁", "吸音板"}, str(back.names()))
+    check("吸音率も一致",
+          np.allclose(back.get("吸音板").coefficients, 0.7)
+          and np.allclose(back.get("硬い壁").coefficients, 0.02))
+    model = rd.read_model(project.dxf_path, band_number=6, verbose=False)
+    plans = {"現状": {"1": "硬い壁", "2": "硬い壁", "3": "硬い壁"},
+             "吸音追加案": {"1": "硬い壁", "2": "吸音板", "3": "硬い壁"}}
+    for name, assignment in plans.items():
+        sub = pj.Project(folder, **{k: getattr(project, k) for k in pj.DEFAULTS})
+        sub.condition_csv = name + ".csv"
+        ct.update(sub, model, library, assignment=assignment, verbose=False)
+
+    found = ct.discover(folder)
+    check("フォルダの条件表を見つける", len(found) == 2,
+          str([os.path.basename(f) for f in found]))
+    check("★中身で判別する（吸音率表や結果 CSV を拾わない）",
+          not ct.is_condition_table(os.path.join(folder, "テスト室.dxf"))
+          and all(ct.is_condition_table(f) for f in found))
+
+    # ---- 一括計算 ----
+    outcome = run_project.run_conditions(project, verbose=False,
+                                         make_figures=False)
+    check("2 条件とも回る", len(outcome["conditions"]) == 2,
+          str(len(outcome["conditions"])))
+
+    results = project.path(pj.RESULT_DIR)
+    names = sorted(os.listdir(results))
+    for condition in ("現状", "吸音追加案"):
+        check(f"『{condition}』の結果が別の名前で並ぶ",
+              f"テスト室_{condition}_まとめ_残響時間.csv" in names, str(names)[:120])
+    check("★経路のキャッシュは 1 つだけ（条件をまたいで共有）",
+          sum(1 for n in os.listdir(os.path.join(results, "rec1"))
+              if n.endswith("経路.npz")) == 1,
+          str(sorted(os.listdir(os.path.join(results, "rec1")))))
+
+    # ---- 条件で結果が変わっていること（吸音を足したら残響が短い）----
+    def average(condition, filename, item, skip):
+        sub = pj.Project(folder, **{k: getattr(project, k) for k in pj.DEFAULTS})
+        sub.condition_csv = condition + ".csv"
+        table = sm._read_summary(sub, filename, skip)
+        return None if table is None else table[1].get(("平均", item))
+
+    quiet = average("吸音追加案", sm.REVERBERATION_FILE, "T30_s", 2)
+    hard = average("現状", sm.REVERBERATION_FILE, "T30_s", 2)
+    check("★吸音を足した条件のほうが残響が短い",
+          quiet is not None and hard is not None
+          and np.nanmean(quiet) < np.nanmean(hard),
+          f"吸音追加案 {np.nanmean(quiet):.3f} s < 現状 {np.nanmean(hard):.3f} s")
+    loud = average("現状", sm.LEVEL_FILE, "Lp_dB", 3)
+    soft = average("吸音追加案", sm.LEVEL_FILE, "Lp_dB", 3)
+    check("吸音を足した条件のほうが音圧レベルが低い",
+          np.nanmean(soft) < np.nanmean(loud),
+          f"{np.nanmean(soft):.2f} < {np.nanmean(loud):.2f} dB")
+
+    # ---- 条件の比較表 ----
+    comparison = outcome["comparison"]
+    check("条件の比較表ができる", comparison and os.path.isfile(comparison),
+          os.path.basename(comparison or ""))
+    check("比較表に条件名が付かない（条件をまたぐ表なので）",
+          os.path.basename(comparison) == "テスト室_まとめ_条件比較.csv",
+          os.path.basename(comparison))
+    with open(comparison, encoding="utf-8-sig") as f:
+        body = f.read()
+    check("1 列目の見出しが「条件」", body.startswith("条件,項目,総合,"),
+          body.split(chr(10))[0][:40])
+    for condition in plans:
+        check(f"比較表に『{condition}』の行がある", f"{condition},T30_s" in body)
+
+    # ---- Excel に比較シートが入る ----
+    try:
+        from openpyxl import load_workbook
+        import workbook as wb
+        sub = pj.Project(folder, **{k: getattr(project, k) for k in pj.DEFAULTS})
+        sub.condition_csv = "現状.csv"
+        book = load_workbook(wb.path(sub))
+        check("Excel に『条件比較』シートが入る",
+              wb.SHEET_COMPARISON in book.sheetnames, str(book.sheetnames))
+        # ★数値判定（2026-08-21 ユーザー指摘。面積が文字列のままだった）
+        room = book[wb.SHEET_ROOM]
+        check("★面積が数値として入る（文字列でない）",
+              isinstance(room.cell(row=2, column=3).value, (int, float)),
+              f"{room.cell(row=2, column=3).value!r}")
+        level = book[wb.SHEET_LEVEL]
+        check("★音源距離も数値",
+              isinstance(level.cell(row=2, column=3).value, (int, float)),
+              f"{level.cell(row=2, column=3).value!r}")
+        sti = book[wb.SHEET_STI]
+        check("★STI の総合値も数値",
+              isinstance(sti.cell(row=2, column=3).value, (int, float)),
+              f"{sti.cell(row=2, column=3).value!r}")
+        condition_sheet = book[wb.SHEET_CONDITION]
+        check("★材料条件表の面数・面積も数値",
+              isinstance(condition_sheet.cell(row=2, column=4).value, (int, float))
+              and isinstance(condition_sheet.cell(row=2, column=5).value,
+                             (int, float)),
+              f"{condition_sheet.cell(row=2, column=4).value!r} / "
+              f"{condition_sheet.cell(row=2, column=5).value!r}")
+        check("材料名は文字のまま",
+              isinstance(condition_sheet.cell(row=2, column=3).value, str),
+              f"{condition_sheet.cell(row=2, column=3).value!r}")
+        # 全シートを走査して「数値になるのに文字列のまま」のセルが無いか
+        stragglers = []
+        for name in book.sheetnames:
+            sheet = book[name]
+            first = wb.SHEET_LAYOUT[name]["text"]
+            for row in sheet.iter_rows(min_row=2, min_col=first + 1):
+                for cell in row:
+                    if not isinstance(cell.value, str) or not cell.value.strip():
+                        continue
+                    try:
+                        float(cell.value)
+                    except ValueError:
+                        continue
+                    stragglers.append(f"{name}!{cell.coordinate}={cell.value}")
+        check("★数値のまま残っている文字列セルが無い", not stragglers,
+              " / ".join(stragglers[:5]))
+    except ImportError:
+        check("openpyxl が入っている", False, "pip install -r requirements.txt")
+
+    # ---- 音圧レベルから自由音場の行を外したこと（ユーザー判断）----
+    import table as tb
+    spl = tb.read_sectioned_table(
+        os.path.join(results, "rec1", "テスト室_現状_spl.csv"))
+    check("★自由音場と差の行は出さない",
+          "自由音場_dB" not in spl["rows"] and "自由音場との差_dB" not in spl["rows"],
+          str(sorted(spl["rows"]))[:120])
+    check("音圧レベルと内訳は残る",
+          all(k in spl["rows"] for k in ("Lp_dB", "Lp_A_dB", "直接音_dB",
+                                         "反射音_dB")))
+
+    shutil.rmtree(folder, ignore_errors=True)
+
 def main():
     print("geosim 数値検証")
     print(f"  Python {sys.version.split()[0]} / numpy {np.__version__}")
@@ -2286,7 +2582,7 @@ def main():
                test_patch_collision, test_shared_trace_and_batch_backtrace,
                test_result_naming, test_sound_level,
                test_speech_transmission_index, test_condition_table,
-               test_workbook):
+               test_workbook, test_path_reuse, test_conditions_batch):
         fn()
 
     failed = [name for name, ok in _results if not ok]
