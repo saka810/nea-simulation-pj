@@ -46,6 +46,7 @@ def run(project, verbose=True, make_figures=True, progress=None,
                           write_back=False,
                           head_azimuth=project.head_azimuth_for(0),
                           reuse_paths=reuse_paths, progress=progress)
+        _write_points(project, receivers, result.get("model"), verbose=verbose)
         _write_summaries(project, verbose=verbose)
         return result
 
@@ -69,6 +70,7 @@ def run(project, verbose=True, make_figures=True, progress=None,
             # 統計残響式は受音点に依らないので 1 点目の結果を配る（無駄なループを消す）
             shared_statistical = (shared_statistical
                                   or results[-1].get("statistical"))
+        _write_points(project, receivers, results[0].get("model"), verbose=verbose)
         _write_summaries(project, verbose=verbose)
         return {"receivers": receivers, "results": results, **results[0]}
 
@@ -103,6 +105,7 @@ def run(project, verbose=True, make_figures=True, progress=None,
         # 軌跡は受音点に依らないので `結果/` 直下に 1 つだけ置く。
         # `clear_results` のあとに置かないと消される
         recorder.save_npz(project.result_path("raylog"))
+    _write_points(project, receivers, results[0].get("model"), verbose=verbose)
     _write_summaries(project, verbose=verbose)
     return {"receivers": receivers, "results": results, **results[0]}
 
@@ -348,6 +351,55 @@ def _clock(seconds):
     minutes, second = divmod(rest, 60)
     return (f"{hours}:{minutes:02d}:{second:02d}" if hours
             else f"{minutes}:{second:02d}")
+
+
+def _write_points(project, receivers=None, model=None, verbose=True):
+    """**測定点の一覧（CSV）と配置図（平面＋立面 2 方向）**を書く。
+
+    ★どれがどの点でどちらを向いているか、あとから分かるように
+    （2026-08-23 ユーザー要望）。**受音点に依らない**ので `結果/` `図/` 直下、
+    吸音材にも依らないので条件名は付けない（`ROOM_SCOPED_RESULTS`）。
+    名前は `結果/recN/` に合わせて `rec1`… とする（表とフォルダが対応する）。
+    """
+    try:
+        if receivers is None:
+            receivers = _receivers(project)
+        sources = []
+        if project.source is not None:
+            sources = [np.asarray(project.source, dtype=float)]
+        elif model is not None and getattr(model, "source_points", None):
+            sources = [np.asarray(p, dtype=float) for p in model.source_points]
+        azimuths = [project.head_azimuth_for(k) for k in range(len(receivers))]
+
+        shared = _sub_project(project, None) if False else project
+        path = pj.Project(project.folder, **project.values()).result_path("points") \
+            if False else None
+        # `receiver_index` を外した状態で書く（`結果/` 直下・条件名なし）
+        keep = project.receiver_index
+        project.receiver_index = None
+        try:
+            written = [pj.write_points_csv(project.result_path("points"),
+                                           sources, receivers, azimuths)]
+            if verbose:
+                print(f"[run] 測定点の一覧: {written[0]}")
+            try:
+                import plots as pl
+                figure = project.figure_path("points.png", shared=True)
+                pl.measurement_points(model, figure, sources=sources,
+                                      receivers=receivers, azimuths=azimuths)
+                written.append(figure)
+                if verbose:
+                    print(f"[run] 測定点の配置図（平面＋立面 2 方向）: {figure}")
+            except Exception as error:      # 図が作れなくても表は残す
+                print(f"[run] 測定点の配置図を作れませんでした: "
+                      f"{type(error).__name__}: {error}")
+            return written
+        finally:
+            project.receiver_index = keep
+    except Exception as error:              # 本体の結果は残す
+        print(f"[run] 測定点の一覧を作れませんでした: "
+              f"{type(error).__name__}: {error}")
+        return []
 
 
 def _write_summaries(project, verbose=True):

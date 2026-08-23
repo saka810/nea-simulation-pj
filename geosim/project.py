@@ -80,6 +80,8 @@ RESULT_FILES = {
     "spl": "spl.csv",
     "sti": "sti.csv",
     "room": "吸音率と理論値.csv",
+    # 音源と受音点の位置・向きの一覧（2026-08-23 ユーザー要望。どれがどの点か分かるように）
+    "points": "測定点.csv",
     "raylog": "raylog.npz",
     # 経路の幾何（反射面の並びと入射角）。**吸音材を変えた再計算に使う**（F-9）
     "paths": PATHS_FILE,
@@ -88,12 +90,13 @@ RESULT_FILES = {
 # **受音点に依らない**結果。受音点ごとのフォルダではなく `結果/` 直下に置く。
 #   室の吸音と理論値 … 室形状と材料だけで決まる
 #   音線軌跡         … 音源から出た音線の形。受音点をまたいで共有している（F-6）
-SHARED_RESULTS = {"room", "raylog"}
+SHARED_RESULTS = {"room", "raylog", "points"}
 
 # **条件（吸音材）に依らない**結果。ファイル名に条件名を付けず、対象室名だけにする。
 #   経路の幾何 … 吸音に依らない（それを使い回すのがこの仕組みの目的）
 #   音線軌跡   … 形は吸音に依らない（色分けに使うエネルギーだけ条件に依る）
-ROOM_SCOPED_RESULTS = {"paths", "raylog"}
+# 測定点の一覧は吸音材に依らない（配置だけ）ので条件名を付けない
+ROOM_SCOPED_RESULTS = {"paths", "raylog", "points"}
 
 # `clear_results()` で**消さない**結果。作り直すのが高くつき、
 # かつ中身が古いかどうかを自分で判定できるもの（経路は指紋を突き合わせる）
@@ -330,15 +333,19 @@ class Project:
         """明瞭度の CSV（`結果/recN/…clarity.csv`）。"""
         return self.result_path("clarity")
 
-    def figure_dir(self):
-        """図の置き場。受音点が決まっていれば `図/recN/`。"""
-        if self.receiver_index is None:
+    def figure_dir(self, shared=False):
+        """図の置き場。受音点が決まっていれば `図/recN/`。
+
+        `shared=True` は**受音点に依らない図**（測定点の配置図など）で、
+        `図/` 直下に置く（結果 CSV の `SHARED_RESULTS` と同じ考え方）。
+        """
+        if shared or self.receiver_index is None:
             return self.path(FIGURE_DIR)
         return self.path(FIGURE_DIR, RECEIVER_DIR % self.receiver_index)
 
-    def figure_path(self, name):
+    def figure_path(self, name, shared=False):
         """図のパス。**図にも対象室＋条件名を付ける**（貼ってから見分けが付くように）。"""
-        return os.path.join(self.figure_dir(), self.prefixed(name))
+        return os.path.join(self.figure_dir(shared=shared), self.prefixed(name))
 
     def screenshot_dir(self):
         """画面から手で撮った画像・動画の置き場（`図/画面/`）。"""
@@ -692,6 +699,58 @@ def write_room_csv(filename, statistical, frequencies=None):
         rows.append((ROOM_SECTIONS[2], label, None, statistical[key]))
     return tb.write_sectioned_table(filename, frequencies, rows,
                                     value_label="面積_m2")
+
+
+def write_points_csv(filename, sources, receivers, azimuths=None,
+                     source_names=None, receiver_names=None):
+    """音源と受音点の**位置と向きの一覧**を CSV にする（`結果/<室>_測定点.csv`）。
+
+    ★**あとで結果を見たときに「どれがどの点か」が分からない**という
+    ユーザー指摘（2026-08-23）で追加した。結果は `結果/recN/` に分かれるので、
+    **名前は `recN` に合わせる**（フォルダ名・ファイル名とそのまま突き合わせられる）。
+
+        区分,名前,X_m,Y_m,Z_m,正面方位_deg,src1からの距離_m
+        音源,src1,1.000,0.500,0.500,,
+        受音点,rec1,0.700,2.000,0.500,0,1.530
+
+    ・**正面方位**は水平面の向き（0°=+X、真上から見て反時計回り）。音源には無い
+    ・**音源からの距離**は音源ごとに列を作る（音圧レベルの逆二乗の確認に使う）
+    ・図は `plots.measurement_points`（平面図＋立面 2 方向）。
+      **平面だけでは点が重なる**というユーザー指摘があるので立面も出す
+    """
+    import csv
+
+    sources = (np.atleast_2d(np.asarray(sources, dtype=float))
+               if sources is not None and len(sources) else np.zeros((0, 3)))
+    receivers = (np.atleast_2d(np.asarray(receivers, dtype=float))
+                 if receivers is not None and len(receivers) else np.zeros((0, 3)))
+    if source_names is None:
+        source_names = [f"src{k + 1}" for k in range(len(sources))]
+    if receiver_names is None:
+        receiver_names = [f"rec{k + 1}" for k in range(len(receivers))]
+    if azimuths is None:
+        azimuths = np.zeros(len(receivers))
+    azimuths = np.asarray(azimuths, dtype=float).ravel()
+
+    header = ["区分", "名前", "X_m", "Y_m", "Z_m", "正面方位_deg"]
+    header += [f"{name}からの距離_m" for name in source_names]
+
+    rows = []
+    for point, name in zip(sources, source_names):
+        rows.append(["音源", name] + [f"{v:.3f}" for v in point] + [""]
+                    + ["" for _ in source_names])
+    for k, (point, name) in enumerate(zip(receivers, receiver_names)):
+        distances = [f"{float(np.linalg.norm(point - src)):.3f}" for src in sources]
+        rows.append(["受音点", name] + [f"{v:.3f}" for v in point]
+                    + [f"{azimuths[k]:.0f}" if k < len(azimuths) else ""]
+                    + distances)
+
+    os.makedirs(os.path.dirname(os.path.abspath(filename)) or ".", exist_ok=True)
+    with open(filename, "w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(header)
+        writer.writerows(rows)
+    return filename
 
 
 def read_room_csv(path):

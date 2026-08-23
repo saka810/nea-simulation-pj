@@ -64,6 +64,8 @@ SHEET_LEVEL = "音圧レベル"
 SHEET_STI = "STI"
 SHEET_ROOM = "吸音率と理論値"
 SHEET_CONDITION = "材料条件表"
+# 音源と受音点の位置・向き（2026-08-23 ユーザー要望。どれがどの点か分かるように）
+SHEET_POINTS = "測定点"
 SHEET_COMPARISON = "条件比較"
 
 HEADER_FILL = "FFEFF3F8"
@@ -248,6 +250,8 @@ SHEET_LAYOUT = {
     # 材料条件表は 区分／レイヤー名／材料番号／材料名 が名前の列（番号も識別子なので
     # 文字のまま）、安全率・面数・面積が数値
     SHEET_CONDITION: {"text": 4, "chart": None, "first": 6},
+    # 測定点は 区分／名前 が文字、座標・正面方位・距離は数値
+    SHEET_POINTS: {"text": 2, "chart": None, "first": 3},
 }
 
 
@@ -282,12 +286,38 @@ def sheets(project, verbose=True):
         result.append((name, _numeric(comparison, layout(name)["text"]),
                        layout(name)["chart"], layout(name)["first"]))
 
+    # 測定点の一覧（受音点に依らないので条件名は付かない）
+    points = _read_rows(_shared_result(project, pj.RESULT_FILES["points"]))
+    if points is not None:
+        name = SHEET_POINTS
+        result.append((name, _numeric(points, layout(name)["text"]), None,
+                       layout(name)["first"]))
+    elif verbose:
+        print(f"[Excel] {pj.RESULT_FILES['points']} が無いので"
+              f"『{SHEET_POINTS}』は飛ばします")
+
     condition = _condition_rows(project)
     if condition is not None:
         name = SHEET_CONDITION
         result.append((name, _numeric(condition, layout(name)["text"]), None,
                        layout(name)["first"]))
     return result
+
+
+def _shared_result(project, filename):
+    """`結果/` 直下にある**受音点に依らない**結果のパス（頭は対象室名だけ）。
+
+    測定点の一覧は条件（吸音材）にも依らないので条件名が付かない
+    （`pj.ROOM_SCOPED_RESULTS`）。頭なしの昔のファイルも探す。
+    """
+    folder = project.path(pj.RESULT_DIR)
+    room = project.room_label
+    names = ([f"{room}_{filename}"] if room else []) + [filename]
+    for name in names:
+        candidate = os.path.join(folder, name)
+        if os.path.exists(candidate):
+            return candidate
+    return os.path.join(folder, names[0])
 
 
 def _run_info(project):

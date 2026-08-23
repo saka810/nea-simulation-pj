@@ -1090,6 +1090,109 @@ def test_direction():
           abs(totals[0] - 5.0) < 1e-12 and abs(totals.sum() - 12.0) < 1e-12,
           f"正面 {totals[0]:.1f} / 合計 {totals.sum():.1f}")
 
+    # ★★人の絵の向きと、方向分布の向きが揃っているか（2026-08-23 ユーザー指摘
+    #    「特に直接音の方向が違う気がします」）。
+    #    分布とラベルは**上を正面**として描いているのに、人の絵の鼻だけ
+    #    +X（図の右）を向いていて、**絵だけ 90° ずれていた**。
+    #    データと矢印は正しかったので、人の絵を見ながら読むと違って見えた。
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Polygon
+
+    figure, axis = plt.subplots()
+    plots._head_patch(axis, 1.0)
+    noses = [p for p in axis.patches if isinstance(p, Polygon)]
+    check("人の絵に鼻がある", len(noses) == 1)
+    if noses:
+        tip = np.asarray(noses[0].get_xy())
+        far = tip[int(np.argmax(np.linalg.norm(tip, axis=1)))]
+        check("★人の絵の鼻は**上（図の +Y）**を向く（正面のラベルと同じ側）",
+              far[1] > 0.9 and abs(far[0]) < 0.2,
+              f"鼻の先 ({far[0]:.2f}, {far[1]:.2f})")
+    # 耳は左右（図の ±X）にある
+    ears = [p for p in axis.patches
+            if type(p).__name__ == "Ellipse" and abs(p.center[0]) > 0.5]
+    check("★人の絵の耳は左右（図の ±X）にある", len(ears) == 2,
+          f"{len(ears)} 個")
+    plt.close(figure)
+
+    # 図の上での位置。相対方位 a は (x, y) = (-sin a, cos a) に描かれる。
+    # 正面(0°)=上 / 左(90°)=図の左 / 右(270°)=図の右。真上から見て正面が上なら
+    # 左手は図の左を指すので、これで人の絵と分布が一致する
+    for angle, want, name in ((0.0, (0.0, 1.0), "正面=上"),
+                              (90.0, (-1.0, 0.0), "左=図の左"),
+                              (270.0, (1.0, 0.0), "右=図の右")):
+        a = np.deg2rad(angle)
+        got = (-np.sin(a), np.cos(a))
+        check(f"図の向き: {name}",
+              abs(got[0] - want[0]) < 1e-9 and abs(got[1] - want[1]) < 1e-9)
+
+    # 実例：音源が受音点の −Y 側にあり、頭が +X を向いているなら「右寄りの前」
+    source, receiver = np.array([1.0, 0.5, 0.5]), np.array([0.7, 2.0, 0.5])
+    unit = (source - receiver) / np.linalg.norm(source - receiver)
+    relative = np.mod(np.arctan2(unit[1], unit[0]), 2.0 * np.pi)
+    x, y = -np.sin(relative), np.cos(relative)
+    check("★直接音は図の右手前に描かれる（幾何と一致）", x > 0.9 and 0.0 < y < 0.4,
+          f"図の位置 ({x:.2f}, {y:.2f}) / 相対方位 {np.rad2deg(relative):.1f}°")
+
+
+# ---------------------------------------------------------------- 測定点の一覧
+def test_measurement_points():
+    print(chr(10) + "[40] 測定点の一覧と配置図（2026-08-23 ユーザー要望）")
+    import plots
+    import project as pj
+
+    sources = [[1.0, 0.5, 0.5]]
+    receivers = [[0.7, 2.0, 0.5], [1.5, 2.0, 0.5], [0.7, 2.0, 0.8]]
+    azimuths = [0.0, 90.0, 215.0]
+
+    import tempfile
+    import shutil
+
+    folder = tempfile.mkdtemp()
+    path = os.path.join(folder, "測定点.csv")
+    pj.write_points_csv(path, sources, receivers, azimuths)
+    with open(path, encoding="utf-8-sig") as f:
+        rows = [line.rstrip(chr(10)).split(",") for line in f]
+    header, body = rows[0], rows[1:]
+    check("見出しに座標と正面方位と音源からの距離がある",
+          header[:6] == ["区分", "名前", "X_m", "Y_m", "Z_m", "正面方位_deg"]
+          and header[6] == "src1からの距離_m", ",".join(header))
+    check("音源と受音点が全部並ぶ（1 + 3 行）", len(body) == 4, f"{len(body)} 行")
+    check("★名前は `結果/recN/` に合わせる（表とフォルダが対応する）",
+          [r[1] for r in body] == ["src1", "rec1", "rec2", "rec3"],
+          " / ".join(r[1] for r in body))
+    check("正面方位が受音点ごとに入る",
+          [r[5] for r in body[1:]] == ["0", "90", "215"],
+          " / ".join(r[5] for r in body[1:]))
+    want = float(np.linalg.norm(np.array(receivers[0]) - np.array(sources[0])))
+    check("音源からの距離が幾何と一致", abs(float(body[1][6]) - want) < 1e-3,
+          f"{body[1][6]} / 幾何 {want:.3f}")
+    check("音源の行に正面方位は入らない（向きを持たない）", body[0][5] == "")
+
+    # 配置図（平面＋立面 2 方向）が描けること。**モデルが無くても点だけで描ける**
+    figure = os.path.join(folder, "測定点.png")
+    plots.measurement_points(None, figure, sources=sources, receivers=receivers,
+                             azimuths=azimuths)
+    check("配置図が作られる", os.path.exists(figure)
+          and os.path.getsize(figure) > 1000,
+          f"{os.path.getsize(figure) if os.path.exists(figure) else 0} バイト")
+
+    # 受音点に依らない・条件に依らない置き場になっているか
+    project = pj.Project(folder, dxf="研修室.dxf", condition_sheet="現状")
+    project.receiver_index = 2
+    result = project.result_path("points")
+    check("★測定点の表は `結果/` 直下（受音点ごとに分けない）",
+          os.path.dirname(result) == project.path("結果"), result)
+    check("★条件名は付けない（吸音材に依らないので）",
+          os.path.basename(result) == "研修室_測定点.csv",
+          os.path.basename(result))
+    check("★配置図も `図/` 直下",
+          os.path.dirname(project.figure_path("points.png", shared=True))
+          == project.path("図"))
+    shutil.rmtree(folder, ignore_errors=True)
+
 
 # ---------------------------------------------------------------- モード分布
 def test_modes():
@@ -3027,7 +3130,8 @@ def main():
                test_result_naming, test_sound_level,
                test_speech_transmission_index, test_condition_table,
                test_workbook, test_path_reuse, test_conditions_batch,
-               test_panel_scroll, test_empty_model, test_impulse_fast):
+               test_panel_scroll, test_empty_model, test_impulse_fast,
+               test_measurement_points):
         fn()
 
     failed = [name for name, ok in _results if not ok]

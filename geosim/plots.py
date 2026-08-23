@@ -386,25 +386,33 @@ EARLY_LIMIT = 0.050
 
 
 def _head_patch(ax, radius, colour="#d6dae2"):
-    """真上から見た人の絵を原点に描く（正面は +X 方向）。
+    """真上から見た人の絵を原点に描く。**この図では正面が上（図の +Y）**。
 
     円（頭）＋鼻の三角＋両耳。**どちらが前か**が一目で分かればよいので、
     細かい形は追わない。図の主役は方向分布のほうなので控えめな色にしてある。
+
+    ★★**鼻は上に向ける**（2026-08-23 にユーザー指摘で直した）。
+    以前は鼻を +X（図の右）に描いていたのに、方向分布と「正面」「左」「右」の
+    ラベルは上を正面として描いていたので、**絵だけ 90° ずれていた**。
+    直接音の矢印は正しかったのに、人の絵と見比べると右から来ているように見えた。
+    この図は**頭を基準にした相対方位**で描く（世界座標の X・Y ではない）ので、
+    正面＝上・左＝図の左・右＝図の右で揃える（真上から見ると
+    正面が上のとき左手は図の左を指す）。
     """
     from matplotlib.patches import Circle, Ellipse, Polygon
 
     ax.add_patch(Circle((0, 0), radius, facecolor="#2a3140",
                         edgecolor=colour, linewidth=1.2, zorder=5))
-    # 鼻（正面 = +X）
+    # 鼻（正面 = 上）
     nose = radius * 0.42
-    ax.add_patch(Polygon([[radius * 0.92, -nose * 0.5],
-                          [radius * 1.38, 0.0],
-                          [radius * 0.92, nose * 0.5]],
+    ax.add_patch(Polygon([[-nose * 0.5, radius * 0.92],
+                          [0.0, radius * 1.38],
+                          [nose * 0.5, radius * 0.92]],
                          closed=True, facecolor=colour, edgecolor=colour, zorder=6))
-    # 両耳（±Y）
+    # 両耳（左右 = 図の ±X）
     for sign in (-1.0, 1.0):
-        ax.add_patch(Ellipse((0.0, sign * radius * 1.02),
-                             width=radius * 0.30, height=radius * 0.52,
+        ax.add_patch(Ellipse((sign * radius * 1.02, 0.0),
+                             width=radius * 0.52, height=radius * 0.30,
                              facecolor="#2a3140", edgecolor=colour,
                              linewidth=1.0, zorder=6))
 
@@ -1097,3 +1105,149 @@ def save_all(project, results, verbose=True):
                  sound_velocity=velocity)
 
     return written
+
+
+# ------------------------------------------------------------------------------
+# ⑨ 測定点の配置（平面図＋2 方向の立面図）
+#
+# ★**あとで結果を見たときに「どれがどの点か」が分かるように**（2026-08-23
+#   ユーザー要望）。結果は `結果/recN/` に分かれるが、rec2 がどこの点で
+#   どちらを向いていたかは数字の表だけでは頭に入らない。
+#   **平面だけでは重なる点がある**というユーザー指摘があるので、
+#   平面（X-Y）と立面 2 方向（X-Z / Y-Z）の 3 面で出す。
+# ------------------------------------------------------------------------------
+
+SOURCE_COLOUR = "#ff5f5f"
+RECEIVER_COLOUR = "#4cc9f0"
+
+
+def _patch_outline_segments(model):
+    """室の形を線で描くための線分 (M,2,3) を返す。
+
+    三角形の辺を全部引くと網目になって形が読めないので、
+    **同一平面パッチの外周だけ**を残す（面の確認画面と同じ考え方）。
+    """
+    import read_dxffile as rd
+
+    if not getattr(model, "mesh", None):
+        return np.zeros((0, 2, 3))
+    triangles = np.array([np.asarray(m.vertexes, dtype=float) for m in model.mesh])
+    normals = np.array([np.asarray(m.normal, dtype=float) for m in model.mesh])
+    try:
+        groups = rd.coplanar_groups(triangles, normals)
+    except Exception:
+        groups = np.arange(len(triangles))
+
+    segments = []
+    for group in np.unique(groups):
+        seen = {}
+        for tri in triangles[groups == group]:
+            for a, b in ((0, 1), (1, 2), (2, 0)):
+                ka, kb = tuple(np.round(tri[a], 6)), tuple(np.round(tri[b], 6))
+                key = (ka, kb) if ka <= kb else (kb, ka)
+                seen[key] = seen.get(key, 0) + 1
+        segments += [key for key, count in seen.items() if count == 1]
+    if not segments:
+        return np.zeros((0, 2, 3))
+    return np.array(segments, dtype=float)
+
+
+def measurement_points(model, path, sources=None, receivers=None,
+                       azimuths=None, source_names=None, receiver_names=None):
+    """音源と受音点の配置を**平面図＋2 方向の立面図**にする。
+
+    引数:
+        model      DxfModel（室の形を線で描くのに使う。None でも点だけは描ける）
+        sources    (S,3) 音源の座標 [m]
+        receivers  (R,3) 受音点の座標 [m]
+        azimuths   (R,)  受音点ごとの正面方位 [度]（0°=+X、真上から見て反時計回り）
+
+    ★**平面図には正面方向の矢印**を描く（立面には描かない。方位は水平面の量なので、
+    立面に描くと見た目の長さが向きによって変わって誤解を生む）。
+    """
+    sources = np.atleast_2d(np.asarray(sources, dtype=float)) if sources is not None \
+        else np.zeros((0, 3))
+    receivers = np.atleast_2d(np.asarray(receivers, dtype=float)) \
+        if receivers is not None else np.zeros((0, 3))
+    if source_names is None:
+        source_names = [f"src{k + 1}" for k in range(len(sources))]
+    if receiver_names is None:
+        receiver_names = [f"rec{k + 1}" for k in range(len(receivers))]
+    if azimuths is None:
+        azimuths = np.zeros(len(receivers))
+    azimuths = np.asarray(azimuths, dtype=float).ravel()
+
+    segments = _patch_outline_segments(model) if model is not None \
+        else np.zeros((0, 2, 3))
+
+    # (横軸, 縦軸, 表題, 横のラベル, 縦のラベル)
+    views = [(0, 1, "平面図（真上から）", "X [m]", "Y [m]"),
+             (0, 2, "立面図（+Y から見る）", "X [m]", "Z [m]"),
+             (1, 2, "立面図（−X から見る）", "Y [m]", "Z [m]")]
+
+    fig, axes = _figure(1, 3, figsize=(16.5, 5.8))
+    for ax, (h, v, title, xlabel, ylabel) in zip(np.atleast_1d(axes).ravel(), views):
+        _style(ax, title, xlabel, ylabel)
+        ax.set_aspect("equal", adjustable="datalim")
+
+        if len(segments):
+            from matplotlib.collections import LineCollection
+            ax.add_collection(LineCollection(segments[:, :, [h, v]],
+                                             colors="#6a7382", linewidths=0.7,
+                                             alpha=0.9, zorder=2))
+
+        # 平面図だけ、受音点の正面方向を矢印で描く
+        if (h, v) == (0, 1) and len(receivers):
+            span = _extent_span(segments, sources, receivers)
+            for point, angle in zip(receivers, azimuths):
+                length = span * 0.06
+                ax.annotate("", xytext=(point[0], point[1]),
+                            xy=(point[0] + length * np.cos(np.deg2rad(angle)),
+                                point[1] + length * np.sin(np.deg2rad(angle))),
+                            arrowprops=dict(arrowstyle="-|>", color=RECEIVER_COLOUR,
+                                            linewidth=1.6, shrinkA=0, shrinkB=0),
+                            zorder=5)
+
+        # ★**この投影で重なる点はラベルを縦にずらす**（2026-08-23 ユーザー指摘
+        #   「平面上被っている場合もある」）。重なったまま書くと名前が読めない。
+        #   どの点かは他の 2 面で見分けられるが、名前が潰れていると照合できない
+        stacked = {}
+        for points, names, colour, marker, label in (
+                (sources, source_names, SOURCE_COLOUR, "*", "音源"),
+                (receivers, receiver_names, RECEIVER_COLOUR, "o", "受音点")):
+            if not len(points):
+                continue
+            ax.scatter(points[:, h], points[:, v], s=140 if marker == "*" else 46,
+                       marker=marker, color=colour, edgecolors="#101521",
+                       linewidths=0.8, zorder=6, label=label)
+            for point, name in zip(points, names):
+                key = (round(float(point[h]), 3), round(float(point[v]), 3))
+                order = stacked.get(key, 0)
+                stacked[key] = order + 1
+                ax.annotate(name, (point[h], point[v]), color=colour, fontsize=8,
+                            textcoords="offset points",
+                            xytext=(7, 6 - 11 * order), zorder=7)
+
+        ax.autoscale_view()
+
+    # ★案内と凡例は**平面図の枠の中**に置く（`_save` が `tight_layout()` を
+    #   呼ぶので、図全体に置いた文字や凡例は他の枠の題名・軸ラベルと重なる）
+    plan = np.atleast_1d(axes).ravel()[0]
+    plan.legend(loc="upper right", fontsize=8, facecolor=PANEL, edgecolor=GRID,
+                labelcolor=TEXT, framealpha=0.9)
+    plan.text(0.02, 0.02,
+              "矢印 = 受音点の正面方向（0°=+X・真上から見て反時計回り）" + chr(10)
+              + "平面で重なる点は立面図で見分ける",
+              transform=plan.transAxes, color="#7f8794", fontsize=8,
+              ha="left", va="bottom", zorder=8)
+    return _save(fig, path)
+
+
+def _extent_span(segments, sources, receivers):
+    """図の広がり（矢印の長さを決めるのに使う）。"""
+    parts = [p.reshape(-1, 3) for p in (segments, sources, receivers) if len(p)]
+    if not parts:
+        return 1.0
+    points = np.vstack(parts)
+    span = float(np.max(points.max(axis=0) - points.min(axis=0)))
+    return span if span > 0.0 else 1.0
