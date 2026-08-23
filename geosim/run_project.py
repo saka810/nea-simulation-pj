@@ -600,13 +600,19 @@ def _library_for(project, verbose=False):
 
 
 def _absorption_table_for(project, verbose=False):
-    """`read_dxffile.read_model(absorption_table=...)` に渡す辞書。無ければ None。"""
+    """`read_dxffile.read_model(absorption_table=...)` に渡す辞書。無ければ None。
+
+    ★条件表の**安全率**（例 0.8 掛け）もここで効かせる。
+    カタログ値に掛けてから垂直入射へ変換する（`condition_table.absorption_table`）。
+    """
+    import condition_table as ct
+
     library = _library_for(project, verbose=verbose)
     if library is None:
         return None
-    return library.absorption_table(_assignment_for(project),
-                                    band_number=project.band_number,
-                                    warn=verbose)
+    return ct.absorption_table(library, _assignment_for(project),
+                               factors=ct.factors_for(project, verbose=verbose),
+                               band_number=project.band_number, warn=verbose)
 
 
 def _update_condition_table(project, model, verbose=True):

@@ -239,8 +239,8 @@ SHEET_LAYOUT = {
     SHEET_COMPARISON: {"text": 2, "chart": "line", "first": 3},
     SHEET_ROOM: {"text": 2, "chart": "line", "first": 3},
     # 材料条件表は 区分／レイヤー名／材料番号／材料名 が名前の列（番号も識別子なので
-    # 文字のまま）、面数と面積が数値
-    SHEET_CONDITION: {"text": 4, "chart": None, "first": 5},
+    # 文字のまま）、安全率・面数・面積が数値
+    SHEET_CONDITION: {"text": 4, "chart": None, "first": 6},
 }
 
 
@@ -305,10 +305,10 @@ def _condition_rows(project):
         library = run_project._library_for(project)
     except Exception:
         library = None
-    rows = [["区分", "レイヤー名", "材料番号", "材料名", "面数", "面積_m2"]]
-    for section, layer, key, count, area in records:
+    rows = [["区分", "レイヤー名", "材料番号", "材料名", "安全率", "面数", "面積_m2"]]
+    for section, layer, key, count, area, factor in records:
         rows.append([section, layer, key, ct.material_name(key, library),
-                     count, area])
+                     factor, count, area])
     return rows
 
 
