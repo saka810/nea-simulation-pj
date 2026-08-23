@@ -39,6 +39,21 @@ NEA（日本環境アメニティ株式会社）のシミュレーション PJ�
 
 各モジュールの詳細は [PROGRAM_STRUCTURE.md](PROGRAM_STRUCTURE.md)。
 
+## 資料を PDF で読む
+
+`docs/` の Markdown は **PDF 版が `docs/pdf/` に入っている**（そのまま開ける）。
+書き直したら作り直す：
+
+```
+.venv\Scripts\python docsuild_pdf.py            # docs/*.md を全部
+.venv\Scripts\python docsuild_pdf.py 技術説明書.md   # 1 つだけ
+```
+
+**追加のライブラリは要らない。**数式は matplotlib の mathtext で画像に焼き、
+PDF 化は Edge か Chrome のヘッドレス印刷（`--print-to-pdf`）を使う。
+mermaid の図はブラウザだけでは描けないので、PDF では元のテキストが枠付きで出る
+（図として見たいときは GitHub 上の Markdown を見る）。
+
 ## 環境構築
 
 **Python 3.10.11**（チーム方針。[.python-version](.python-version) を参照）。

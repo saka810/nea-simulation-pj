@@ -58,6 +58,14 @@
 - `tests\test_geosim.py` … 数値検証（504 項目）。pytest 不要、素の Python で走る。
   **数式に関わるコードを変更したら必ず走らせる**：`.venv\Scripts\python tests\test_geosim.py`
 - `TODO.md` … 作業一覧（A〜G にグルーピング）。着手・完了したらチェックボックスを更新する。
+- `docs\pdf\` … **docs の Markdown を PDF にしたもの**（2026-08-23 ユーザー要望
+  「docs 内の資料を PDF で見れるようにして」）。作り直しは
+  `.venv\Scripts\python docsuild_pdf.py`（`docs/build_pdf.py`）。
+  **追加のライブラリは入れていない**：数式は matplotlib の mathtext で画像に焼き、
+  PDF 化は Edge / Chrome のヘッドレス印刷。mermaid は枠付きのテキストで出す。
+  ★mathtext が読めない書き方は**黄色い枠で生の LaTeX を出す**（黙って消さない）。
+  ★数式の大きさは**焼いた画像の実寸から**決める（em で決め打ちすると分数がつぶれる）。
+  **生成物なので、docs の .md を直したら作り直してコミットする**
 - `docs\技術説明書.md` … プログラムのフローと数式の意味の解説資料。
   数式の根拠は書籍『建築音響物理学』2.2 節。**数式に関わるコードを変更したらこの文書も更新する。**
 - `docs\出力・可視化方針.md` … 最終的に作りたい 6 種の出力と、そのために蓄積すべきデータ。

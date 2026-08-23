@@ -430,9 +430,19 @@ class Project:
         """
         removed = 0
         skip = set(KEEP_ON_CLEAR) | set(keep)
+        # ★★**受音点に依らない結果は 1 点目のときだけ消す**（2026-08-23 に直した）。
+        #   `_run_one` は受音点ごとに走り、その頭でここが呼ばれる。
+        #   `結果/` 直下のものまで毎回消していたので、**2 点目の掃除で
+        #   1 点目が書いた『吸音率と理論値.csv』が消えていた**
+        #   （統計残響式は受音点に依らないので 2 点目以降は計算せず、
+        #     書き直されないまま終わっていた。実際に研修室で消えていた）。
+        #   受音点 N>1 を扱っている分身に、共有のものを消す筋合いはない
+        shared_allowed = self.receiver_index in (None, 1)
         # 受音点ごとのものと、受音点に依らないものの両方（result_path が振り分ける）
         for key in RESULT_FILES:
             if key in skip:
+                continue
+            if key in SHARED_RESULTS and not shared_allowed:
                 continue
             for path in self.result_candidates(key):
                 if os.path.exists(path):

@@ -1193,6 +1193,36 @@ def test_measurement_points():
           == project.path("図"))
     shutil.rmtree(folder, ignore_errors=True)
 
+    # ★★受音点に依らない結果を 2 点目の掃除で消していないか（2026-08-23 に直した）。
+    #    `_run_one` は受音点ごとに走り、その頭で `clear_results()` が呼ばれる。
+    #    `結果/` 直下まで毎回消していたので、**1 点目が書いた
+    #    『吸音率と理論値.csv』が 2 点目の掃除で消えていた**
+    #    （統計残響式は受音点に依らないので 2 点目以降は書き直されない）。
+    #    実際に研修室で消えていたので、テストで固定する
+    folder = tempfile.mkdtemp()
+    project = pj.Project(folder, dxf="研修室.dxf", condition_sheet="現状")
+    project.ensure_dirs()
+    project.receiver_index = 1
+    shared = project.result_path("room")            # 結果/ 直下（受音点に依らない）
+    own = project.result_path("rt")                 # 結果/rec1/（受音点ごと）
+    for path in (shared, own):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("dummy")
+
+    project.receiver_index = 2                      # 2 点目を扱う分身
+    project.ensure_dirs()
+    project.clear_results(verbose=False)
+    check("★2 点目の掃除で『吸音率と理論値』を消さない（受音点に依らないので）",
+          os.path.exists(shared))
+    project.receiver_index = 1
+    project.clear_results(verbose=False)
+    check("★1 点目の掃除では消す（そのあと書き直される）",
+          not os.path.exists(shared))
+    check("受音点ごとの結果は自分のぶんが消える", not os.path.exists(own))
+    shutil.rmtree(folder, ignore_errors=True)
+
+
 
 # ---------------------------------------------------------------- モード分布
 def test_modes():
@@ -1965,10 +1995,20 @@ def test_result_naming():
     open(old_statistical, "w").close()
     check("★1 枚にまとめる前の rt_statistical.csv も読める",
           project.existing_result_path("room") == old_statistical)
+    # ★受音点に依らないものは**1 点目の掃除だけ**が消す（2026-08-23）。
+    #   2 点目の掃除で消していたので、1 点目が書いた『吸音率と理論値』が
+    #   消えたまま終わっていた（統計残響式は 2 点目以降は計算しないため）
     removed = project.clear_results(verbose=False)
-    check("昔の名前のファイルも消す（今回の結果と混ざらないように）",
-          not os.path.exists(legacy) and not os.path.exists(old_statistical),
-          f"{removed} 個")
+    check("★2 点目の掃除では受音点に依らないものを消さない",
+          os.path.exists(old_statistical), f"{removed} 個")
+    check("昔の名前のファイルも消す（受音点ごとのぶん）",
+          not os.path.exists(legacy), f"{removed} 個")
+    project.receiver_index = 1
+    project.ensure_dirs()
+    project.clear_results(verbose=False)
+    check("昔の名前のファイルも消す（1 点目なら受音点に依らないぶんも）",
+          not os.path.exists(old_statistical))
+    project.receiver_index = 2
 
     # ---- 『吸音率と理論値』の中身（材料別 → 平均 → 理論値 の順）----
     mesh = [rd.Mesh([0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1], "床",
