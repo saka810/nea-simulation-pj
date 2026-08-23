@@ -52,6 +52,7 @@ def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref
             source_power_db=None, noise_level_db=None,
             level_filename=None, sti_filename=None,
             paths_filename=None, reuse_paths=True, statistical_result=None,
+            impulse_method="fast",
             flip_faces=None, face_materials=None, traced_history=None,
             progress=None):
     """
@@ -344,7 +345,7 @@ def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref
             impulse = ir.impulse_response_from_pulses(
                 impulse_filename, pulses, octave_frequencies=frequencies,
                 atmosphere=atmosphere, sampling_frequency=sampling_frequency,
-                max_time=max_time)
+                max_time=max_time, method=impulse_method)
 
     # 残響時間の算出。元コード ipls2rt_fortran.f90 に対応
     reverberation = None

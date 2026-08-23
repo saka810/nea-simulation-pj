@@ -144,11 +144,23 @@ def transfer_function(energy32_air, time, nfreq, df, sound_velocity, chunk=4096)
 
 
 # 端数遅延（サブサンプルの位置にパルスを置く）に使う窓付き sinc のタップ数。
-# 大きいほど厳密版に近づくが、置く手間が増える。64 で実効値の差 0.5%・相関 0.998
-FRACTIONAL_TAPS = 64
+# ★**大きいほど厳密解（式(2)）に近づく**。実案件（パルス 8,825 本・応答 3 秒）で
+#
+#   タップ数   時間     実効値の比   波形の相関
+#      64     0.29 s    0.99744     0.99911
+#     128     0.47 s    0.99923     0.99970
+#     256     0.89 s    0.99975     0.99988   ← 既定
+#     512     2.62 s    0.99988     0.99996
+#
+# 単調に厳密解へ寄る（＝式(2) を切り詰めているだけだと確かめられる）。
+# 256 でも厳密版（17.4 秒）の 20 倍速いので、**余裕を見て 256 を既定にした**
+# （2026-08-23。差は 8 kHz バンドより上に集まる。`docs/技術説明書.md` 8.2.1）
+FRACTIONAL_TAPS = 256
 
 
-def impulse_train(energy32_air, time, nfft, sound_velocity, taps=FRACTIONAL_TAPS):
+def impulse_train(energy32_air, time, nfft, sound_velocity,
+                  sampling_frequency=SAMPLING_FREQUENCY,
+                  taps=FRACTIONAL_TAPS):
     """パルス列を**時間領域の列**にする（1/3 オクターブバンドごと）。戻り値 (32, nfft)。
 
     ★**これが高速化の要**（2026-08-21。ユーザー要望「配列演算で高速化」）。
@@ -171,14 +183,11 @@ def impulse_train(energy32_air, time, nfft, sound_velocity, taps=FRACTIONAL_TAPS
     amplitude = np.sqrt(energy32_air) / (time * sound_velocity)[None, :]
 
     half = int(taps) // 2
-    position = time * SAMPLING_FREQUENCY
+    # ★fs は**引数から**取る（モジュール定数を見ていて、fs を変えると
+    #   パルスの置き場が全部ずれるバグがあった。2026-08-23 に気づいた）
+    position = time * sampling_frequency
     index = np.floor(position).astype(np.int64)
     fraction = position - index
-    inside = (index - half + 1 >= 0) & (index + half < nfft)
-    if not np.any(inside):
-        return np.zeros((energy32_air.shape[0], nfft))
-    index, fraction = index[inside], fraction[inside]
-    amplitude = amplitude[:, inside]
 
     # 窓付き sinc。合計 1 に正規化して直流の重みを保つ
     offsets = np.arange(-half + 1, half + 1)
@@ -186,11 +195,19 @@ def impulse_train(energy32_air, time, nfft, sound_velocity, taps=FRACTIONAL_TAPS
     kernel = np.sinc(x) * (0.5 + 0.5 * np.cos(np.pi * x / half))
     kernel /= kernel.sum(axis=1, keepdims=True)
 
+    # ★置き場は **nfft で折り返す**（2026-08-23 に直した）。
+    #   窓付き sinc は前後に裾を持つので、始まりに近いパルスでは裾が 0 より前へ、
+    #   終わりに近いパルスでは nfft より後へはみ出す。
+    #   以前は**はみ出すパルスを丸ごと捨てていて、タップ数を増やすと
+    #   直接音が消えていた**（taps=512 で実効値が 22% 落ちた）。
+    #   厳密版は DFT なので周期的に折り返る。同じ扱いに揃えるのが正しい
+    #   （はみ出した先は FIR の遅れを取り除くときに出力の外へ出る）。
     trains = np.zeros((energy32_air.shape[0], nfft))
     for band in range(energy32_air.shape[0]):
         row = trains[band]
         for column, offset in enumerate(offsets):
-            np.add.at(row, index + offset, amplitude[band] * kernel[:, column])
+            np.add.at(row, (index + offset) % nfft,
+                      amplitude[band] * kernel[:, column])
     return trains
 
 
@@ -237,7 +254,8 @@ def _fir1_bandpass_fortran(numtaps, wmin, wmax):
 
 def impulse_response(time, energy, octave_frequencies=None, atmosphere=None,
                      sampling_frequency=SAMPLING_FREQUENCY, max_time=MAX_TIME,
-                     numtaps=NUMTAPS, verbose=True, method="fast"):
+                     numtaps=NUMTAPS, verbose=True, method="fast",
+                     taps=FRACTIONAL_TAPS):
     """パルス列からインパルス応答を合成する。
 
     引数:
@@ -308,7 +326,8 @@ def impulse_response(time, energy, octave_frequencies=None, atmosphere=None,
     if method == "exact":
         spectrum = transfer_function(energy32, time, nfreq, df, sound_velocity)
     else:
-        spectrum = rfft(impulse_train(energy32, time, nfft, sound_velocity),
+        spectrum = rfft(impulse_train(energy32, time, nfft, sound_velocity,
+                                      sampling_frequency, taps),
                         n=nfft, axis=1).T
 
     # ★**足し合わせは周波数領域で行い、逆変換は 1 回だけ**にする（線形なので同じ）。
@@ -334,7 +353,8 @@ def write_impulse_response(filename, t, ir):
 
 def impulse_response_from_pulses(filename, pulses, octave_frequencies=None, atmosphere=None,
                      sampling_frequency=SAMPLING_FREQUENCY, max_time=MAX_TIME,
-                     numtaps=NUMTAPS, verbose=True):
+                     numtaps=NUMTAPS, verbose=True, method="fast",
+                     taps=FRACTIONAL_TAPS):
     """パルス列 → インパルス応答 → CSV 保存までの一括処理。
 
     pulses : loop_noredundancy.PulseList（`.time` と `.energy` を使う）
@@ -343,7 +363,8 @@ def impulse_response_from_pulses(filename, pulses, octave_frequencies=None, atmo
                              octave_frequencies=octave_frequencies,
                              atmosphere=atmosphere,
                              sampling_frequency=sampling_frequency,
-                             max_time=max_time, numtaps=numtaps, verbose=verbose)
+                             max_time=max_time, numtaps=numtaps, verbose=verbose,
+                             method=method, taps=taps)
     write_impulse_response(filename, t, ir)
     if verbose:
         print(f"[impulse] インパルス応答を書き出しました: {filename}")

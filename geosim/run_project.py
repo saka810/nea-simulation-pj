@@ -523,6 +523,8 @@ def _run_one(project, receiver, verbose=True, make_figures=True,
         source_power_db=project.source_power_db,
         noise_level_db=project.noise_level_db,
         statistical=project.statistical,
+        # ★合成のやり方（`fast` / `exact`）。波動解と突き合わせるときは exact
+        impulse_method=getattr(project, "impulse_method", "fast"),
         progress=progress,
     )
 

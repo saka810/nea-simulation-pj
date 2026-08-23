@@ -24,6 +24,11 @@ from tkinter import filedialog, messagebox, ttk
 import project as pj
 
 BAND_CHOICES = [("8 バンド（63〜8k Hz）", 8), ("6 バンド（125〜4k Hz）", 6)]
+# ★インパルス応答の合成のやり方（2026-08-23 ユーザー指摘）。
+# 査読論文 Toyoda & Sakayoshi (2021) 式(2) の厳密解をそのまま解くか、
+# 時間領域に置いてから FFT するか。**波動解と突き合わせるときは厳密版**
+IMPULSE_CHOICES = [("高速（時間領域→FFT。指標を出すならこれで足りる）", "fast"),
+                   ("厳密（式(2) をそのまま。波動解と比べるとき）", "exact")]
 NORMAL_CHOICES = [("自動（閉じていれば内向き、開いていれば CAD のまま）", "auto"),
                   ("CAD の巻き順をそのまま使う", "cad"),
                   ("面ごとに室内側へ揃える", "inward"),
@@ -282,9 +287,10 @@ class SetupWindow:
         #   ここには置かない（2026-08-21 ユーザー指摘）
         combo(0, "band_number", "周波数バンド", BAND_CHOICES)
         combo(1, "orient_normals", "法線の向き", NORMAL_CHOICES)
+        combo(2, "impulse_method", "インパルス応答の合成", IMPULSE_CHOICES)
         self.vars["statistical"] = tk.BooleanVar()
         ttk.Checkbutton(frame, text="統計残響式（Sabine / Eyring / Eyring-Knudsen）も計算する",
-                        variable=self.vars["statistical"]).grid(row=2, column=1,
+                        variable=self.vars["statistical"]).grid(row=3, column=1,
                                                                 sticky="w", padx=8)
 
     def _build_buttons(self, parent):
@@ -324,6 +330,8 @@ class SetupWindow:
             self.vars[key].set("" if value is None else str(value))
         self._set_combo("band_number", BAND_CHOICES, p.band_number)
         self._set_combo("orient_normals", NORMAL_CHOICES, p.orient_normals)
+        self._set_combo("impulse_method", IMPULSE_CHOICES,
+                        getattr(p, "impulse_method", "fast"))
         self.vars["statistical"].set(bool(p.statistical))
         self._show_status()
 
@@ -377,6 +385,8 @@ class SetupWindow:
         self.project.band_number = self._combo_value("band_number", BAND_CHOICES)
         self.project.orient_normals = self._combo_value("orient_normals",
                                                         NORMAL_CHOICES)
+        self.project.impulse_method = self._combo_value("impulse_method",
+                                                        IMPULSE_CHOICES)
         self.project.statistical = bool(self.vars["statistical"].get())
         return None
 

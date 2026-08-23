@@ -2932,6 +2932,82 @@ def test_impulse_fast():
     check("★厳密版は参照実装として残してある",
           callable(getattr(ip, "transfer_function", None)))
 
+    # ★★ここからが「時間軸で作ると干渉する周波数がずれる」への答え
+    #    （2026-08-23 ユーザー指摘。査読論文 Toyoda & Sakayoshi (2021) 第 3 節が
+    #     まさにこれを警告している。同 式(2) が厳密解）。
+    #
+    #    論文が言っているのは「サンプル間隔の間に届いたエネルギーを**サンプル時刻へ
+    #    寄せて**重ねる」やり方の話で、それだと位相が最大で半サンプルずれ、
+    #    干渉（くし形）の谷の位置が動いてしまう。
+    #    こちらは**寄せずに、窓付き sinc で本来の端数位置に置いている**（帯域制限した
+    #    厳密な遅延）ので、谷の位置は動かない。それを数字で押さえる。
+    from scipy.fft import rfft, rfftfreq, next_fast_len
+
+    fs = ip.SAMPLING_FREQUENCY
+    length = next_fast_len(8192)
+    bins = rfftfreq(length, 1.0 / fs)
+    velocity = 340.0
+    gap = 3.7135                                    # わざと半端なサンプル数にする
+    pair = np.array([0.02, 0.02 + gap / fs])
+    weight = np.array([1.0, 0.8])
+    strength = (weight * (pair * velocity)) ** 2     # impulse_train が戻す形に合わせる
+
+    strict = np.array([np.sum(weight * np.exp(-2j * np.pi * f * pair)) for f in bins])
+    quick = rfft(ip.impulse_train(strength[None, :], pair, length, velocity,
+                                  sampling_frequency=fs)[0], n=length)
+    rough = np.zeros(length)                         # 論文が警告するやり方（寄せる）
+    np.add.at(rough, np.round(pair * fs).astype(int), weight)
+    rough = rfft(rough, n=length)
+
+    def dip(spectrum):
+        window = (bins > 200.0) & (bins < fs / 2.0)
+        return float(bins[window][np.argmin(np.abs(spectrum[window]))])
+
+    check("★干渉の谷の周波数が厳密版と一致（1 Hz 以内）",
+          abs(dip(quick) - dip(strict)) < 1.0,
+          f"厳密 {dip(strict):.1f} Hz → 高速 {dip(quick):.1f} Hz")
+    check("★サンプル時刻へ寄せると谷がずれる（論文 第3節の警告）",
+          abs(dip(rough) - dip(strict)) > 100.0,
+          f"厳密 {dip(strict):.1f} Hz → 寄せる {dip(rough):.1f} Hz")
+
+    audible = (bins > 20.0) & (bins <= 11314.0)      # 8 kHz バンドの上端まで
+    keep = np.abs(strict) > 0.05 * np.abs(strict[audible]).max()
+    level = np.abs(20.0 * np.log10(np.abs(quick[audible & keep])
+                                   / np.abs(strict[audible & keep]))).max()
+    phase = np.abs(np.angle(quick[audible & keep] / strict[audible & keep],
+                            deg=True)).max()
+    check("★11.3 kHz までは振幅が一致（0.01 dB 以内）", level < 0.01,
+          f"最大 {level:.5f} dB")
+    check("★11.3 kHz までは位相が一致（0.1° 以内）", phase < 0.1,
+          f"最大 {phase:.5f} °")
+
+    # ★タップ数を増やすと**単調に**厳密解へ寄る（＝式(2) を切り詰めているだけ）
+    steps = []
+    for taps in (64, 128, 256):
+        _, wave = ip.impulse_response(time, energy, atmosphere=air, max_time=0.4,
+                                      verbose=False, taps=taps)
+        steps.append(float(np.sqrt((wave ** 2).sum() / (exact ** 2).sum())))
+    check("★タップ数を増やすと単調に厳密解へ寄る",
+          all(abs(steps[k + 1] - 1.0) < abs(steps[k] - 1.0)
+              for k in range(len(steps) - 1)),
+          " → ".join(f"{r:.5f}" for r in steps))
+
+    # ★始まりに近いパルスを捨てていないこと（窓付き sinc の裾は前へも伸びる）。
+    #   以前は範囲外のパルスを丸ごと落としていて、タップ数を増やすと直接音が消えた
+    near = np.array([0.0005, 0.002])                 # 0.17 m / 0.68 m 相当
+    train = ip.impulse_train(np.ones((1, 2)), near, length, velocity,
+                             sampling_frequency=fs, taps=512)
+    check("★始まりに近いパルスも捨てない（直接音が消えない）",
+          np.abs(train).sum() > 0.0,
+          f"合計 {np.abs(train).sum():.4g}")
+
+    # ★サンプリング周波数は**引数から**取る（定数を見ていると置き場が全部ずれる）
+    shifted = ip.impulse_train(np.ones((1, 1)), np.array([0.01]), length,
+                               velocity, sampling_frequency=fs / 2.0)
+    check("★fs を変えると置き場が変わる（引数を見ている）",
+          int(np.argmax(np.abs(shifted[0]))) == int(round(0.01 * fs / 2.0)),
+          f"位置 {int(np.argmax(np.abs(shifted[0])))} / 期待 {int(round(0.01 * fs / 2))}")
+
 def main():
     print("geosim 数値検証")
     print(f"  Python {sys.version.split()[0]} / numpy {np.__version__}")
