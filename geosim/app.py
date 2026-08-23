@@ -28,6 +28,26 @@ import sys
 import traceback
 
 
+def _warn(title, error):
+    """理由がはっきりしている失敗を、文章で伝える（画面と文字の両方）。
+
+    追跡（traceback）を出すのは**プログラムの想定外**のときだけにする。
+    「REGION の DXF を選んだ」のような入力の問題は、読めば分かる形で出す。
+    """
+    message = f"{error}"
+    print(f"[app] {title}: {message}")
+    try:
+        import tkinter as tk
+        from tkinter import messagebox
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        messagebox.showwarning(title, message)
+        root.destroy()
+    except Exception:
+        pass        # 画面が出せない環境（CLI）では文字だけで十分
+
+
 def _visualise(project, results=None):
     """計算結果の可視化ウィンドウを開く（音線 ↔ 音粒子を Tab で切替）。"""
     import project as pj
@@ -233,6 +253,10 @@ def main():
         if action == "normals":
             try:
                 face_editor.edit(project)
+            except ValueError as error:
+                # モデルが読めないなど**理由がはっきりしているもの**は、
+                # 追跡ではなく文章で伝える（2026-08-21。面 0 枚で落ちた）
+                _warn("面の確認を開けませんでした", error)
             except Exception:
                 print("[app] 面の確認ウィンドウでエラーが起きました:")
                 traceback.print_exc()
@@ -243,6 +267,9 @@ def main():
             # 前の見た目のままだった。音線追跡はやり直さないので数秒で済む）
             try:
                 run_project.redraw(project)
+            except (ValueError, FileNotFoundError) as error:
+                _warn("図を描き直せませんでした（保存済みの図をそのまま使います）",
+                      error)
             except Exception:
                 print("[app] 図を描き直せませんでした（保存済みの図をそのまま使います）:")
                 traceback.print_exc()

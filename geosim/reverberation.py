@@ -85,6 +85,8 @@ def print_frequency_table(frequencies, rows, prefix="[reverberation]", width=10,
 
 def triangle_areas(mesh):
     """各三角形の面積 [m^2]。外積の大きさの半分。"""
+    if not len(mesh):
+        return np.zeros(0)      # 面が無くても落ちないように（呼ぶ側で判断する）
     v = np.array([np.asarray(m.vertexes, dtype=float) for m in mesh])
     return 0.5 * np.linalg.norm(np.cross(v[:, 1] - v[:, 0], v[:, 2] - v[:, 0]), axis=1)
 
@@ -176,6 +178,10 @@ def statistical_reverberation(mesh, volume, frequencies=None, atmosphere=None,
     """
     if atmosphere is None:
         atmosphere = Atmosphere()
+    if not len(mesh):
+        if verbose:
+            print("[reverberation] 面が 1 枚も無いので統計残響式は計算できません")
+        return None
     surface = surface_summary(mesh, convert_to_random=convert_to_random, warn=verbose)
 
     areas = surface["areas"]

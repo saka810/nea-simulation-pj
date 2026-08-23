@@ -240,6 +240,16 @@ class FaceEditor:
         self.layers = sorted(set(face_layers))
         self.layer_of = np.array([self.layers.index(name) for name in face_layers])
 
+        # ★面が 1 枚も無いモデルは**ここで止める**。先へ進めると
+        #   「1 次元の配列に 2 つの添字」という分かりにくい例外になる（2026-08-21）
+        if not self.count:
+            raise ValueError(
+                "この DXF から面が 1 枚も読めませんでした。"
+                "読めるのは 3DFACE / ポリフェイスメッシュ / 閉じたポリラインで、"
+                "**REGION と 3DSOLID（ACIS）は読めません**。"
+                "CAD で面に分解して書き出してください"
+                "（docs/DXFデータの作り方.md 参照）")
+
         # 自動判定（レイの偶奇）。ここでは**反転するか否かの判定にしか使わない**
         self.enclosure = rd.encloses_point(
             self.triangles,

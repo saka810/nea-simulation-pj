@@ -2808,6 +2808,50 @@ def test_panel_scroll():
     finally:
         plotter.close()
 
+# ------------------------------------------ 面が読めない DXF（2026-08-21 の落ち方）
+def test_empty_model():
+    print(chr(10) + "[38] 面が 1 枚も読めない DXF（落ちずに理由を告げる）")
+    import shutil
+    import tempfile
+
+    import face_editor as fe
+    import project as pj
+    import reverberation as rv
+    import run_project
+
+    # REGION だけの DXF を模した「面が無い DXF」を作る（読める面が 1 つも無い）
+    folder = tempfile.mkdtemp(prefix="geosim_empty_")
+    empty = os.path.join(folder, "面が無い.dxf")
+    with open(empty, "w", encoding="utf-8") as f:
+        f.write(chr(10).join(["0", "SECTION", "2", "ENTITIES",
+                              "0", "ENDSEC", "0", "EOF", ""]))
+
+    model = rd.read_model(empty, verbose=False)
+    check("面が 0 枚のモデルとして読める（例外にしない）", len(model.mesh) == 0)
+
+    # ★ここが 2026-08-21 に落ちたところ。1 次元の配列に 2 つ添字を付けていた
+    check("★encloses_point が落ちない（囲まれていない = 0）",
+          rd.encloses_point([], [0.0, 0.0, 0.0]) == 0.0)
+    check("★orient_inward が落ちない", rd.orient_inward([], []) == (set(), 0))
+    check("★triangle_areas が落ちない", len(rv.triangle_areas([])) == 0)
+    check("★統計残響式は None を返す（黙って 0 にしない）",
+          rv.statistical_reverberation([], 100.0, verbose=False) is None)
+
+    project = pj.Project(folder, dxf=empty)
+    project.ensure_dirs()
+    try:
+        fe.edit(project, off_screen=True)
+        check("★面の確認は理由を告げて止まる", False, "例外が出なかった")
+    except ValueError as error:
+        check("★面の確認は理由を告げて止まる（IndexError にしない）",
+              "面が 1 枚も読めません" in str(error) and "REGION" in str(error),
+              str(error)[:40])
+    except IndexError as error:
+        check("★面の確認は理由を告げて止まる（IndexError にしない）", False,
+              f"IndexError: {error}")
+
+    shutil.rmtree(folder, ignore_errors=True)
+
 def main():
     print("geosim 数値検証")
     print(f"  Python {sys.version.split()[0]} / numpy {np.__version__}")
@@ -2827,7 +2871,7 @@ def main():
                test_result_naming, test_sound_level,
                test_speech_transmission_index, test_condition_table,
                test_workbook, test_path_reuse, test_conditions_batch,
-               test_panel_scroll):
+               test_panel_scroll, test_empty_model):
         fn()
 
     failed = [name for name, ok in _results if not ok]

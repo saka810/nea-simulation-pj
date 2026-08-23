@@ -1148,6 +1148,8 @@ def _count_crossings(origins, directions, triangles, eps=1.0e-9):
     """
     origins = np.asarray(origins, dtype=float)
     directions = np.asarray(directions, dtype=float)
+    if not len(triangles):
+        return np.zeros(len(directions), dtype=int)   # 面が無ければ交差 0 回
     v0 = np.array([t[0] for t in triangles], dtype=float)
     v1 = np.array([t[1] for t in triangles], dtype=float)
     v2 = np.array([t[2] for t in triangles], dtype=float)
@@ -1193,6 +1195,8 @@ def orient_inward(triangles, normals, probes=INWARD_PROBE_DIRECTIONS, seed=0):
     戻り値: (反転する面インデックスの集合, 判定に迷った面の数)
     """
     triangles = list(triangles)
+    if not len(triangles):
+        return set(), 0     # 面が無ければ反転するものも無い（呼ぶ側を落とさない）
     normals = np.asarray(normals, dtype=float)
     centroids = np.array([(t[0] + t[1] + t[2]) / 3.0 for t in triangles])
 
@@ -1236,6 +1240,8 @@ def encloses_point(triangles, point, samples=256, seed=0):
 
     方向は固定シードで生成するので、同じモデルなら毎回同じ値になる。
     """
+    if not len(triangles):
+        return 0.0          # 面が無ければ「囲まれていない」
     rng = np.random.default_rng(seed)
     directions = rng.normal(size=(int(samples), 3))
     directions /= np.linalg.norm(directions, axis=1)[:, None]
@@ -1616,6 +1622,17 @@ def read_model(file_name, unit=None, absorption_table=None, default_absorption=N
     if model.mesh:
         allpts = np.concatenate([m.vertexes for m in model.mesh])
         model.extents = np.array([allpts.min(axis=0), allpts.max(axis=0)])
+    else:
+        # ★**面が 1 枚も読めなかったことを大きく知らせる。**
+        #   黙って空のモデルを返すと、この先で「1 次元の配列に 2 つの添字」といった
+        #   分かりにくい例外になる（実際に画面が落ちた。2026-08-21）
+        print(f"[read_dxffile] ★面が 1 枚も読めませんでした: {file_name}")
+        print(f"[read_dxffile]   読めるのは 3DFACE / ポリフェイスメッシュ / "
+              f"閉じたポリラインです。**REGION と 3DSOLID（ACIS）は読めません**")
+        print(f"[read_dxffile]   CAD で面に分解して書き出してください"
+              f"（docs/DXFデータの作り方.md 参照）")
+        if model.skipped:
+            print(f"[read_dxffile]   読み飛ばした種別: {model.skipped}")
 
     # ---- 総表面積と容積 ----------------------------------------------------
     #

@@ -508,6 +508,12 @@ def redraw(project, verbose=True):
                           orient_normals=project.orient_normals,
                           flip_faces=_flip_faces_for(project),
                           face_materials=_face_materials_for(project), verbose=False)
+    if not len(model.mesh):
+        # ★面 0 枚のまま進むと分かりにくい例外になる（2026-08-21）
+        raise ValueError(
+            f"{os.path.basename(project.dxf_path or '')} から面が 1 枚も"
+            f"読めませんでした（REGION と 3DSOLID は読めません）。"
+            f"モデルの指定を確かめてください")
 
     results = {"model": model, "pulses": pulses, "frequencies": frequencies,
                "atmosphere": atmosphere, "impulse": None,
