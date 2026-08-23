@@ -1180,7 +1180,20 @@ def view(dxf_path, raylog_path, mode="both", absorption=None, unit=None,
     """
     # バンド数は計算時と揃える。既定のままだと「列が足りない」と注意が出て紛らわしい
     kwargs = {} if band_number is None else {"band_number": band_number}
-    model = rd.read_model(dxf_path, unit=unit, absorption_table=absorption,
+    # ★`absorption` は**吸音率の表**でも**ファイルのパス**でもよい。
+    #   パスを渡されたときに表として扱ってしまい、全レイヤが「吸音率が未指定」に
+    #   なっていた（2026-08-21 に実行ログで気づいた）
+    table = absorption
+    if isinstance(absorption, str):
+        import absorption as ab
+        try:
+            table = ab.MaterialLibrary.from_file(absorption).absorption_table(
+                band_number=band_number, warn=False)
+        except Exception as error:
+            print(f"[view_rays] 吸音率を読めませんでした（{error}）。"
+                  f"モデルの色は既定値になります")
+            table = None
+    model = rd.read_model(dxf_path, unit=unit, absorption_table=table,
                           orient_normals=orient_normals, **kwargs)
     raylog = RayLog(raylog_path)
     print(f"[view_rays] {raylog.summary()}")
