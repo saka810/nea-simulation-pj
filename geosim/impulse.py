@@ -143,6 +143,57 @@ def transfer_function(energy32_air, time, nfreq, df, sound_velocity, chunk=4096)
     return result
 
 
+# 端数遅延（サブサンプルの位置にパルスを置く）に使う窓付き sinc のタップ数。
+# 大きいほど厳密版に近づくが、置く手間が増える。64 で実効値の差 0.5%・相関 0.998
+FRACTIONAL_TAPS = 64
+
+
+def impulse_train(energy32_air, time, nfft, sound_velocity, taps=FRACTIONAL_TAPS):
+    """パルス列を**時間領域の列**にする（1/3 オクターブバンドごと）。戻り値 (32, nfft)。
+
+    ★**これが高速化の要**（2026-08-21。ユーザー要望「配列演算で高速化」）。
+
+    `transfer_function` は周波数ごとに全パルスの位相を足すので
+    **計算量が (周波数の数) × (パルスの数)** になる。実案件（研修室・受音点 1 点・
+    パルス 8,825 本・応答 3 秒）で **15.7 秒**かかっていた（全体の 46%）。
+    いっぽう時間領域に置いてから FFT すれば **(パルスの数) + (FFT)** で済み、
+    同じ条件で **0.25 秒（63 倍）**になる。
+
+    ただし到来時刻はサンプルの格子に乗らないので、**端数の遅延**を
+    窓付き sinc（Hann 窓）で分配する。単純な最近傍（1 タップ）や
+    線形補間（2 タップ）だと高域が落ちて実効値が 17% も減るが、
+    64 タップなら 0.5% に収まる（`tests/test_geosim.py` の [39] で押さえてある）。
+
+    厳密版（`transfer_function`）は**参照実装として残してある**。
+    """
+    energy32_air = np.asarray(energy32_air, dtype=float)
+    time = np.asarray(time, dtype=float)
+    amplitude = np.sqrt(energy32_air) / (time * sound_velocity)[None, :]
+
+    half = int(taps) // 2
+    position = time * SAMPLING_FREQUENCY
+    index = np.floor(position).astype(np.int64)
+    fraction = position - index
+    inside = (index - half + 1 >= 0) & (index + half < nfft)
+    if not np.any(inside):
+        return np.zeros((energy32_air.shape[0], nfft))
+    index, fraction = index[inside], fraction[inside]
+    amplitude = amplitude[:, inside]
+
+    # 窓付き sinc。合計 1 に正規化して直流の重みを保つ
+    offsets = np.arange(-half + 1, half + 1)
+    x = fraction[:, None] - offsets[None, :]
+    kernel = np.sinc(x) * (0.5 + 0.5 * np.cos(np.pi * x / half))
+    kernel /= kernel.sum(axis=1, keepdims=True)
+
+    trains = np.zeros((energy32_air.shape[0], nfft))
+    for band in range(energy32_air.shape[0]):
+        row = trains[band]
+        for column, offset in enumerate(offsets):
+            np.add.at(row, index + offset, amplitude[band] * kernel[:, column])
+    return trains
+
+
 def bandpass_edges(mf, fmax):
     """各 1/3 オクターブバンドの正規化遮断周波数。元コード 152〜154 行。
 
@@ -186,7 +237,7 @@ def _fir1_bandpass_fortran(numtaps, wmin, wmax):
 
 def impulse_response(time, energy, octave_frequencies=None, atmosphere=None,
                      sampling_frequency=SAMPLING_FREQUENCY, max_time=MAX_TIME,
-                     numtaps=NUMTAPS, verbose=True):
+                     numtaps=NUMTAPS, verbose=True, method="fast"):
     """パルス列からインパルス応答を合成する。
 
     引数:
@@ -235,6 +286,8 @@ def impulse_response(time, energy, octave_frequencies=None, atmosphere=None,
 
     if verbose:
         print(f"[impulse] {atmosphere.summary()}")
+        print(f"[impulse] 合成のやり方: "
+              f"{'厳密（式2.67）' if method == 'exact' else '高速（時間領域→FFT）'}")
         print(f"[impulse] fs={sampling_frequency:.0f} Hz / 出力 {n_out} 点 "
               f"({max_time:.3f} s) / FFT長 {nfft} / パルス {len(time)} 本 / "
               f"バンド {len(octave_frequencies)}（{octave_frequencies[0]:.0f}〜"
@@ -244,18 +297,27 @@ def impulse_response(time, energy, octave_frequencies=None, atmosphere=None,
     energy32 = expand_to_third_octave(energy, octave_frequencies, mf)
     energy32 = apply_air_absorption(energy32, time, atmosphere, mf)
 
-    # ---- 伝達関数（式2.67）----
-    spectrum = transfer_function(energy32, time, nfreq, df, sound_velocity)
-
-    # ---- バンドごとにフィルタを掛けて足し合わせ、時間領域に戻す ----
+    # ---- バンドごとの成分を周波数領域で作る ----
+    #
+    # `method='fast'`（既定）… 時間領域に置いてから FFT（`impulse_train`）。
+    #   実案件で **63 倍**速い（2026-08-21）。端数遅延は窓付き sinc で分配する
+    # `method='exact'`      … 式(2.67) をそのまま（`transfer_function`）。
+    #   **参照実装**。周波数 × パルスの総当たりなので遅い
     lower, upper = bandpass_edges(mf, fmax)
     delay = (numtaps - 1) // 2
-    ir = np.zeros(nfft)
+    if method == "exact":
+        spectrum = transfer_function(energy32, time, nfreq, df, sound_velocity)
+    else:
+        spectrum = rfft(impulse_train(energy32, time, nfft, sound_velocity),
+                        n=nfft, axis=1).T
+
+    # ★**足し合わせは周波数領域で行い、逆変換は 1 回だけ**にする（線形なので同じ）。
+    #   以前はバンドごとに逆変換していて 32 回呼んでいた
+    total = np.zeros(nfreq, dtype=np.complex128)
     for j in range(len(mf)):
-        # 周波数領域の積 = 時間領域の畳み込み（ゼロ詰め済みなので線形畳み込み）
-        band_spectrum = spectrum[:, j] * rfft(filter_bandpass(numtaps, lower[j],
-                                                              upper[j]), nfft)
-        ir += irfft(band_spectrum, nfft)
+        total += spectrum[:, j] * rfft(filter_bandpass(numtaps, lower[j],
+                                                        upper[j]), nfft)
+    ir = irfft(total, nfft)
 
     # 直線位相 FIR の遅れを取り除いて 0 秒始まりにする
     ir = ir[delay:delay + n_out]

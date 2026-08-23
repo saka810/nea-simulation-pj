@@ -264,6 +264,23 @@ class ControlPanel:
 
     # ---- 並べ直し ------------------------------------------------------
 
+    def _pin(self, widget):
+        """★ウィジェットを**パネル側のレンダラに固定する**。
+
+        VTK のウィジェットは `SetEnabled(1)` のときに
+        `FindPokedRenderer`（マウスの下のレンダラ）で置き場を決める。
+        固定しないと、送って隠す・出すを繰り返すうちに**3D 側のレンダラにも
+        登録され、同じものが 2 つ描かれる**（2026-08-21 ユーザー指摘。
+        吸音材のチェックボックスと方向のスライダがモデル側に飛び出していた）。
+        """
+        try:
+            panel = self.plotter.renderers[0]
+            widget.SetDefaultRenderer(panel)
+            widget.SetCurrentRenderer(panel)
+        except Exception:
+            pass
+        return widget
+
     def _add(self, height, place, show=None):
         item = PanelItem(height, place, show)
         self.items.append(item)
@@ -351,8 +368,9 @@ class ControlPanel:
         self._help_note = note
         self._model()
         head = [f"― {title} ―"] + ([note] if note else []) + [""]
+        # 文字は小さめ（10 だと大きいというユーザー指摘 2026-08-21）
         self._help_actor = self.plotter.add_text(
-            chr(10).join(head + list(lines)), position=(24, 24), font_size=10,
+            chr(10).join(head + list(lines)), position=(24, 24), font_size=8,
             color="#ffe9a8", font_file=self.font)
         self._help_actor.SetVisibility(False)
         self.plotter.add_key_event(key, self.toggle_help)
@@ -535,6 +553,7 @@ class ControlPanel:
                                      font_size=self.LABEL_FONT, color=TEXT_COLOR,
                                      font_file=self.font)
         self._model()
+        self._pin(widget)
         self._widgets.append(widget)
 
         def place(y, widget=widget, text=text, label=label):
@@ -552,8 +571,13 @@ class ControlPanel:
             text.SetDisplayPosition(left, int(y) + 3)
 
         # 範囲外に出たら**チェックボックスも文字も隠す**（ページ送りのため）
+        shown = {"on": True}
+
         def show(visible, widget=widget, text=text):
             text.SetVisibility(bool(visible))
+            if bool(visible) == shown["on"]:
+                return          # 変わらないなら触らない（登録し直しを減らす）
+            shown["on"] = bool(visible)
             widget.On() if visible else widget.Off()
 
         self._add(self.CHECK + 4, place, show)
@@ -596,6 +620,7 @@ class ControlPanel:
         widget.GetRepresentation().ShowSliderLabelOff()
         state["ready"] = True
         self._model()
+        self._pin(widget)
         self._widgets.append(widget)
 
         def set_value(v, widget=widget):
@@ -630,8 +655,13 @@ class ControlPanel:
             representation.Modified()
             representation.BuildRepresentation()
 
+        shown = {"on": True}
+
         def show(visible, widget=widget):
             # スライダは**ウィンドウ全体**の座標で描くので、隠さないと 3D に残る
+            if bool(visible) == shown["on"]:
+                return
+            shown["on"] = bool(visible)
             widget.On() if visible else widget.Off()
 
         self._add(self.SLIDER, place, show)

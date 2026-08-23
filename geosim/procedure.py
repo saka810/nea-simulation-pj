@@ -51,7 +51,7 @@ def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref
             clarity=True, clarity_filename=None,
             source_power_db=None, noise_level_db=None,
             level_filename=None, sti_filename=None,
-            paths_filename=None, reuse_paths=True,
+            paths_filename=None, reuse_paths=True, statistical_result=None,
             flip_faces=None, face_materials=None, traced_history=None,
             progress=None):
     """
@@ -218,7 +218,11 @@ def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref
     # 統計残響式（Sabine / Eyring / Eyring-Knudsen）。音線を飛ばす前に出せる。
     # 面積と吸音率だけから決まるので、あとの計算結果と突き合わせる物差しになる
     report("統計残響式")
-    statistical_result = None
+    # ★**受音点に依らない**ので、複数受音点のときは 1 回だけ計算して配る
+    #   （`run_project` が 2 点目以降に渡してくる。2026-08-21 ユーザー指摘
+    #     「受音点ごとに統計残響時間の表示等がある。不必要なループでは？」）
+    if statistical_result is not None:
+        statistical = False
     if statistical:
         if volume is not None:
             print(f"[統計残響] 容積は指定値 {volume:.2f} m3 を使います"

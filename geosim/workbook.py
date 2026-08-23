@@ -186,7 +186,14 @@ def _overview(project):
         rows += [["室容積 [m3]（指定値）", project.volume]]
 
     receivers = sm.receiver_folders(project)
-    rows += [["受音点の数", len(receivers)], [None, None], ["主要な結果", ""]]
+    rows += [["受音点の数", len(receivers)]]
+
+    # ★計算に使った PC と所要時間（2026-08-21 ユーザー要望）
+    info = _run_info(project)
+    if info:
+        rows += [[None, None], ["計算した環境と時間", ""]] + info
+
+    rows += [[None, None], ["主要な結果", ""]]
 
     # 代表値は「500 Hz に最も近いバンド」で拾う（中域の代表として実務で使う）
     def representative(filename, item, skip):
@@ -281,6 +288,19 @@ def sheets(project, verbose=True):
         result.append((name, _numeric(condition, layout(name)["text"]), None,
                        layout(name)["first"]))
     return result
+
+
+def _run_info(project):
+    """`結果/<室>_計算情報.csv`（PC と所要時間）を読んで行のリストにする。"""
+    import run_project
+
+    for name in project.name_candidates(run_project.RUN_INFO_FILE):
+        rows = _read_rows(os.path.join(project.path(pj.RESULT_DIR), name))
+        if rows is None:
+            continue
+        return [[row[0], _as_number(row[1]) if len(row) > 1 else ""]
+                for row in rows[1:]]
+    return []
 
 
 def _condition_rows(project):

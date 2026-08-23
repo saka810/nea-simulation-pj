@@ -86,11 +86,16 @@ def _run_with_progress(project):
     import progress_window
     import run_project
 
-    return progress_window.run_with_progress(
+    # ★ログはテキストにも残す（2026-08-21 ユーザー要望）
+    results, elapsed = progress_window.run_with_progress(
         f"{project.display_name} を計算中",
         lambda progress: run_project.run(project, progress=progress),
         subtitle=(f"音線 {project.rays} 本 / 最大反射 {project.nref} 回 / "
-                  f"受音球 {project.radius} m"))
+                  f"受音球 {project.radius} m"),
+        log_path=run_project.log_path(project))
+    # かかった時間を結果に残す（`結果一式.xlsx` の「概要」に出る）
+    run_project.write_run_info(project, elapsed)
+    return results
 
 
 def _run_all_with_progress(project):
@@ -98,10 +103,14 @@ def _run_all_with_progress(project):
     import progress_window
     import run_project
 
-    return progress_window.run_with_progress(
+    outcome, elapsed = progress_window.run_with_progress(
         f"{project.display_name} の全条件を計算中",
         lambda progress: run_project.run_conditions(project, progress=progress),
-        subtitle="材料条件表を順に当てます（2 件目以降は経路を使い回すので速い）")
+        subtitle="材料条件表を順に当てます（2 件目以降は経路を使い回すので速い）",
+        log_path=run_project.log_path(project))
+    run_project.write_run_info(project, elapsed,
+                              conditions=len((outcome or {}).get("conditions") or []))
+    return outcome
 
 
 def _report_conditions(project, outcome):

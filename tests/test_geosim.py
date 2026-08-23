@@ -2800,6 +2800,21 @@ def test_panel_scroll():
         panel._update_hint()
         check("入りきるときは案内を出さない", panel._hint.GetInput().strip() == "",
               repr(panel._hint.GetInput()))
+        # ★★ウィジェットが**3D 側のレンダラに登録されない**こと。
+        #   固定しないと On/Off のたびに置き場を取り直し、同じチェックボックスや
+        #   スライダが**モデルの上に二重に描かれた**（2026-08-21 ユーザー指摘）
+        def props(renderer):
+            return renderer.GetViewProps().GetNumberOfItems()
+
+        for step in (+1, +1, -1, -2, +2):
+            panel.scroll_by(step)
+        check("★送ってもウィジェットが 3D 側に飛び出さない",
+              props(plotter.renderers[1]) == 0,
+              f"3D 側に {props(plotter.renderers[1])} 個")
+        check("パネル側には残っている", props(plotter.renderers[0]) > 0,
+              f"{props(plotter.renderers[0])} 個")
+        panel.scroll_by(-99)
+
         # ★左は「設定の面」なので 3D 側と背景を変えている（2026-08-21 ユーザー要望）
         panel_bg = plotter.renderers[0].GetBackground()
         model_bg = plotter.renderers[1].GetBackground()
@@ -2859,6 +2874,64 @@ def test_empty_model():
 
     shutil.rmtree(folder, ignore_errors=True)
 
+# ------------------------------ インパルス応答の高速合成（2026-08-21 の高速化）
+def test_impulse_fast():
+    print(chr(10) + "[39] インパルス応答の高速合成（厳密版との一致）")
+    import impulse as ip
+    import reverberation as rv
+
+    # ★時間領域に置いてから FFT する版（既定）と、式(2.67) をそのまま解く版の一致。
+    #   実案件（パルス 8,825 本・応答 3 秒）で **15.5 秒 → 0.24 秒（65 倍）**。
+    #   到来時刻がサンプルの格子に乗らないぶんを窓付き sinc で分配している
+    rng = np.random.default_rng(7)
+    count, bands = 400, 8
+    time = np.sort(rng.uniform(0.004, 0.35, count))
+    energy = rng.uniform(0.05, 1.0, (count, bands)) * np.exp(-time * 8.0)[:, None]
+    air = at.Atmosphere()
+
+    t_exact, exact = ip.impulse_response(time, energy, atmosphere=air,
+                                        max_time=0.4, verbose=False,
+                                        method="exact")
+    t_fast, fast = ip.impulse_response(time, energy, atmosphere=air,
+                                       max_time=0.4, verbose=False,
+                                       method="fast")
+    check("時間軸が同じ", np.allclose(t_exact, t_fast))
+    correlation = float(np.corrcoef(exact, fast)[0, 1])
+    ratio = float(np.sqrt((fast ** 2).sum() / (exact ** 2).sum()))
+    check("★波形が厳密版とほぼ一致（相関 0.99 以上）", correlation > 0.99,
+          f"相関 {correlation:.6f}")
+    check("★実効値の差が 1% 以内", abs(ratio - 1.0) < 0.01,
+          f"比 {ratio:.6f}")
+
+    frequencies = ab.octave_bands(bands)
+    one = rv.reverberation_time(t_exact, exact, frequencies=frequencies,
+                                verbose=False)
+    two = rv.reverberation_time(t_fast, fast, frequencies=frequencies,
+                               verbose=False)
+    difference = np.nanmax(np.abs(one["measures"]["T30"] - two["measures"]["T30"]))
+    check("★T30 が一致（差 0.01 秒未満）", difference < 0.01,
+          f"最大差 {difference:.4f} s")
+    first = rv.clarity_measures(t_exact, exact, frequencies=frequencies)
+    second = rv.clarity_measures(t_fast, fast, frequencies=frequencies)
+    gap = np.nanmax(np.abs(first["C50"] - second["C50"]))
+    check("★C50 が一致（差 0.1 dB 未満）", gap < 0.1, f"最大差 {gap:.4f} dB")
+
+    # ★端数遅延の分配が甘いと高域が落ちる（1 タップだと実効値が 17% 減る）。
+    #   タップ数を増やすほど厳密版に近づくことを押さえておく
+    ratios = []
+    for taps in (2, 64):
+        train = ip.impulse_train(
+            ip.apply_air_absorption(
+                ip.expand_to_third_octave(energy, frequencies,
+                                          ip.third_octave_bands()),
+                time, air, ip.third_octave_bands()),
+            time, 32768, air.sound_velocity, taps=taps)
+        ratios.append(float(np.sqrt((train ** 2).sum())))
+    check("タップを増やすと厳密版に近づく（高域が落ちない）",
+          ratios[1] > ratios[0], f"2 タップ {ratios[0]:.4g} → 64 タップ {ratios[1]:.4g}")
+    check("★厳密版は参照実装として残してある",
+          callable(getattr(ip, "transfer_function", None)))
+
 def main():
     print("geosim 数値検証")
     print(f"  Python {sys.version.split()[0]} / numpy {np.__version__}")
@@ -2878,7 +2951,7 @@ def main():
                test_result_naming, test_sound_level,
                test_speech_transmission_index, test_condition_table,
                test_workbook, test_path_reuse, test_conditions_batch,
-               test_panel_scroll, test_empty_model):
+               test_panel_scroll, test_empty_model, test_impulse_fast):
         fn()
 
     failed = [name for name, ok in _results if not ok]

@@ -69,6 +69,7 @@
 
 import argparse
 import os
+import time
 
 import numpy as np
 import pyvista as pv
@@ -440,6 +441,12 @@ def add_rays(plotter, raylog, index=None, colour="energy", band=None,
 # ② 音粒子の可視化
 # ------------------------------------------------------------------------------
 
+# 音粒子の既定値（2026-08-21 ユーザー指定）
+DEFAULT_TIME_STEP_MS = 1.0      # 離散化時間の初期値
+DEFAULT_PLAY_FPS = 1.0          # 再生速度（1 秒に 1 コマ＝離散化時間ぶん進む）
+DEFAULT_MOVIE_SECONDS = 10.0    # 保存する動画の長さの上限 [s]
+
+
 class ParticleAnimation:
     """音粒子アニメーションの状態を持つ。
 
@@ -464,7 +471,10 @@ class ParticleAnimation:
         self.frames = int(frames)
         self.band = band
         self.step = 0
-        self.playing = True
+        # ★**最初は停止**（2026-08-21 ユーザー要望。開くなり流れると追えない）
+        self.playing = False
+        # ★**再生速度**（1 秒あたりのコマ数）。既定 1 コマ/秒＝離散化時間ぶんずつ進む
+        self.frames_per_second = DEFAULT_PLAY_FPS
         # 表示する粒子の数。点の数（＝トポロジ）は変えず、**表示しないぶんは
         # エネルギーを NaN にして隠す**（`nan_opacity=0`）。作り直しが起きない
         self._shown = np.ones(len(self.index), dtype=bool)
@@ -1041,6 +1051,7 @@ def run_animation(plotter, animation, interval=30):
     回転などの操作は `update()` の中で処理される。
     """
     closed = {"flag": False}
+    carry = {"value": 0.0, "time": time.perf_counter()}
     plotter.add_key_event("q", lambda: closed.__setitem__("flag", True))
     try:
         plotter.iren.add_observer("ExitEvent",
@@ -1059,8 +1070,18 @@ def run_animation(plotter, animation, interval=30):
                 or plotter.iren is None):
             break
         if animation.playing:
-            # 描画は plotter.update() に任せる（ここで render すると二重に描くことになる）
-            animation.update(animation.step + 1, render=False)
+            # ★**実時間で進める**（2026-08-21 ユーザー要望。速すぎて追えなかった）。
+            #   `frames_per_second` コマ/秒。溜まった端数は次に持ち越す
+            now = time.perf_counter()
+            carry["value"] += (now - carry["time"]) * max(
+                0.01, animation.frames_per_second)
+            carry["time"] = now
+            advance = int(carry["value"])
+            if advance:
+                carry["value"] -= advance
+                animation.update(animation.step + advance, render=False)
+        else:
+            carry["time"] = time.perf_counter()
         try:
             plotter.update(interval)
         except (RuntimeError, AttributeError):
@@ -1069,7 +1090,8 @@ def run_animation(plotter, animation, interval=30):
 
 
 def add_movie_key(plotter, animation, folder, stem="音粒子", key="b",
-                  max_width=720, max_frames=400, duration=40, colors=128):
+                  max_width=720, max_frames=400, duration=40, colors=128,
+                  movie_setting=None):
     """`b` で、**いまの視点・いまの設定のまま**音粒子の動画（GIF）を保存する。
 
     `save_movie()` が別に off-screen で作り直すのと違い、こちらは
@@ -1099,6 +1121,12 @@ def add_movie_key(plotter, animation, folder, stem="音粒子", key="b",
             print(f"[view_rays] コマが多いので {total} → {len(steps)} に"
                   f"間引きます（動画の長さは変わりません）")
 
+        # ★**動画の長さを決める**（2026-08-21 ユーザー要望。長いと容量が大きい）。
+        #   コマ数は上で間引いてあるので、1 コマの表示時間を長さから割り出す
+        seconds = float((movie_setting or {}).get("seconds",
+                                                  DEFAULT_MOVIE_SECONDS))
+        interval = max(20, int(round(seconds * 1000.0 / max(1, len(steps)))))
+
         playing, keep = animation.playing, animation.step
         animation.playing = False
         print(f"[view_rays] 動画を作っています（{len(steps)} コマ）…")
@@ -1114,7 +1142,7 @@ def add_movie_key(plotter, animation, folder, stem="音粒子", key="b",
                 images.append(image.convert("P", palette=Image.ADAPTIVE,
                                             colors=colors))
             images[0].save(path, save_all=True, append_images=images[1:],
-                           duration=duration, loop=0, optimize=True)
+                           duration=interval, loop=0, optimize=True)
         except Exception as e:
             print(f"[view_rays] 動画を保存できませんでした: {type(e).__name__}: {e}")
             return None
@@ -1124,7 +1152,8 @@ def add_movie_key(plotter, animation, folder, stem="音粒子", key="b",
 
         size = os.path.getsize(path) / 1e6
         print(f"[view_rays] 動画を保存しました: {path}"
-              f"（{len(images)} コマ / {size:.1f} MB）")
+              f"（{len(images)} コマ / {len(images) * interval / 1000.0:.1f} 秒 / "
+              f"{size:.1f} MB）")
         return path
 
     plotter.add_key_event(key, save)
@@ -1240,6 +1269,8 @@ def view(dxf_path, raylog_path, mode="both", absorption=None, unit=None,
                           max_reflection=max_reflection, count=ray_count)
 
     animation = None
+    # 保存する動画の長さ [s]（パネルのスライダで変えられる。2026-08-21）
+    movie_setting = {"seconds": DEFAULT_MOVIE_SECONDS}
     if want_particles:
         time_label = None
         if panel is not None:
@@ -1247,6 +1278,8 @@ def view(dxf_path, raylog_path, mode="both", absorption=None, unit=None,
             time_label = panel.reserve_text(2, size=10)
         animation = animate(plotter, raylog, index=pool, frames=frames,
                             band=band, point_size=point_size, label=time_label)
+        # ★離散化時間の初期値は 1 ms（2026-08-21 ユーザー指定）
+        animation.set_time_step(DEFAULT_TIME_STEP_MS, render=False)
         animation.set_count(particle_count, render=False)
         if off_screen:
             animation.update(frames // 3, render=False)
@@ -1269,6 +1302,15 @@ def view(dxf_path, raylog_path, mode="both", absorption=None, unit=None,
             # 細かくすると初期反射のような速い動きが追える
             panel.slider("離散化時間 [ms]", [0.2, 50.0], animation.time_step_ms,
                          lambda v: animation.set_time_step(v), fmt="%.1f")
+            # ★再生速度（コマ/秒）。1 なら 1 秒に離散化時間ぶんだけ進む
+            panel.slider("再生速度 [コマ/秒]", [0.5, 60.0],
+                         animation.frames_per_second,
+                         lambda v: setattr(animation, "frames_per_second",
+                                           float(v)), fmt="%.1f")
+            # ★保存する動画の長さ [s]（長いと容量が大きくなる）
+            panel.slider("動画の長さ [s]", [2.0, 30.0], movie_setting["seconds"],
+                         lambda v: movie_setting.__setitem__("seconds", float(v)),
+                         fmt="%.0f")
 
         # ---- 注目したい音線だけを残す（p で基準点、k で種類）----
         # 基準点の既定は受音点（クリックしなくても使えるように）
@@ -1302,7 +1344,8 @@ def view(dxf_path, raylog_path, mode="both", absorption=None, unit=None,
             vg.add_screenshot_key(plotter, save_dir, stem, key="g")
             help_lines.insert(0, "g いまの画面を画像で保存")
             if animation is not None:
-                add_movie_key(plotter, animation, save_dir, key="b")
+                add_movie_key(plotter, animation, save_dir, key="b",
+                              movie_setting=movie_setting)
                 help_lines.insert(1, "b いまの視点で動画（GIF）を保存")
 
         # 「音線の情報」は起動時にコンソールへ出しているのでパネルには載せない

@@ -15,6 +15,9 @@ import numpy as np
 import plots
 import procedure
 import project as pj
+
+# 計算に使った PC と所要時間を残すファイル（結果一式の「概要」に並ぶ）
+RUN_INFO_FILE = "計算情報.csv"
 from atmosphere import Atmosphere
 
 
@@ -49,7 +52,7 @@ def run(project, verbose=True, make_figures=True, progress=None,
     # ★保存した経路が全受音点ぶんそろっていれば、音線追跡そのものを省く（F-9）。
     #   吸音材だけ変えた計算はここで終わり（あとはエネルギーの掛け算だけ）
     if reuse_paths and _paths_ready(project, receivers, verbose=verbose):
-        results = []
+        results, shared_statistical = [], None
         for k, point in enumerate(receivers):
             sub = _sub_project(project, k)
             if verbose:
@@ -60,8 +63,12 @@ def run(project, verbose=True, make_figures=True, progress=None,
                                     make_figures=make_figures, write_back=False,
                                     head_azimuth=project.head_azimuth_for(k),
                                     reuse_paths=True,
+                                    statistical_result=shared_statistical,
                                     progress=_prefixed(progress,
                                                        f"受音点{k + 1}/{len(receivers)} ")))
+            # 統計残響式は受音点に依らないので 1 点目の結果を配る（無駄なループを消す）
+            shared_statistical = (shared_statistical
+                                  or results[-1].get("statistical"))
         _write_summaries(project, verbose=verbose)
         return {"receivers": receivers, "results": results, **results[0]}
 
@@ -73,7 +80,7 @@ def run(project, verbose=True, make_figures=True, progress=None,
               f"音線追跡は 1 回で済ませ、受音判定だけ {len(receivers)} 点ぶん行います")
     traced, recorder = _trace_once(project, receivers, verbose=verbose, progress=progress)
 
-    results = []
+    results, shared_statistical = [], None
     for k, point in enumerate(receivers):
         sub = _sub_project(project, k)
         if verbose:
@@ -88,8 +95,10 @@ def run(project, verbose=True, make_figures=True, progress=None,
                                 head_azimuth=project.head_azimuth_for(k),
                                 traced_history=None if traced is None else traced[k],
                                 reuse_paths=False,
+                                statistical_result=shared_statistical,
                                 progress=_prefixed(progress,
                                                    f"受音点{k + 1}/{len(receivers)} ")))
+        shared_statistical = shared_statistical or results[-1].get("statistical")
     if recorder is not None:
         # 軌跡は受音点に依らないので `結果/` 直下に 1 つだけ置く。
         # `clear_results` のあとに置かないと消される
@@ -242,6 +251,105 @@ def run_conditions(project, conditions=None, verbose=True, make_figures=True,
     return {"conditions": done, "results": results, "comparison": comparison}
 
 
+def log_path(project):
+    """計算中のログを残すテキストのパス（`結果/<室>_計算ログ.txt`）。
+
+    画面のログは閉じると消えてしまうので、あとから追えるように残す
+    （2026-08-21 ユーザー要望）。条件ごとに分けたいので条件名も付く。
+    """
+    return os.path.join(project.path(pj.RESULT_DIR),
+                        project.prefixed("計算ログ.txt"))
+
+
+def machine_info():
+    """計算に使った PC の情報（2026-08-21 ユーザー要望）。
+
+    ★**標準ライブラリだけで取れるもの**にしてある（依存を増やさないため）。
+    メモリと CPU 名は Windows なら `wmic` / 環境変数から拾えるので試し、
+    取れなければその項目だけ空にする。
+    """
+    import platform
+
+    info = {
+        "PC 名": platform.node(),
+        "OS": f"{platform.system()} {platform.release()}（{platform.version()}）",
+        "CPU": platform.processor() or os.environ.get("PROCESSOR_IDENTIFIER", ""),
+        "論理コア数": os.cpu_count(),
+        "Python": platform.python_version(),
+    }
+    try:
+        import numpy as np
+        info["numpy"] = np.__version__
+    except Exception:
+        pass
+    # 物理メモリ。Windows は GlobalMemoryStatusEx、それ以外は os.sysconf
+    try:
+        if os.name == "nt":
+            import ctypes
+
+            class Status(ctypes.Structure):
+                _fields_ = [("dwLength", ctypes.c_ulong),
+                            ("dwMemoryLoad", ctypes.c_ulong),
+                            ("ullTotalPhys", ctypes.c_ulonglong),
+                            ("ullAvailPhys", ctypes.c_ulonglong),
+                            ("ullTotalPageFile", ctypes.c_ulonglong),
+                            ("ullAvailPageFile", ctypes.c_ulonglong),
+                            ("ullTotalVirtual", ctypes.c_ulonglong),
+                            ("ullAvailVirtual", ctypes.c_ulonglong),
+                            ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+
+            status = Status()
+            status.dwLength = ctypes.sizeof(Status)
+            ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status))
+            info["メモリ [GB]"] = round(status.ullTotalPhys / 1024 ** 3, 1)
+        else:
+            info["メモリ [GB]"] = round(
+                os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+                / 1024 ** 3, 1)
+    except Exception:
+        pass
+    return info
+
+
+def write_run_info(project, elapsed=None, conditions=None, verbose=True):
+    """**使った PC と計算にかかった時間**を残す（`結果/<室>_計算情報.csv`）。
+
+    結果一式（Excel）の「概要」シートにそのまま並ぶ（2026-08-21 ユーザー要望）。
+    「同じ条件で誰の PC で何分かかったか」を後から見られるようにするためのもの。
+    """
+    import csv
+    import time
+
+    rows = [("項目", "値"), ("計算日時", time.strftime("%Y-%m-%d %H:%M:%S"))]
+    if elapsed is not None:
+        rows.append(("計算にかかった時間 [s]", round(float(elapsed), 1)))
+        rows.append(("計算にかかった時間", _clock(elapsed)))
+    if conditions:
+        rows.append(("回した条件の数", conditions))
+    rows += [("音線数", project.rays), ("最大反射回数", project.nref),
+             ("受音球の半径 [m]", project.radius),
+             ("応答の長さ [s]", project.max_time),
+             ("周波数バンド", project.band_number)]
+    rows += list(machine_info().items())
+
+    path = os.path.join(project.path(pj.RESULT_DIR),
+                        project.prefixed(RUN_INFO_FILE))
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8-sig", newline="") as f:
+        csv.writer(f).writerows(rows)
+    if verbose:
+        print(f"[run] 計算情報（PC と所要時間）: {path}")
+    return path
+
+
+def _clock(seconds):
+    seconds = int(max(0.0, float(seconds)))
+    hours, rest = divmod(seconds, 3600)
+    minutes, second = divmod(rest, 60)
+    return (f"{hours}:{minutes:02d}:{second:02d}" if hours
+            else f"{minutes}:{second:02d}")
+
+
 def _write_summaries(project, verbose=True):
     """受音点をまたいだまとめ表を作る（`結果/まとめ_*.csv`）。
 
@@ -359,7 +467,7 @@ def _sub_project(project, index):
 
 def _run_one(project, receiver, verbose=True, make_figures=True,
              write_back=True, head_azimuth=None, traced_history=None,
-             reuse_paths=True, progress=None):
+             reuse_paths=True, statistical_result=None, progress=None):
     project.ensure_dirs()
     # 前回の結果を消してから回す。条件を変えたときに古いファイルが残っていると、
     # 今回の条件の値だと思って読んでしまう。
@@ -410,6 +518,8 @@ def _run_one(project, receiver, verbose=True, make_figures=True,
         sti_filename=project.result_path("sti"),
         paths_filename=project.paths_cache(),
         reuse_paths=reuse_paths,
+        # 統計残響式は受音点に依らない。2 点目以降は 1 点目の結果を使う
+        statistical_result=statistical_result,
         source_power_db=project.source_power_db,
         noise_level_db=project.noise_level_db,
         statistical=project.statistical,
