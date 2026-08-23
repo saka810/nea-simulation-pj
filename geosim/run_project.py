@@ -594,8 +594,10 @@ def _library_for(project, verbose=False):
     if library is not None:
         return library
     if project.absorption_path:
-        return ab.MaterialLibrary.from_csv(project.absorption_path,
-                                           kind=project.absorption_kind)
+        # ★xlsx（「吸音率」シート）も CSV も選べる（2026-08-21 ユーザー要望）
+        return ab.MaterialLibrary.from_file(project.absorption_path,
+                                            kind=project.absorption_kind,
+                                            verbose=verbose)
     return None
 
 

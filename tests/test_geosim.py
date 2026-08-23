@@ -2729,6 +2729,73 @@ def test_conditions_batch():
 
     shutil.rmtree(folder, ignore_errors=True)
 
+# ---------------------------------------- 左パネルのページ送り（依頼 2026-08-21）
+def test_panel_scroll():
+    print("\n[37] 左パネルのページ送り（入りきらない分を送る）")
+    import view_model_gui as vg
+
+    # ★実案件（研修室：レイヤ 9 種 ＋ 材料 19 種）と同じくらいの量を積む。
+    #   1920x1080 でも 230 px あふれたので、送れないと材料一覧が見えない
+    # 小さめの窓（ノート PC の実寸）で試す。研修室の実測は 1280x860 で 450 px、
+    # 1920x1080 でも 230 px あふれた
+    plotter, panel = vg.make_plotter("パネルの試験", (1280, 520), off_screen=True,
+                                     panel=True)
+    try:
+        panel.text("見出し", size=11)
+        status = panel.reserve_text(2)
+        panel.heading("レイヤ表示")
+        boxes = [panel.checkbox(f"レイヤ {i}", True, lambda v: None)
+                 for i in range(9)]
+        panel.heading("受音点の向き")
+        panel.slider("正面の方位 [°]", [0.0, 360.0], 90.0, lambda v: None)
+        panel.heading("吸音材")
+        for i in range(19):
+            panel.checkbox(f"材料 {i}", False, lambda v: None)
+        panel.enable_scroll()
+
+        check("入りきらない量が分かる", panel.hidden_height() > 0,
+              f"{panel.hidden_height():.0f} px あふれ / 中身 "
+              f"{panel.content_height():.0f} px")
+        check("hidden_height と max_scroll は同じ意味",
+              np.isclose(panel.hidden_height(), panel.max_scroll()))
+        check("下端の案内が出る（送れることが分かる）",
+              "PageUp" in panel._hint.GetInput(), panel._hint.GetInput())
+
+        limit = panel.max_scroll()
+        panel.scroll_by(+1)
+        check("★1 ページ送れる", 0 < panel.scroll <= limit, f"{panel.scroll:.0f} px")
+        panel.scroll_by(+99)
+        check("★送りすぎない（最後で止まる）", np.isclose(panel.scroll, limit),
+              f"{panel.scroll:.0f} / 上限 {limit:.0f}")
+        panel.scroll_by(-99)
+        check("★戻しすぎない（先頭で止まる）", panel.scroll == 0.0,
+              f"{panel.scroll:.0f}")
+
+        # ★範囲外の要素は隠す。スライダはウィンドウ全体の座標で描かれるので、
+        #   隠さないと 3D の上に残る（2026-08-19 に取り下げた原因）
+        hidden_before = [b.GetEnabled() for b in boxes]
+        panel.scroll_by(+99)
+        hidden_after = [b.GetEnabled() for b in boxes]
+        check("★最後まで送ると上のチェックボックスは隠れる",
+              any(before and not after
+                  for before, after in zip(hidden_before, hidden_after)),
+              f"{sum(hidden_before)} → {sum(hidden_after)} 個が有効")
+        panel.scroll_by(-99)
+        check("戻すと元に戻る",
+              [b.GetEnabled() for b in boxes] == hidden_before,
+              str([b.GetEnabled() for b in boxes]))
+
+        # ウィンドウを縦に広げれば送る必要が減る（パネルの高さ＝ウィンドウの高さ）
+        tall = panel.content_height() + 4 * panel.margin
+        panel.height = int(tall)
+        check("縦に広げれば送らずに全部入る", panel.max_scroll() == 0.0,
+              f"{panel.max_scroll():.0f} px")
+        panel._update_hint()
+        check("入りきるときは案内を出さない", panel._hint.GetInput().strip() == "",
+              repr(panel._hint.GetInput()))
+    finally:
+        plotter.close()
+
 def main():
     print("geosim 数値検証")
     print(f"  Python {sys.version.split()[0]} / numpy {np.__version__}")
@@ -2747,7 +2814,8 @@ def main():
                test_patch_collision, test_shared_trace_and_batch_backtrace,
                test_result_naming, test_sound_level,
                test_speech_transmission_index, test_condition_table,
-               test_workbook, test_path_reuse, test_conditions_batch):
+               test_workbook, test_path_reuse, test_conditions_batch,
+               test_panel_scroll):
         fn()
 
     failed = [name for name, ok in _results if not ok]

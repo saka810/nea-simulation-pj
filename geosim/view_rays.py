@@ -1295,14 +1295,19 @@ def view(dxf_path, raylog_path, mode="both", absorption=None, unit=None,
         # 「音線の情報」は起動時にコンソールへ出しているのでパネルには載せない
         # （操作が増えて入りきらなくなったため。2026-08-19）
         panel.heading("操作")
-        panel.text("\n".join(help_lines), color="#7f8794")
+        # ★全部は F1 の別ウィンドウで読める（パネルは狭いので要点だけ）
+        panel.text(chr(10).join(help_lines[:6]), color="#7f8794")
+        panel.help_window(help_lines + ["PageUp / PageDown  左の欄を送る"],
+                          title="音線・音粒子 — 操作の一覧")
         panel.enable_value_input()
+        # ★入りきらない分はページ送りで見る（2026-08-21 ユーザー指摘）
+        panel.enable_scroll()
         panel.relayout()
         if panel.hidden_height() > 0:
-            # 黙って下が切れると操作説明ごと消えるので知らせる。
-            # パネルの高さ＝ウィンドウの高さなので、縦に広げれば入る
+            # 送れば見えるが、コンソールにも出しておく（探さずに済むように）
             print(f"[view_rays] 左パネルが {panel.hidden_height():.0f} px ぶん"
-                  f"入りきりません（ウィンドウを縦に広げてください）。操作は以下:")
+                  f"入りきりません。**PageUp / PageDown で送れます**"
+                  f"（ウィンドウを縦に広げても入ります）。操作は以下:")
             for line in help_lines:
                 print(f"[view_rays]   {line}")
 

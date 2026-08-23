@@ -397,6 +397,26 @@ class MaterialLibrary:
 
     # ---- 入出力 ----
     @classmethod
+    def from_file(cls, file_name, kind=None, band_number=None, verbose=True):
+        """**拡張子で読み方を選ぶ**（2026-08-21 ユーザー要望）。
+
+        - `.xlsx` / `.xlsm` … 「吸音率」シートを読む（`condition_table` の形）。
+          用意した吸音率表を設定画面で選べるようにするため
+        - それ以外 … CSV として読む（`from_csv`）
+
+        xlsx に「吸音率」シートが無ければ `ValueError`。
+        """
+        if str(file_name or "").lower().endswith((".xlsx", ".xlsm")):
+            import condition_table as ct
+            library = ct.library_from_book(file_name, kind=kind, verbose=verbose)
+            if library is None:
+                raise ValueError(
+                    f"{os.path.basename(file_name)} に「{ct.ABSORPTION_SHEET}」"
+                    f"シートが見つかりません（番号・材料名・吸音率の並びが要ります）")
+            return library
+        return cls.from_csv(file_name, kind=kind, band_number=band_number)
+
+    @classmethod
     def from_csv(cls, file_name, kind=None, band_number=None):
         """吸音率 CSV を読み込む。
 

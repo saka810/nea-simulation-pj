@@ -186,8 +186,8 @@ def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref
     # ・レイヤ → 材料の対応は layer_assignment で差し替えられる（CAD を触らずに済む）
     absorption_table = None
     if material_library is None and absorption_csv is not None:
-        material_library = ab.MaterialLibrary.from_csv(absorption_csv,
-                                                       kind=absorption_kind)
+        material_library = ab.MaterialLibrary.from_file(absorption_csv,
+                                                        kind=absorption_kind)
     if material_library is not None:
         print(f"[procedure] {material_library.summary()}")
         absorption_table = material_library.absorption_table(layer_assignment,

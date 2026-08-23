@@ -107,16 +107,20 @@ VALUE_INPUT_KEY = "t"
 
 
 class PanelItem:
-    """パネルに積んだ要素 1 つ。**高さと、置き直し方**だけを持つ。
+    """パネルに積んだ要素 1 つ。**高さ・置き直し方・隠し方**を持つ。
 
     ウィンドウの大きさが変わったら `place(y)` を呼び直すだけで並べ直せる。
+    `show(False)` は**ページ送りで範囲外に出たとき**に呼ぶ（2026-08-21）。
+    文字はレンダラのビューポートで切られるが、スライダは
+    ウィンドウ全体の座標で描かれるので**隠さないと 3D の上に残る**。
     """
 
-    __slots__ = ("height", "place")
+    __slots__ = ("height", "place", "show")
 
-    def __init__(self, height, place):
+    def __init__(self, height, place, show=None):
         self.height = height
         self.place = place
+        self.show = show
 
 
 class ControlPanel:
@@ -154,6 +158,12 @@ class ControlPanel:
         self.items = []
         self._widgets = []                 # 参照を残さないと GC で消える
         self.controls = []                 # 数値入力ダイアログに出すスライダ
+        self.scroll = 0.0                  # ページ送りの量 [px]
+        self._help_lines = []              # 別ウィンドウに出す操作の一覧
+        self._help_title = "操作の一覧"
+        self._help_note = None
+        self._hint = None                  # 下端に固定する案内（送られない）
+        self._scroll_label = "PageUp/PageDown"
         self._measure()
         self._watch_resize()
 
@@ -241,20 +251,127 @@ class ControlPanel:
 
     # ---- 並べ直し ------------------------------------------------------
 
-    def _add(self, height, place):
-        item = PanelItem(height, place)
+    def _add(self, height, place, show=None):
+        item = PanelItem(height, place, show)
         self.items.append(item)
         return item
 
     def relayout(self, render=False):
-        """いまのウィンドウの大きさに合わせて、上から順に積み直す。"""
+        """いまのウィンドウの大きさに合わせて、上から順に積み直す。
+
+        ★**ページ送りの分だけ下へずらす**（`self.scroll`）。
+        ずらして範囲外に出た要素は `show(False)` で隠す
+        （スライダはウィンドウ全体の座標で描かれるので、隠さないと 3D に残る）。
+        """
         self._measure()
-        y = self.height - self.margin
+        self.scroll = min(max(0.0, self.scroll), self.max_scroll())
+        top, bottom = self.height - self.margin, self.margin + self._hint_height()
+        y = top + self.scroll
         for item in self.items:
             y -= item.height
             item.place(y)
+            if item.show is not None:
+                item.show(y >= bottom - 1 and y + item.height <= top + 1)
+        self._update_hint()
         if render:
             self.plotter.render()
+
+    # ---- ページ送り（2026-08-21）----------------------------------------
+    #
+    # ★以前は「入りきらない分は載せる内容を削る」方針だったが、実案件では
+    #   レイヤ 9 種 ＋ 材料 19 種で 1280 px でも 450 px、1920 px でも 230 px
+    #   あふれた（ユーザー指摘）。**削り切れないので送れるようにした。**
+    #   前に試して取り下げたのは「置き直しを飛ばす」やり方で、
+    #   古い位置に残ったウィジェットが文字に重なっていた。いまは必ず置き直し、
+    #   範囲外は隠す。
+
+    def enable_scroll(self, back="Prior", forward="Next", label="PageUp/PageDown"):
+        """入りきらないときにページ送りできるようにする。
+
+        キーは既定で PageUp / PageDown（VTK も他の画面も使っていない）。
+        送れる状態かどうかは**パネルの下端の案内**に出す。
+        """
+        self._scroll_label = label
+        self.plotter.add_key_event(back, lambda: self.scroll_by(-1))
+        self.plotter.add_key_event(forward, lambda: self.scroll_by(+1))
+        self._ensure_hint()
+        self.relayout()
+
+    def help_window(self, lines, key="F1", title="操作の一覧", note=None):
+        """操作の一覧を**別ウィンドウ**で出せるようにする（2026-08-21 ユーザー要望）。
+
+        左パネルは狭いうえ縦にも限りがあるので、送らずに全部読みたいときの逃げ道。
+        `enable_value_input` と同じく tkinter の窓を開いて閉じるまで待つ
+        （3D の操作は止まるが、読むだけなので取り合いにならない）。
+
+        パネルには「F1 操作の一覧」の 1 行だけ置く。
+        """
+        self._help_lines = list(lines)
+        self._help_title = title
+        self._help_note = note
+        self.plotter.add_key_event(key, self.open_help)
+        self.text(f"{key} 操作の一覧（別ウィンドウ）", size=8, color="#ffd166")
+        return self
+
+    def open_help(self):
+        import tkinter as tk
+        from tkinter import ttk
+
+        root = tk.Tk()
+        root.title(self._help_title)
+        root.attributes("-topmost", True)
+        frame = ttk.Frame(root, padding=12)
+        frame.pack(fill="both", expand=True)
+        if self._help_note:
+            ttk.Label(frame, text=self._help_note, foreground="#666",
+                      wraplength=460).pack(anchor="w", pady=(0, 8))
+        box = tk.Text(frame, width=52, height=min(28, len(self._help_lines) + 2),
+                      wrap="none", relief="flat", background="#f6f7f9")
+        scroll = ttk.Scrollbar(frame, command=box.yview)
+        box.configure(yscrollcommand=scroll.set)
+        box.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+        box.insert("1.0", chr(10).join(self._help_lines))
+        box.configure(state="disabled")
+        ttk.Button(root, text="閉じる", command=root.destroy).pack(pady=(0, 10))
+        root.bind("<Escape>", lambda _e: root.destroy())
+        root.mainloop()
+
+    def max_scroll(self):
+        """送れる最大量 [px]（入りきっていれば 0）。"""
+        return max(0.0, self.content_height()
+                   - (self.height - 2 * self.margin - self._hint_height()))
+
+    def scroll_by(self, pages):
+        """`pages` 枚ぶん送る（1 枚 = 見えている高さの 8 割）。"""
+        step = max(40.0, (self.height - 2 * self.margin) * 0.8)
+        self.scroll = min(max(0.0, self.scroll + pages * step), self.max_scroll())
+        self.relayout(render=True)
+
+    def _ensure_hint(self):
+        """パネルの下端に固定する案内の文字（**積まないので送られない**）。"""
+        if self._hint is not None:
+            return self._hint
+        self._panel()
+        self._hint = self.plotter.add_text(" ", position=(self.margin, self.margin),
+                                           font_size=8, color="#ffd166",
+                                           font_file=self.font)
+        self._model()
+        return self._hint
+
+    def _hint_height(self):
+        return self.line_height(8) + 4 if self._hint is not None else 0
+
+    def _update_hint(self):
+        if self._hint is None:
+            return
+        limit = self.max_scroll()
+        if limit <= 0:
+            self._hint.SetInput(" ")
+        else:
+            page = int(self.scroll / max(1.0, limit) * 100.0)
+            self._hint.SetInput(f"▲▼ {self._scroll_label} で送る（{page}%）")
+        self._hint.SetDisplayPosition(self.margin, self.margin)
 
     def content_height(self):
         """並べた要素の高さの合計 [px]。"""
@@ -264,14 +381,9 @@ class ControlPanel:
         """入りきらずに下へはみ出している高さ [px]（入りきっていれば 0）。
 
         **ウィンドウを縦に広げれば減る**（パネルの高さはウィンドウの高さそのもの）。
-        はみ出しているときは呼び出し側から知らせること。
-
-        ★スクロールできるようにするのは試したが取り下げた。
-          VTK のウィジェットは置き直しを飛ばすと古い位置に残り、
-          チェックボックスが行ずれして文字に重なった（2026-08-19）。
-          載せる内容を削るほうを選んだ。
+        入りきらない場合は `enable_scroll()` でページ送りできる（2026-08-21）。
         """
-        return max(0.0, self.content_height() - (self.height - 2 * self.margin))
+        return self.max_scroll()
 
     def _watch_resize(self):
         """ウィンドウの大きさが変わったら並べ直す。
@@ -339,7 +451,8 @@ class ControlPanel:
                                      for line in str(message).split("\n")))
             actor.SetDisplayPosition(self.margin + indent, int(y))
 
-        self._add(height * lines, place)
+        self._add(height * lines, place,
+                  lambda visible, a=actor: a.SetVisibility(bool(visible)))
         return self
 
     def reserve_text(self, lines, size=9, color=TEXT_COLOR):
@@ -354,7 +467,8 @@ class ControlPanel:
                                       font_file=self.font)
         self._model()
         self._add(self.line_height(size) * lines,
-                  lambda y, a=actor: a.SetDisplayPosition(self.margin, int(y)))
+                  lambda y, a=actor: a.SetDisplayPosition(self.margin, int(y)),
+                  lambda visible, a=actor: a.SetVisibility(bool(visible)))
         return actor
 
     def heading(self, message):
@@ -383,7 +497,12 @@ class ControlPanel:
             text.SetInput(self.fit(label, self.width - left - self.margin))
             text.SetDisplayPosition(left, int(y) + 3)
 
-        self._add(self.CHECK + 4, place)
+        # 範囲外に出たら**チェックボックスも文字も隠す**（ページ送りのため）
+        def show(visible, widget=widget, text=text):
+            text.SetVisibility(bool(visible))
+            widget.On() if visible else widget.Off()
+
+        self._add(self.CHECK + 4, place, show)
         return widget
 
     def slider(self, title, value_range, value, callback, fmt="%.2f"):
@@ -457,7 +576,11 @@ class ControlPanel:
             representation.Modified()
             representation.BuildRepresentation()
 
-        self._add(self.SLIDER, place)
+        def show(visible, widget=widget):
+            # スライダは**ウィンドウ全体**の座標で描くので、隠さないと 3D に残る
+            widget.On() if visible else widget.Off()
+
+        self._add(self.SLIDER, place, show)
         return widget
 
 

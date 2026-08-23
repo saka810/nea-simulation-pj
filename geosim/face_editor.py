@@ -644,24 +644,43 @@ class FaceEditor:
                               if len(self.head_azimuth) > 1 else "黄色い矢印が正面です"),
                            size=8)
 
+            # ★操作は**別ウィンドウ（F1）でも全部読める**ようにしてある。
+            #   パネルは狭いので、ここには要点だけ短く置く（2026-08-21 ユーザー指摘）
+            keys = [
+                "r  枠で選ぶ（もう一度押すと解除）",
+                "0  選択を解除    j  全部を選ぶ    h  選択を反転",
+                "k  同じ向きの面を選ぶ    l  同じ吸音材の面を選ぶ",
+                "数字  そのレイヤを選ぶ（1〜9）",
+                "y  面グループ ⇔ 三角形    m  法線 ⇔ 吸音材",
+                "i  選んだ面の法線を反転（選択が空なら全部）",
+                "a  自動判定にする    d  CAD の巻き順に戻す",
+                "n  法線の矢印    o  不透明度の対象を切り替え",
+                "z / x / c / v  視点（上・正面・横・等角）",
+                f"{vg.VALUE_INPUT_KEY}  スライダの値を数字で入れる",
+            ]
+            if len(self.head_azimuth) > 1:
+                keys.append("w  向きを調整する受音点を切り替え")
+            if self.save_dir:
+                keys.append("g  いまの画面を画像で保存")
+            keys += ["PageUp / PageDown  左の欄を送る",
+                     "s  保存して閉じる    q  保存せずに閉じる"]
+
             panel.heading("操作")
-            # ★パネルは縦に伸びず、横も狭い（`Panel.text` は右を「…」で切り詰める）。
-            #   材料が増えるほど下が押されるので、**小さめの字で短く**書く
             panel.text("r 枠選択  0 解除  j 全選択\n"
-                       "h 選択反転  k 同じ向き\n"
-                       "l 同じ吸音材  数字 レイヤ\n"
-                       "y グループ⇔三角形  m 法線⇔吸音材\n"
-                       "i 法線を反転（空なら全部）\n"
-                       "a 自動判定  d CAD の巻き順\n"
-                       "n 法線矢印  o 不透明度\n"
-                       f"z/x/c/v 視点  {vg.VALUE_INPUT_KEY} 数値入力"
-                       + ("  g 画像" if self.save_dir else "") + "\n"
+                       "h 反転  k 同じ向き  l 同じ吸音材\n"
+                       "i 法線を反転  m 法線⇔吸音材\n"
                        "s 保存して閉じる  q 保存せず閉じる",
                        size=8, color="#7f8794")
             self.status = panel.reserve_text(2, size=9, color="#ffd166")
+            panel.help_window(keys, title="面の確認 — 操作の一覧",
+                              note="選んでから適用する二段階です。"
+                                   "枠で囲んで選び、キーで操作します。")
 
             # 吸音材の一覧は長くなりうるので**いちばん下**（上の説明を参照）
             self._build_material_panel(panel)
+            # ★入りきらない分はページ送りで見る（2026-08-21 ユーザー指摘）。
+            #   実案件（レイヤ 9 ＋ 材料 19）では 1920x1080 でも 230 px あふれた
+            panel.enable_scroll()
         else:
             self.label = self.plotter.add_text(" ", position=(14, window_size[1] - 130),
                                                font_size=10, color=TEXT_COLOR,
@@ -851,7 +870,7 @@ def material_names(project):
         return []
     import absorption as ab
     try:
-        library = ab.MaterialLibrary.from_csv(project.absorption_path,
+        library = ab.MaterialLibrary.from_file(project.absorption_path,
                                               kind=project.absorption_kind)
     except Exception as error:      # CSV が壊れていても画面は開けるようにする
         print(f"[face_editor] 吸音率 CSV を読めませんでした（{error}）。"
@@ -919,7 +938,8 @@ def load_model_for(project, verbose=True):
     table = None
     if absorption:
         import absorption as ab
-        library = ab.MaterialLibrary.from_csv(absorption, kind=project.absorption_kind)
+        library = ab.MaterialLibrary.from_file(absorption,
+                                               kind=project.absorption_kind)
         table = library.absorption_table(project.assignment,
                                          band_number=project.band_number)
     # 面数が分からないと反転指定・材料の割り当てを照合できないので、まず一度読む

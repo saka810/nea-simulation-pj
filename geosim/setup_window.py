@@ -144,8 +144,11 @@ class SetupWindow:
             ("name", "対象室名（任意）", "text",
              "結果ファイル名の頭に付きます。**空欄なら DXF のファイル名**を使います"),
             ("dxf", "モデル（DXF）", "file", "室形状。音源・受音点も src / rec レイヤから読みます"),
-            ("absorption_csv", "吸音率（CSV）", "file",
-             "1列目=材料名または ID。レイヤ名の先頭の数字でも引けます"),
+            # ★用意した吸音率表を選ぶ（xlsx なら「吸音率」シートを読む。
+            #   2026-08-21 ユーザー要望）
+            ("absorption_csv", "吸音率表（xlsx / CSV）", "file",
+             "材料の一覧。xlsx なら「吸音率」シート（番号・材料名・α）を読みます。"
+             "★条件表に「吸音率」シートがあればそちらが優先"),
             # ★条件はファイルで選ぶ。用意していなければ「条件表を作成」で作る。
             #   xlsx なら**シート 1 枚が条件 1 つ**で、シート名が条件名になる
             ("condition_csv", "条件表（xlsx）", "file",
@@ -365,6 +368,9 @@ class SetupWindow:
         elif key == "condition_csv":
             # 条件表は xlsx が本命。昔の CSV も選べるようにしておく
             patterns = [("条件表", "*.xlsx *.xlsm *.csv"), ("すべて", "*.*")]
+        elif key == "absorption_csv":
+            # 吸音率表も xlsx（「吸音率」シート）を選べる
+            patterns = [("吸音率表", "*.xlsx *.xlsm *.csv"), ("すべて", "*.*")]
         else:
             patterns = [("CSV", "*.csv"), ("すべて", "*.*")]
         path = filedialog.askopenfilename(title="ファイルを選ぶ", filetypes=patterns,

@@ -81,7 +81,7 @@ python -c "import numpy, scipy, matplotlib, pyvista, openpyxl; print('ok')"
 | scipy | 帯域フィルタ・信号処理（E-6） |
 | matplotlib | 2D グラフ（インパルス応答・音響指標・モード分布） |
 | pyvista（+ vtk） | 3D 表示（`geosim/view_model_gui.py`） |
-| openpyxl | 結果一式の Excel 出力（`geosim/workbook.py`）。CSV 出力には不要 |
+| openpyxl | Excel の読み書き（条件表 `condition_table.py` / 結果一式 `workbook.py`） |
 
 ## 実行
 
@@ -263,7 +263,7 @@ python procedure.py ..\test.dxf --absorption ..\absorption.csv --absorption-kind
 .\.venv\Scripts\python tests\test_geosim.py
 ```
 
-**473 項目**（2026-08-21 時点）。解析的に答えが分かる問題（直方体の虚音源距離、
+**483 項目**（2026-08-21 時点）。解析的に答えが分かる問題（直方体の虚音源距離、
 減衰率が既知の応答など）で数式レベルの正しさを確かめる。
 **数式に関わるコードを変更したら必ず走らせること。**
 
