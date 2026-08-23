@@ -1191,6 +1191,13 @@ def test_measurement_points():
     check("★配置図も `図/` 直下",
           os.path.dirname(project.figure_path("points.png", shared=True))
           == project.path("図"))
+    check("★配置図の名前にも条件名は付けない（表と揃える）",
+          os.path.basename(project.figure_path("points.png", shared=True))
+          == "研修室_points.png",
+          os.path.basename(project.figure_path("points.png", shared=True)))
+    check("受音点ごとの図には条件名が付く（従来どおり）",
+          os.path.basename(project.figure_path("decay.png")) == "研修室_現状_decay.png",
+          os.path.basename(project.figure_path("decay.png")))
     shutil.rmtree(folder, ignore_errors=True)
 
     # ★★受音点に依らない結果を 2 点目の掃除で消していないか（2026-08-23 に直した）。

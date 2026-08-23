@@ -344,7 +344,17 @@ class Project:
         return self.path(FIGURE_DIR, RECEIVER_DIR % self.receiver_index)
 
     def figure_path(self, name, shared=False):
-        """図のパス。**図にも対象室＋条件名を付ける**（貼ってから見分けが付くように）。"""
+        """図のパス。**図にも対象室＋条件名を付ける**（貼ってから見分けが付くように）。
+
+        ★ただし `shared=True` の図は**受音点にも条件にも依らない**ので、
+        頭は**対象室名だけ**にする（2026-08-23。測定点の配置図で、
+        表が `研修室_測定点.csv` なのに図が `研修室_現状_points.png` と
+        食い違っていた）。結果 CSV 側の `ROOM_SCOPED_RESULTS` と同じ扱い。
+        """
+        if shared:
+            room = self.room_label
+            return os.path.join(self.figure_dir(shared=True),
+                                f"{room}_{name}" if room else name)
         return os.path.join(self.figure_dir(shared=shared), self.prefixed(name))
 
     def screenshot_dir(self):
