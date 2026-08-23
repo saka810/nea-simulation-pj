@@ -139,6 +139,40 @@ class PulseList:
                    comments="", fmt="%.12g")
         return filename
 
+    @classmethod
+    def from_csv(cls, filename, sound_velocity=SOUND_VELOCITY):
+        """`save_csv` が書いた CSV を読み戻す（`save_csv` の裏返し）。
+
+        ★**虚音源の可視化（`view_images.py`）のために足した**（2026-08-24）。
+        虚音源の位置は `受音点 + direction * distance` で復元できるので、
+        パルス列があれば計算をやり直さずに描ける。
+
+        **反射の幾何（`walls` / `cos_theta`）は CSV に入っていない**ので空のまま。
+        幾何が要るときは経路の npz（`path_cache`）を読むこと。
+        """
+        rows = np.loadtxt(filename, delimiter=",", skiprows=1, ndmin=2)
+        if rows.size == 0:
+            return cls(1, sound_velocity)
+        band_number = max(1, rows.shape[1] - 6)
+        self = cls(band_number, sound_velocity)
+        self.reflection_count = rows[:, 0].astype(int)
+        self.time = rows[:, 1]
+        self.distance = rows[:, 2]
+        self.direction = rows[:, 3:6]
+        self.energy = rows[:, 6:]
+        return self
+
+    def image_sources(self, receiver_point):
+        """**虚音源の位置**を返す (n,3)。
+
+        `direction` は受音点から虚音源を見込む単位ベクトル、`distance` は
+        そこまでの距離なので、`受音点 + direction * distance` が虚音源そのもの。
+        受音点と虚音源を結ぶ直線が「折り返しを伸ばした経路」で、その長さが
+        経路長（= 音速 × 到来時刻）になる（書籍 図2.18）。
+        """
+        receiver = np.asarray(receiver_point, dtype=float).reshape(1, 3)
+        return receiver + self.direction * self.distance[:, None]
+
     def summary(self):
         if len(self) == 0:
             return "パルス列: 0 本（受音に至った経路なし）"

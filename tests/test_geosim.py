@@ -3158,6 +3158,106 @@ def test_impulse_fast():
           int(np.argmax(np.abs(shifted[0]))) == int(round(0.01 * fs / 2.0)),
           f"位置 {int(np.argmax(np.abs(shifted[0])))} / 期待 {int(round(0.01 * fs / 2))}")
 
+
+# ------------------------------ 虚音源の可視化（2026-08-24 ユーザー要望）
+def test_image_source_view():
+    print(chr(10) + "[41] 虚音源の可視化（G-31）")
+    import tempfile
+    import shutil
+
+    import view_images as vi
+
+    # test.dxf（2×3×1 m の直方体）で実際にバックトレースを回し、
+    # ★**パルス列から虚音源の位置を復元できる**（受音点 + 到来方向 × 距離）ことと、
+    #   その値が幾何から出した鏡像と一致することを押さえる
+    model, src, rec = load_test_room()
+    mesh = model.mesh
+    rays = sr.soundray_generator(20000)
+    history = ld.delete(lr.loop(src, rec, rays, 2, mesh, 0.15))
+    pulses = ln.loop(src, rec, history, mesh, sound_velocity=C, verbose=False)
+    check("経路が見つかる", len(pulses) > 0, f"{len(pulses)} 本")
+
+    position = pulses.image_sources(rec)
+    check("虚音源の数がパルスの数と同じ", len(position) == len(pulses))
+    length = np.linalg.norm(position - np.asarray(rec).reshape(1, 3), axis=1)
+    check("★虚音源までの距離が経路長と一致（受音点 + 方向 × 距離）",
+          np.allclose(length, pulses.distance, atol=1e-9),
+          f"最大差 {np.abs(length - pulses.distance).max():.3e} m")
+
+    direct = np.nonzero(pulses.reflection_count == 0)[0]
+    check("★直接音の虚音源は音源そのもの",
+          len(direct) == 1 and np.allclose(position[direct[0]], src, atol=1e-9),
+          f"{np.round(position[direct[0]], 9).tolist() if len(direct) else '無し'}")
+
+    # 1 回反射の虚音源は、6 枚の壁について音源を鏡像にした点のどれかに一致する
+    mirrors = np.array([mirror(src, name) for name in FACES])
+    first = np.nonzero(pulses.reflection_count == 1)[0]
+    gap = np.abs(position[first][:, None, :] - mirrors[None, :, :]).sum(axis=2)
+    check("★1 回反射の虚音源は「壁について音源を鏡像にした点」に一致",
+          len(first) > 0 and float(gap.min(axis=1).max()) < 1e-9,
+          f"{len(first)} 個 / 最大差 {gap.min(axis=1).max():.3e} m")
+
+    # ---- 反射回数の範囲で絞る（ユーザー要望の「開始」「終了」）----
+    item = vi.ImageSourceSet(rec, pulses, name="rec1")
+    check("虚音源の集まりが作れる", len(item) == len(pulses))
+    check("範囲を指定しなければ全部", len(item.select(0, None)) == len(pulses))
+    check("★開始＝終了＝0 で直接音のみ", len(item.select(0, 0)) == 1)
+    for order in (1, 2):
+        picked = item.select(order, order)
+        want = int((pulses.reflection_count == order).sum())
+        check(f"★開始＝終了＝{order} で {order} 回目反射のみ",
+              len(picked) == want and bool(np.all(item.order[picked] == order)),
+              f"{len(picked)} 個")
+    span = item.select(1, 2)
+    want = int(((pulses.reflection_count >= 1)
+                & (pulses.reflection_count <= 2)).sum())
+    check("範囲（1〜2 回）で絞れる",
+          len(span) == want
+          and bool(np.all((item.order[span] >= 1) & (item.order[span] <= 2))),
+          f"{len(span)} 個")
+    check("開始と終了が逆でも同じ結果",
+          np.array_equal(item.select(2, 1), item.select(1, 2)))
+    check("該当が無ければ空", len(item.select(90, 99)) == 0)
+
+    # ★本数で絞るときは**エネルギーの大きい順**（弱いものばかり残らないように）
+    pool = item.select(0, 2)
+    limited = item.select(0, 2, 3)
+    check("本数で絞れる", len(limited) == min(3, len(pool)), f"{len(limited)} 個")
+    if len(pool) > 3:
+        threshold = np.sort(item.energy[pool])[::-1][2]
+        check("★絞るときはエネルギーの大きい順",
+              bool(np.all(item.energy[limited] >= threshold - 1e-12)))
+
+    # ---- 描くためのデータ（線と点）----
+    poly = item.line_polydata(limited, "reflection")
+    check("線は 1 本につき 2 点", poly.n_points == 2 * len(limited))
+    points = np.asarray(poly.points)
+    check("★線の片端はすべて受音点",
+          np.allclose(points[1::2], np.asarray(rec).reshape(1, 3), atol=1e-9))
+    check("線のもう片端は虚音源",
+          np.allclose(points[0::2], item.position[limited], atol=1e-9))
+    check("点の数は本数と同じ",
+          item.point_polydata(limited, "reflection").n_points == len(limited))
+    check("該当が無ければ線も点も作らない",
+          item.line_polydata(item.select(90, 99)) is None
+          and item.point_polydata(item.select(90, 99)) is None)
+    check("色に使う値（到来時刻 [ms]）が出る",
+          np.allclose(item.values(limited, "time"), item.time[limited] * 1000.0))
+
+    # ---- CSV を経由しても同じか（画面はここから読む）----
+    folder = tempfile.mkdtemp()
+    path = os.path.join(folder, "pulses.csv")
+    pulses.save_csv(path)
+    again = ln.PulseList.from_csv(path)
+    check("★パルス列の CSV を読み戻せる（画面はここから読む）",
+          len(again) == len(pulses)
+          and np.allclose(again.distance, pulses.distance, rtol=1e-9)
+          and np.array_equal(again.reflection_count, pulses.reflection_count))
+    check("読み戻したパルス列でも虚音源が一致",
+          np.allclose(again.image_sources(rec), position, atol=1e-6))
+    shutil.rmtree(folder, ignore_errors=True)
+
+
 def main():
     print("geosim 数値検証")
     print(f"  Python {sys.version.split()[0]} / numpy {np.__version__}")
@@ -3178,7 +3278,7 @@ def main():
                test_speech_transmission_index, test_condition_table,
                test_workbook, test_path_reuse, test_conditions_batch,
                test_panel_scroll, test_empty_model, test_impulse_fast,
-               test_measurement_points):
+               test_measurement_points, test_image_source_view):
         fn()
 
     failed = [name for name, ok in _results if not ok]

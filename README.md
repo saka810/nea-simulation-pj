@@ -12,7 +12,7 @@ NEA（日本環境アメニティ株式会社）のシミュレーション PJ�
 
 ## フォルダ構成
 
-    geosim/                 Python 移植版のパッケージ（本体。33 ファイル）
+    geosim/                 Python 移植版のパッケージ（本体。34 ファイル）
     tests/test_geosim.py    数値検証。pytest 不要、素の Python で走る
     docs/                   数式・フロー・CAD の作図ルールの解説（PDF 版は docs/pdf/）
     data/                   吸音率テーブルのサンプル
@@ -37,7 +37,7 @@ NEA（日本環境アメニティ株式会社）のシミュレーション PJ�
 | 再計算を速く | `path_cache.py`（**経路の幾何を保存して使い回す**。吸音だけ変えた再計算） | — |
 | 出力 | `plots.py`（図）/ `table.py`（表の並べ方の共通ルール）/ `project.py`（保存・読込）/ `summary.py`（全測定点のまとめ表）/ `workbook.py`（**結果一式の Excel**） | — |
 | 絞り込み | `ray_filter.py`（注目したい音線を残す。近く・方向・1 本） | — |
-| 画面 | `app.py`（入口）/ `setup_window.py`（条件入力）/ `progress_window.py`（進捗）/ `face_editor.py`（面の確認：法線・吸音材）/ `view_rays.py`（音線・音粒子）/ `view_directions.py`（音線の飛び方）/ `view_model_gui.py`・`view_model.py`（モデルビューア） | — |
+| 画面 | `app.py`（入口）/ `setup_window.py`（条件入力）/ `progress_window.py`（進捗）/ `face_editor.py`（面の確認：法線・吸音材）/ `view_rays.py`（音線・音粒子）/ `view_images.py`（**虚音源**）/ `view_directions.py`（音線の飛び方）/ `view_model_gui.py`・`view_model.py`（モデルビューア） | — |
 
 各モジュールの詳細は [PROGRAM_STRUCTURE.md](PROGRAM_STRUCTURE.md)。
 
@@ -216,6 +216,10 @@ python view_model_gui.py ..\test.dxf --absorption ..\absorption.csv
 # モデルビューア（HTML + WebGL を書き出してブラウザで開く。依存ライブラリ不要）
 python view_model.py ..\test.dxf --absorption ..\absorption.csv
 
+# 虚音源（虚音源と受音点を結ぶ線。反射回数の開始・終了で絞る。計算はやり直さない）
+.\.venv\Scripts\python geosim\view_images.py <プロジェクトフォルダ>
+.\.venv\Scripts\python geosim\view_images.py <フォルダ> --start 2 --end 2   # 2 回目反射のみ
+
 # 音線と音粒子（既定は両方。Tab で切り替え。閉じずに見比べられる）
 python view_rays.py ..\test.dxf ..\結果\test_raylog.npz --received-only --max-reflection 3 --color time
 
@@ -280,7 +284,7 @@ python procedure.py ..\test.dxf --absorption ..\absorption.csv --absorption-kind
 .\.venv\Scripts\python tests\test_geosim.py
 ```
 
-**535 項目**（2026-08-23 時点）。解析的に答えが分かる問題（直方体の虚音源距離、
+**558 項目**（2026-08-24 時点）。解析的に答えが分かる問題（直方体の虚音源距離、
 減衰率が既知の応答など）で数式レベルの正しさを確かめる。
 **数式に関わるコードを変更したら必ず走らせること。**
 

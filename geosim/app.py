@@ -76,6 +76,23 @@ def _visualise(project, results=None):
         traceback.print_exc()
 
 
+def _visualise_images(project):
+    """★虚音源の可視化ウィンドウを開く（2026-08-24 ユーザー要望）。
+
+    パルス列から虚音源の位置を復元して描くだけなので**計算はやり直さない**。
+    """
+    import view_images as vi
+
+    try:
+        vi.open_for_project(project)
+    except ValueError as error:
+        # 理由がはっきりしているもの（結果が無いなど）は文章で伝える
+        _warn("虚音源を開けませんでした", error)
+    except Exception:
+        print("[app] 虚音源ウィンドウでエラーが起きました:")
+        traceback.print_exc()
+
+
 def _run_with_progress(project):
     """進捗ウィンドウを出しながら計算する。
 
@@ -269,6 +286,10 @@ def main():
             except Exception:
                 print("[app] 面の確認ウィンドウでエラーが起きました:")
                 traceback.print_exc()
+            continue
+        if action == "images":
+            # 虚音源を見るだけ。計算も図の描き直しもしない
+            _visualise_images(project)
             continue
         if action == "view":
             # 計算し直さずに、保存済みの結果を見る。

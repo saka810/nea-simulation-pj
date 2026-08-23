@@ -682,6 +682,7 @@ WINDOW_TITLES = {
     "rays":       ("音線・音粒子",   "geosim - rays and particles"),
     "directions": ("音線の飛び方",   "geosim - ray directions"),
     "model":      ("モデルビューア", "geosim - model viewer"),
+    "images":     ("虚音源",         "geosim - image sources"),
 }
 
 

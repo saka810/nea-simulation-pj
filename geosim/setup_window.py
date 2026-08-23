@@ -310,6 +310,11 @@ class SetupWindow:
         self.view_button = ttk.Button(frame, text="前回の結果を見る",
                                       command=self._on_view)
         self.view_button.pack(side="right", padx=4)
+        # ★虚音源の可視化（2026-08-24 ユーザー要望）。計算はやり直さず、
+        #   保存済みのパルス列から虚音源を復元して描くだけなのですぐ開く
+        self.images_button = ttk.Button(frame, text="虚音源を見る",
+                                        command=self._on_images)
+        self.images_button.pack(side="right", padx=4)
         ttk.Button(frame, text="面を確認…（法線・吸音材）", command=self._on_normals).pack(side="right",
                                                                            padx=4)
         ttk.Button(frame, text="条件だけ保存", command=self._on_save).pack(side="right",
@@ -693,6 +698,21 @@ class SetupWindow:
             os.startfile(path)
         except Exception:
             messagebox.showinfo("条件表", f"ここにあります: {path}")
+
+    def _on_images(self):
+        """★虚音源を見る（2026-08-24 ユーザー要望）。
+
+        パルス列（`結果/recN/<室>_pulses.csv`）から虚音源の位置を復元して描くだけで、
+        **計算はやり直さない**。だから結果があればいつでも開ける。
+        """
+        if not pj.has_results(self.project):
+            messagebox.showinfo("結果がありません",
+                                f"{self.project.folder} にまだ計算結果がありません。\n"
+                                f"虚音源はパルス列から作るので、"
+                                f"先に「計算する ▶」を実行してください。")
+            return
+        self.action = "images"
+        self.root.destroy()
 
     def _on_view(self):
         """計算し直さずに、保存済みの結果を開く。"""
