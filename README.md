@@ -12,9 +12,9 @@ NEA（日本環境アメニティ株式会社）のシミュレーション PJ�
 
 ## フォルダ構成
 
-    geosim/                 Python 移植版のパッケージ（本体。27 ファイル）
+    geosim/                 Python 移植版のパッケージ（本体。33 ファイル）
     tests/test_geosim.py    数値検証。pytest 不要、素の Python で走る
-    docs/                   数式・フロー・CAD の作図ルールの解説
+    docs/                   数式・フロー・CAD の作図ルールの解説（PDF 版は docs/pdf/）
     data/                   吸音率テーブルのサンプル
     Claude履歴/             セッション履歴（端末をまたいで作業を引き継ぐため）
     参考文献/               論文・書籍（PDF 本体はローカルのみ）
@@ -31,9 +31,11 @@ NEA（日本環境アメニティ株式会社）のシミュレーション PJ�
 | ⑤ バックトレース | `loop_noredundancy.py` | 876〜1134 行 |
 | ⑥ インパルス応答 | `impulse.py` | `make_ipls_freq_monaural_fortran.f90` |
 | ⑦ 残響時間・音響指標 | `reverberation.py` | `ipls2rt_fortran.f90` |
-| 材料・大気 | `absorption.py`（吸音率の種類の変換）/ `atmosphere.py`（音速・空気吸収） | — |
-| 通し実行 | `procedure.py` | — |
-| 出力 | `plots.py`（図）/ `table.py`（表の並べ方の共通ルール）/ `project.py`（保存・読込） | — |
+| ⑦ 音圧レベル・STI | `sound_level.py`（$L_p$ と STI。パルス列から直接出す） | — |
+| 材料・大気 | `absorption.py`（吸音率の種類の変換）/ `condition_table.py`（**条件表 xlsx**。レイヤー → 材料番号）/ `atmosphere.py`（音速・空気吸収） | — |
+| 通し実行 | `procedure.py`（1 点ぶん）/ `run_project.py`（プロジェクト単位・複数受音点・条件の一括） | — |
+| 再計算を速く | `path_cache.py`（**経路の幾何を保存して使い回す**。吸音だけ変えた再計算） | — |
+| 出力 | `plots.py`（図）/ `table.py`（表の並べ方の共通ルール）/ `project.py`（保存・読込）/ `summary.py`（全測定点のまとめ表）/ `workbook.py`（**結果一式の Excel**） | — |
 | 絞り込み | `ray_filter.py`（注目したい音線を残す。近く・方向・1 本） | — |
 | 画面 | `app.py`（入口）/ `setup_window.py`（条件入力）/ `progress_window.py`（進捗）/ `face_editor.py`（面の確認：法線・吸音材）/ `view_rays.py`（音線・音粒子）/ `view_directions.py`（音線の飛び方）/ `view_model_gui.py`・`view_model.py`（モデルビューア） | — |
 
@@ -278,12 +280,18 @@ python procedure.py ..\test.dxf --absorption ..\absorption.csv --absorption-kind
 .\.venv\Scripts\python tests\test_geosim.py
 ```
 
-**495 項目**（2026-08-21 時点）。解析的に答えが分かる問題（直方体の虚音源距離、
+**535 項目**（2026-08-23 時点）。解析的に答えが分かる問題（直方体の虚音源距離、
 減衰率が既知の応答など）で数式レベルの正しさを確かめる。
 **数式に関わるコードを変更したら必ず走らせること。**
 
-高速化した処理は**必ず scalar 版（参照実装）との一致を見る**方針にしてある
-（交差判定・受音判定・反射）。scalar 版は消さないこと。
+高速化した処理は**必ず参照実装との一致を見る**方針にしてある。参照実装は消さないこと。
+
+| 高速化したもの | 参照実装 | 何で一致を見るか |
+|---|---|---|
+| 交差判定（配列演算・同一平面パッチ） | `mesh_method.collision_distance` ほか | 距離・交点がビット単位で一致 |
+| バックトレース（経路の束） | `loop_noredundancy.backtrace_path` | 到来時刻・エネルギー |
+| インパルス応答の合成（時間領域 → FFT） | `impulse.transfer_function`（**査読論文 式(2)**） | 干渉の谷の位置・振幅・位相（11.3 kHz まで 0.00001 dB / 0.00002°） |
+| 経路の使い回し | 経路を保存せず計算し直した場合 | エネルギー（1e-15） |
 
 ## 動作確認用の DXF
 
