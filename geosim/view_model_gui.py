@@ -160,6 +160,7 @@ class ControlPanel:
     SLIDER = 28
     LABEL_FONT = 8      # レイヤ名など、横に長くなりがちな文字
     LINE = 18           # font_size 9 のときの 1 行 [px]（外から参照される既定値）
+    WHEEL = 60          # ホイール 1 段で送る量 [px]（3 行ぶん）
 
     def __init__(self, plotter, font=None, margin=14, width_ratio=PANEL_RATIO):
         self.plotter = plotter
@@ -170,9 +171,10 @@ class ControlPanel:
         self._widgets = []                 # 参照を残さないと GC で消える
         self.controls = []                 # 数値入力ダイアログに出すスライダ
         self.scroll = 0.0                  # ページ送りの量 [px]
-        self._help_lines = []              # 別ウィンドウに出す操作の一覧
+        self._help_lines = []              # 重ねて出す操作の一覧
         self._help_title = "操作の一覧"
         self._help_note = None
+        self._help_actor = None
         self._hint = None                  # 下端に固定する案内（送られない）
         self._scroll_label = "PageUp/PageDown"
         self._measure()
@@ -296,57 +298,73 @@ class ControlPanel:
     #   古い位置に残ったウィジェットが文字に重なっていた。いまは必ず置き直し、
     #   範囲外は隠す。
 
-    def enable_scroll(self, back="Prior", forward="Next", label="PageUp/PageDown"):
-        """入りきらないときにページ送りできるようにする。
+    def enable_scroll(self, back="Prior", forward="Next",
+                      label="ホイール / PageUp・PageDown"):
+        """入りきらないときにスクロールできるようにする。
 
-        キーは既定で PageUp / PageDown（VTK も他の画面も使っていない）。
-        送れる状態かどうかは**パネルの下端の案内**に出す。
+        ★**普通のマウスホイールで送る**（2026-08-21 ユーザー要望）。
+        パネルの上にカーソルがあるときだけパネルを送り、
+        3D の上なら今までどおり拡大縮小になる。キーボードも残す。
+
+        ホイールは 3D 側の「近づく・遠ざかる」にも割り当てられているが、
+        **パネル側のレンダラには 2D の文字とウィジェットしか置いていない**ので、
+        そちらのカメラが動いても見た目は変わらない（だから止めなくてよい）。
         """
         self._scroll_label = label
         self.plotter.add_key_event(back, lambda: self.scroll_by(-1))
         self.plotter.add_key_event(forward, lambda: self.scroll_by(+1))
+        self._watch_wheel()
         self._ensure_hint()
         self.relayout()
 
-    def help_window(self, lines, key="F1", title="操作の一覧", note=None):
-        """操作の一覧を**別ウィンドウ**で出せるようにする（2026-08-21 ユーザー要望）。
+    def _watch_wheel(self):
+        """マウスホイールを見張る（パネルの上なら送る）。"""
+        def wheel(step):
+            def handler(*_args):
+                if self.max_scroll() <= 0:
+                    return
+                try:
+                    x = self.plotter.iren.interactor.GetEventPosition()[0]
+                except Exception:
+                    return
+                if x <= self.width:        # パネルの上にカーソルがあるときだけ
+                    self.scroll_pixels(step * self.WHEEL)
+            return handler
 
-        左パネルは狭いうえ縦にも限りがあるので、送らずに全部読みたいときの逃げ道。
-        `enable_value_input` と同じく tkinter の窓を開いて閉じるまで待つ
-        （3D の操作は止まるが、読むだけなので取り合いにならない）。
+        try:
+            self.plotter.iren.add_observer("MouseWheelForwardEvent", wheel(-1))
+            self.plotter.iren.add_observer("MouseWheelBackwardEvent", wheel(+1))
+        except Exception:
+            pass        # ホイールが取れない環境でもキーで送れる
+
+    def help_window(self, lines, key="F1", title="操作の一覧", note=None):
+        """操作の一覧を **3D の上に重ねて**出す（`key` で表示/非表示）。
+
+        ★はじめは tkinter の別ウィンドウにしたが、**開いている間は元の画面を
+        閉じられない**（tkinter が入力を握る）とユーザー指摘を受けて作り直した。
+        いまは同じウィンドウの中に重ねるだけなので、取り合いが起きない。
 
         パネルには「F1 操作の一覧」の 1 行だけ置く。
         """
         self._help_lines = list(lines)
         self._help_title = title
         self._help_note = note
-        self.plotter.add_key_event(key, self.open_help)
-        self.text(f"{key} 操作の一覧（別ウィンドウ）", size=8, color="#ffd166")
+        self._model()
+        head = [f"― {title} ―"] + ([note] if note else []) + [""]
+        self._help_actor = self.plotter.add_text(
+            chr(10).join(head + list(lines)), position=(24, 24), font_size=10,
+            color="#ffe9a8", font_file=self.font)
+        self._help_actor.SetVisibility(False)
+        self.plotter.add_key_event(key, self.toggle_help)
+        self.text(f"{key} 操作の一覧（重ねて表示）", size=8, color="#ffd166")
         return self
 
-    def open_help(self):
-        import tkinter as tk
-        from tkinter import ttk
-
-        root = tk.Tk()
-        root.title(self._help_title)
-        root.attributes("-topmost", True)
-        frame = ttk.Frame(root, padding=12)
-        frame.pack(fill="both", expand=True)
-        if self._help_note:
-            ttk.Label(frame, text=self._help_note, foreground="#666",
-                      wraplength=460).pack(anchor="w", pady=(0, 8))
-        box = tk.Text(frame, width=52, height=min(28, len(self._help_lines) + 2),
-                      wrap="none", relief="flat", background="#f6f7f9")
-        scroll = ttk.Scrollbar(frame, command=box.yview)
-        box.configure(yscrollcommand=scroll.set)
-        box.pack(side="left", fill="both", expand=True)
-        scroll.pack(side="right", fill="y")
-        box.insert("1.0", chr(10).join(self._help_lines))
-        box.configure(state="disabled")
-        ttk.Button(root, text="閉じる", command=root.destroy).pack(pady=(0, 10))
-        root.bind("<Escape>", lambda _e: root.destroy())
-        root.mainloop()
+    def toggle_help(self):
+        """操作の一覧の表示を切り替える。"""
+        if self._help_actor is None:
+            return
+        self._help_actor.SetVisibility(not self._help_actor.GetVisibility())
+        self.plotter.render()
 
     def max_scroll(self):
         """送れる最大量 [px]（入りきっていれば 0）。"""
@@ -356,8 +374,17 @@ class ControlPanel:
     def scroll_by(self, pages):
         """`pages` 枚ぶん送る（1 枚 = 見えている高さの 8 割）。"""
         step = max(40.0, (self.height - 2 * self.margin) * 0.8)
-        self.scroll = min(max(0.0, self.scroll + pages * step), self.max_scroll())
+        return self.scroll_pixels(pages * step)
+
+    def scroll_pixels(self, pixels):
+        """`pixels` だけ送る（ホイール 1 段は `WHEEL` px）。"""
+        limit = self.max_scroll()
+        scroll = min(max(0.0, self.scroll + pixels), limit)
+        if scroll == self.scroll:
+            return self.scroll
+        self.scroll = scroll
         self.relayout(render=True)
+        return self.scroll
 
     def _ensure_hint(self):
         """パネルの下端に固定する案内の文字（**積まないので送られない**）。"""
@@ -516,6 +543,11 @@ class ControlPanel:
             representation.SetPlaceFactor(1.0)
             representation.PlaceWidget([self.margin, self.margin + self.CHECK,
                                         y, y + self.CHECK, 0.0, 0.0])
+            # ★置き場所を変えただけでは描き直されない（内部に計算結果を持っている）。
+            #   忘れると**送ったときに文字だけ動いて四角が取り残される**
+            #   （2026-08-21 ユーザー指摘。スライダ側には元から入れてあった）
+            representation.Modified()
+            representation.BuildRepresentation()
             text.SetInput(self.fit(label, self.width - left - self.margin))
             text.SetDisplayPosition(left, int(y) + 3)
 
@@ -1171,7 +1203,11 @@ def add_opacity_control(plotter, font=None, panel=None, target_key="o"):
     def toggle_model():
         state["visible"] = not state["visible"]
         for name in names:
-            layers[name]["face"].SetVisibility(state["visible"])
+            # そのレイヤの持ち物を全部（面・輪郭・矢印）まとめて消す
+            for key in ("face", "edge", "arrow"):
+                actor = layers[name].get(key)
+                if actor is not None:
+                    actor.SetVisibility(state["visible"])
         plotter.render()
 
     plotter.add_key_event(target_key, next_target)

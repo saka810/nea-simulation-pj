@@ -2773,6 +2773,13 @@ def test_panel_scroll():
 
         # ★範囲外の要素は隠す。スライダはウィンドウ全体の座標で描かれるので、
         #   隠さないと 3D の上に残る（2026-08-19 に取り下げた原因）
+        # ★ホイールでも送れる（キーだけでなく。2026-08-21 ユーザー要望）
+        panel.scroll_pixels(panel.WHEEL)
+        check("★ホイール 1 段ぶん送れる", panel.scroll == panel.WHEEL,
+              f"{panel.scroll:.0f} px")
+        panel.scroll_pixels(-panel.WHEEL * 99)
+        check("ホイールでも戻しすぎない", panel.scroll == 0.0)
+
         hidden_before = [b.GetEnabled() for b in boxes]
         panel.scroll_by(+99)
         hidden_after = [b.GetEnabled() for b in boxes]

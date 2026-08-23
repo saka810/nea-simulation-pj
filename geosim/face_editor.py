@@ -124,6 +124,8 @@ SHELL_ROLE_NAMES = {"outer": "外殻（容積を囲む）",
                     "inner_open": "内側の開いた板"}
 # 開いた辺の色。穴なのか T 字接合なのかを目で確かめるために重ねて描く
 OPEN_EDGE_COLOR = "#e5484d"
+# 同一平面パッチの輪郭の色（三角形の割れ目は描かず、これだけを描く）
+PATCH_EDGE_COLOR = "#3a4150"
 
 # 受音点の正面方向の矢印。**いま調整している点**とそれ以外を色で分ける
 HEAD_COLOR = "#ffd166"
@@ -132,7 +134,9 @@ HEAD_OTHER_COLOR = "#8a7a3f"
 # 「同じ向きの面」とみなす角度。床・天井・壁をまとめて選ぶのに使う。
 # 面グループのしきい値（1°）より緩くしてあるのは、**別々の平面でも向きが揃っていれば
 # まとめたい**ため（例：段差のある天井を一度に選ぶ）
-SAME_NORMAL_DEGREES = 5.0
+# 「同じ平面」の判定は `read_dxffile.coplanar_groups` に任せる（画面の見た目と同じ）。
+# 以前あった「同じ向き（法線の角度）」の判定は 2026-08-21 に廃止した
+SAME_NORMAL_DEGREES = 5.0     # 参照用に残す（いまは使っていない）
 
 # 「未設定（レイヤに戻す）」を表す番兵。材料名として使えない文字を含めてある
 UNASSIGNED = "\x00未設定"
@@ -164,10 +168,18 @@ def _hex_to_rgb(code):
     return np.array([int(code[i:i + 2], 16) for i in (0, 2, 4)], dtype=np.uint8)
 
 
-def _visibility(plotter, actor):
-    """チェックボックス用のコールバックを作る（クロージャの取り違え防止）。"""
+def _visibility(plotter, entry):
+    """チェックボックス用のコールバックを作る（クロージャの取り違え防止）。
+
+    ★**そのレイヤの持ち物を全部**（面・パッチの輪郭・法線の矢印）まとめて
+    消す（2026-08-21 ユーザー指摘。レイヤを消しても矢印が残っていた）。
+    """
     def callback(flag):
-        actor.SetVisibility(flag)
+        for key in ("face", "edge", "arrow"):
+            actor = entry.get(key) if isinstance(entry, dict) else None
+            if actor is not None:
+                actor.SetVisibility(flag)
+        entry["visible"] = bool(flag)
         plotter.render()
     return callback
 
@@ -275,7 +287,8 @@ class FaceEditor:
         self.plotter = None
         self.panel = None
         self.surfaces = []      # [(面インデックス, PolyData)] をレイヤごとに
-        self.arrows = None
+        self.arrows = []            # 法線の矢印（**レイヤごと**に 1 つ）
+        self.registry = None        # レイヤ名 → 表示している actor の一式
         self.outline = None
         self.show_normals = False
         self.label = None
@@ -344,17 +357,32 @@ class FaceEditor:
         self.selection = set(range(self.count)) - self.selection
         self.refresh()
 
-    def select_same_normal(self):
-        """選択中の面と**向きが揃う**面をまとめて選ぶ（床・天井・壁の一括）。"""
+    def select_same_plane(self):
+        """選択中の面と**同じ平面**の面をまとめて選ぶ。
+
+        ★2026-08-21 に「同じ向き」から「同じ平面」へ変えた（ユーザー要望）。
+        向きが同じだけの面（平行な別の壁）まで選ばれるのは分かりにくく、
+        画面でも同一平面パッチを 1 枚として描いているので、そちらに合わせた。
+        """
         if not self.selection:
             self._say("先に面を選んでください（r で枠選択）")
             return
-        unit = self.normals()
-        picked = unit[sorted(self.selection)]
-        cosine = np.cos(np.deg2rad(SAME_NORMAL_DEGREES))
-        # どれか 1 つでも向きが揃えば仲間とみなす
-        match = (unit @ picked.T >= cosine).any(axis=1)
-        self.selection = set(np.nonzero(match)[0].tolist())
+        wanted = {int(g) for g in self.group_of[sorted(self.selection)]}
+        self.selection = set(np.nonzero(np.isin(self.group_of,
+                                                list(wanted)))[0].tolist())
+        self.refresh()
+
+    def select_same_plane_and_layer(self):
+        """**同じ平面かつ同じレイヤ（吸音材）**の面を選ぶ（画面の 1 枚と同じ）。"""
+        if not self.selection:
+            self._say("先に面を選んでください（r で枠選択）")
+            return
+        chosen = sorted(self.selection)
+        wanted = {(int(g), int(l)) for g, l in zip(self.group_of[chosen],
+                                                   self.layer_of[chosen])}
+        keep = [j for j in range(self.count)
+                if (int(self.group_of[j]), int(self.layer_of[j])) in wanted]
+        self.selection = set(keep)
         self.refresh()
 
     def select_same_material(self):
@@ -446,17 +474,15 @@ class FaceEditor:
         surface.cell_data["rgb"] = self.face_colours()[faces]
         return surface
 
-    def _selection_outline(self):
-        """選択している面のかたまりの**外周**を線で返す（無ければ None）。
+    def _outline_of(self, faces):
+        """面のかたまりの**外周**を線で返す（無ければ None）。
 
         中の三角形の辺まで引くと網目になって形が読めないので、
-        **1 回しか現れない辺＝外周**だけを残す。面グループで選んだときに
-        「壁 1 枚がまるごと選ばれている」ことが一目で分かる。
+        **1 回しか現れない辺＝外周**だけを残す。
+        選択の枠にも、**同一平面パッチの輪郭**（三角形の割れ目を見せないため）にも使う。
         """
-        if not self.selection:
-            return None
         seen = {}
-        for j in self.selection:
+        for j in faces:
             v = np.asarray(self.triangles[j])
             for a, b in ((0, 1), (1, 2), (2, 0)):
                 ka = tuple(np.round(v[a], 9))
@@ -470,6 +496,36 @@ class FaceEditor:
         lines = np.hstack([[2, 2 * i, 2 * i + 1] for i in range(len(border))])
         return pv.PolyData(points, lines=lines.astype(np.int64))
 
+    def _selection_outline(self):
+        """選択している面のかたまりの外周（面グループで選んだ形が一目で分かる）。"""
+        if not self.selection:
+            return None
+        return self._outline_of(sorted(self.selection))
+
+    def _patch_outline(self, faces):
+        """**同一平面パッチごと**の輪郭を 1 つの線の集まりにする。
+
+        ★三角形の割れ目は見せない（2026-08-21 ユーザー指摘
+        「同一平面と認識されたものは 1 つの平面として表示して」）。
+        面そのものは三角形のまま描き（`show_edges=False`）、
+        **パッチの外周だけ**を線で重ねる。picking は三角形単位のままなので、
+        選択・材料の貼り付けの仕組みには手を入れずに見た目だけ変えられる。
+        """
+        pieces = []
+        for group in sorted({int(g) for g in self.group_of[faces]}):
+            same = np.intersect1d(faces, self.groups[group], assume_unique=False)
+            if not len(same):
+                continue
+            border = self._outline_of(same)
+            if border is not None:
+                pieces.append(border)
+        if not pieces:
+            return None
+        merged = pieces[0]
+        for piece in pieces[1:]:
+            merged = merged.merge(piece)
+        return merged
+
     def refresh(self, render=True):
         if not self.surfaces:
             return
@@ -477,9 +533,9 @@ class FaceEditor:
         for faces, surface in self.surfaces:
             surface.cell_data["rgb"] = colours[faces]
             surface.Modified()
-        if self.arrows is not None:
-            self.plotter.remove_actor(self.arrows, render=False)
-            self.arrows = None
+        for actor in (self.arrows or []):
+            self.plotter.remove_actor(actor, render=False)
+        self.arrows = []
         if self.show_normals:
             self._add_arrows()
         if self.outline is not None:
@@ -505,17 +561,37 @@ class FaceEditor:
             self.plotter.render()
 
     def _add_arrows(self):
+        """法線の矢印を**レイヤごとに**作る。
+
+        ★1 本の actor にまとめていたので、レイヤを消しても矢印だけ残っていた
+        （2026-08-21 ユーザー指摘）。レイヤごとに分けて、
+        表示 ON/OFF のチェックボックスで面と一緒に消す。
+        """
         centres = np.array([np.mean(t, axis=0) for t in self.triangles])
         length = float(np.linalg.norm(self.model.extents[1] - self.model.extents[0])) * 0.04
-        cloud = pv.PolyData(centres)
-        cloud["vector"] = self.normals() * length
-        cloud.point_data["rgb"] = self.face_colours()
-        glyph = cloud.glyph(orient="vector", scale=False, factor=1.0,
-                            geom=pv.Arrow(tip_length=0.3, shaft_radius=0.02,
-                                          tip_radius=0.07))
-        self.arrows = self.plotter.add_mesh(glyph, scalars="rgb", rgb=True,
-                                            show_scalar_bar=False, lighting=False,
-                                            pickable=False)
+        vectors = self.normals() * length
+        colours = self.face_colours()
+        self.arrows = []
+        for k, name in enumerate(self.layers):
+            faces = np.nonzero(self.layer_of == k)[0]
+            if not len(faces):
+                continue
+            cloud = pv.PolyData(centres[faces])
+            cloud["vector"] = vectors[faces]
+            cloud.point_data["rgb"] = colours[faces]
+            glyph = cloud.glyph(orient="vector", scale=False, factor=1.0,
+                                geom=pv.Arrow(tip_length=0.3, shaft_radius=0.02,
+                                              tip_radius=0.07))
+            actor = self.plotter.add_mesh(glyph, scalars="rgb", rgb=True,
+                                          show_scalar_bar=False, lighting=False,
+                                          pickable=False)
+            # レイヤが消えていれば矢印も消す（チェックボックスの状態に合わせる）
+            entry = (self.registry or {}).get(name, {})
+            if entry.get("visible") is False:
+                actor.SetVisibility(False)
+            if self.registry is not None and name in self.registry:
+                self.registry[name]["arrow"] = actor
+            self.arrows.append(actor)
 
     def _say(self, message):
         """パネル下部に一言出す（キーを押しても何も起きない理由を伝えるため）。"""
@@ -595,14 +671,23 @@ class FaceEditor:
             surface = self._build_surface(faces)
             actor = self.plotter.add_mesh(
                 surface, scalars="rgb", rgb=True,
-                show_scalar_bar=False, show_edges=True, edge_color="#3a4150",
-                line_width=1, opacity=opacity,
+                # ★三角形の辺は描かない。代わりに**同一平面パッチの外周**を
+                #   線で重ねるので、「1 枚の壁」として見える（2026-08-21）
+                show_scalar_bar=False, show_edges=False, opacity=opacity,
                 # **裏から見ている面はより透ける**（音線ビューアと同じ扱い）。
                 # 室の外から覗くと手前の壁は裏側なので、そこが薄くなって中が見える
                 backface_params={"opacity": opacity * vg.BACKFACE_OPACITY_RATIO})
+            edges = self._patch_outline(faces)
+            edge_actor = None
+            if edges is not None:
+                edge_actor = self.plotter.add_mesh(edges, color=PATCH_EDGE_COLOR,
+                                                   line_width=2, lighting=False,
+                                                   pickable=False)
             self.surfaces.append((faces, surface))
-            registry[name] = {"face": actor, "arrow": None,
+            # ★レイヤを消したら**輪郭と法線矢印も一緒に消す**（ユーザー指摘 2026-08-21）
+            registry[name] = {"face": actor, "edge": edge_actor, "arrow": None,
                               "colour": "#8b929e", "opacity": opacity}
+        self.registry = registry
         vg._attach(self.plotter, "geosim_layers", registry)
         vg._attach(self.plotter, "geosim_panel", panel)
 
@@ -635,7 +720,7 @@ class FaceEditor:
                 label = f"{k + 1}: {name} ({len(faces)})" if k < 9 \
                     else f"{name} ({len(faces)})"
                 panel.checkbox(label, True,
-                               _visibility(self.plotter, registry[name]["face"]),
+                               _visibility(self.plotter, registry[name]),
                                colour="#4cc9f0")
 
             vg.add_opacity_control(self.plotter, font=font, panel=panel,
@@ -660,8 +745,8 @@ class FaceEditor:
             keys = [
                 "r  枠で選ぶ（もう一度押すと解除）",
                 "0  選択を解除    j  全部を選ぶ    h  選択を反転",
-                "k  同じ向きの面を選ぶ    l  同じ吸音材の面を選ぶ",
-                "数字  そのレイヤを選ぶ（1〜9）",
+                "k  同じ平面の面を選ぶ    t  同じ平面かつ同じレイヤ",
+                "l  同じ吸音材の面を選ぶ    数字  そのレイヤを選ぶ（1〜9）",
                 "y  面グループ ⇔ 三角形    m  法線 ⇔ 吸音材",
                 "i  選んだ面の法線を反転（選択が空なら全部）",
                 "a  自動判定にする    d  CAD の巻き順に戻す",
@@ -678,7 +763,7 @@ class FaceEditor:
 
             panel.heading("操作")
             panel.text("r 枠選択  0 解除  j 全選択\n"
-                       "h 反転  k 同じ向き  l 同じ吸音材\n"
+                       "h 反転  k 同じ平面  t 平面＋レイヤ  l 同じ吸音材\n"
                        "i 法線を反転  m 法線⇔吸音材\n"
                        "s 保存して閉じる  q 保存せず閉じる",
                        size=8, color="#7f8794")
@@ -712,7 +797,8 @@ class FaceEditor:
         self.plotter.add_key_event("0", self.clear_selection)
         self.plotter.add_key_event("j", self.select_all)
         self.plotter.add_key_event("h", self.invert_selection)
-        self.plotter.add_key_event("k", self.select_same_normal)
+        self.plotter.add_key_event("k", self.select_same_plane)
+        self.plotter.add_key_event("t", self.select_same_plane_and_layer)
         self.plotter.add_key_event("l", self.select_same_material)
         self.plotter.add_key_event("s", self._save_and_close)
         # `r` は枠選択（VTK のラバーバンド）に取られているので、撮影は `g`（grab）
@@ -876,18 +962,19 @@ def _triangle_area(triangle):
 
 
 def material_names(project):
-    """プロジェクトの吸音率 CSV から材料名の一覧を返す（無ければ空）。"""
-    if not project.absorption_path:
-        return []
-    import absorption as ab
+    """材料名の一覧を返す（無ければ空）。
+
+    ★**条件表の「吸音率」シート**から取る（`run_project._library_for`）。
+    以前は吸音率 CSV しか見ていなかったので、条件表 1 本にした環境で
+    材料一覧が空になっていた（2026-08-21 ユーザー指摘）。
+    """
+    import run_project
     try:
-        library = ab.MaterialLibrary.from_file(project.absorption_path,
-                                              kind=project.absorption_kind)
-    except Exception as error:      # CSV が壊れていても画面は開けるようにする
-        print(f"[face_editor] 吸音率 CSV を読めませんでした（{error}）。"
-              f"材料一覧は空になります")
+        library = run_project._library_for(project)
+    except Exception as error:      # 表が壊れていても画面は開けるようにする
+        print(f"[face_editor] 材料の一覧を読めませんでした（{error}）")
         return []
-    return library.names()
+    return library.names() if library else []
 
 
 def edit(project, model=None, off_screen=False, screenshot=None):

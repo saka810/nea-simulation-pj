@@ -24,33 +24,41 @@ from tkinter import filedialog, messagebox, ttk
 import project as pj
 
 BAND_CHOICES = [("8 バンド（63〜8k Hz）", 8), ("6 バンド（125〜4k Hz）", 6)]
-KIND_CHOICES = [("残響室法（乱入射）", "random"),
-                ("垂直入射", "normal"),
-                ("CSV の # kind: 宣言に従う", "")]
 NORMAL_CHOICES = [("自動（閉じていれば内向き、開いていれば CAD のまま）", "auto"),
                   ("CAD の巻き順をそのまま使う", "cad"),
                   ("面ごとに室内側へ揃える", "inward"),
                   ("シェル単位で空気側へ揃える", "shells"),
                   ("全反転", "flip")]
 
-# (属性名, ラベル, 型, 補足)
-NUMBER_FIELDS = [
+# ★**区分ごとに分けてある**（2026-08-21 ユーザー要望）
+GEOMETRY_FIELDS = [
     ("rays", "音線数", int, "多いほど後期の経路を拾える。20 万本が目安"),
     ("nref", "最大反射回数", int, "35 dB 減衰するまで必要。足りないと残響が短く出る"),
     ("radius", "受音球の半径 [m]", float,
-     "★経路を見つけるための網。小さすぎると残響が短く出る（半径を変えて値が動かないか確認）"),
+     "★経路を見つけるための網。小さすぎると残響が短く出る"),
     ("max_time", "インパルス応答の長さ [s]", float, "残響時間より十分長くとる"),
-    ("temperature", "温度 [℃]", float, "音速と空気吸収が変わる"),
-    ("humidity", "相対湿度 [%]", float, "高域の空気吸収に効く"),
-    ("pressure", "気圧 [kPa]", float, "既定 101.325"),
-    ("volume", "室容積 [m³]", float,
-     "統計残響式に使う。空欄なら閉じた形状から自動算出（開いた形状では要指定）"),
+]
+ROOM_FIELDS = [
+    ("volume", "室容積 [m³]", float, "空欄なら閉じた形状から自動算出"),
+]
+SOURCE_FIELDS = [
     # 音圧レベルの絶対値・STI の SNR に要る（2026-08-21 ユーザー要望）
     ("source_power_db", "音源 PWL [dB]", float,
-     "点音源のパワーレベル。空欄なら音圧レベルは相対値（Lw=0 dB）で出る"),
+     "空欄なら音圧レベルは相対値（Lw=0 dB）"),
     ("noise_level_db", "背景騒音 [dB]", float,
-     "STI の SNR に使う。空欄なら騒音なし（理想）で計算。PWL と両方要る"),
+     "STI の SNR に使う。PWL と両方要る"),
 ]
+# 大気は説明なしで 1 行に収める（ユーザー判断）
+ATMOSPHERE_FIELDS = [
+    ("temperature", "温度 [℃]", float, ""),
+    ("humidity", "相対湿度 [%]", float, ""),
+    ("pressure", "気圧 [kPa]", float, ""),
+]
+NUMBER_FIELDS = GEOMETRY_FIELDS + ROOM_FIELDS + SOURCE_FIELDS + ATMOSPHERE_FIELDS
+
+# インパルス応答の長さを理論残響時間の何倍にするか（1 秒単位に切り上げる）。
+# T30 は 35 dB 減るまで見るので 0.58 倍あれば測れるが、余裕を見て 1.5 倍
+MAX_TIME_MARGIN = 1.5
 
 
 def estimate_volume(dxf_path, unit=None):
@@ -112,15 +120,36 @@ class SetupWindow:
     def run(self):
         self.root = tk.Tk()
         self.root.title("幾何音響シミュレーション — 計算条件")
-        self.root.geometry("880x760")
+        self.root.geometry("900x720")
 
-        outer = ttk.Frame(self.root, padding=14)
-        outer.pack(fill="both", expand=True)
+        # ★**縦にスクロールできるようにする**（2026-08-21 ユーザー指摘。
+        #   画面を広げないと下のボタンが見切れていた）。
+        #   ボタンは下に固定し、条件の並びだけを送る
+        buttons = ttk.Frame(self.root, padding=(14, 0, 14, 12))
+        buttons.pack(side="bottom", fill="x")
+        canvas = tk.Canvas(self.root, highlightthickness=0, borderwidth=0)
+        bar = ttk.Scrollbar(self.root, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=bar.set)
+        bar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+
+        outer = ttk.Frame(canvas, padding=14)
+        window = canvas.create_window((0, 0), window=outer, anchor="nw")
+
+        def fit(_event=None):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            canvas.itemconfigure(window, width=canvas.winfo_width())
+
+        outer.bind("<Configure>", fit)
+        canvas.bind("<Configure>", fit)
+        # マウスホイールで送る（Windows は <MouseWheel>）
+        canvas.bind_all("<MouseWheel>",
+                        lambda e: canvas.yview_scroll(-e.delta // 120, "units"))
 
         self._build_files(outer)
         self._build_numbers(outer)
         self._build_options(outer)
-        self._build_buttons(outer)
+        self._build_buttons(buttons)
         self._load_into_widgets()
 
         self.root.mainloop()
@@ -144,11 +173,6 @@ class SetupWindow:
             ("name", "対象室名（任意）", "text",
              "結果ファイル名の頭に付きます。**空欄なら DXF のファイル名**を使います"),
             ("dxf", "モデル（DXF）", "file", "室形状。音源・受音点も src / rec レイヤから読みます"),
-            # ★用意した吸音率表を選ぶ（xlsx なら「吸音率」シートを読む。
-            #   2026-08-21 ユーザー要望）
-            ("absorption_csv", "吸音率表（xlsx / CSV）", "file",
-             "材料の一覧。xlsx なら「吸音率」シート（番号・材料名・α）を読みます。"
-             "★条件表に「吸音率」シートがあればそちらが優先"),
             # ★条件はファイルで選ぶ。用意していなければ「条件表を作成」で作る。
             #   xlsx なら**シート 1 枚が条件 1 つ**で、シート名が条件名になる
             ("condition_csv", "条件表（xlsx）", "file",
@@ -185,27 +209,62 @@ class SetupWindow:
             ttk.Label(frame, text=hint, foreground="#666").grid(
                 row=row * 2 + 1, column=1, columnspan=2, sticky="w", padx=8)
 
+    def _number_row(self, frame, row, key, label, hint, width=14):
+        """数値の入力欄 1 行（見出し・欄・補足）。戻り値は補足を置く枠。"""
+        ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w", pady=2)
+        var = tk.StringVar()
+        self.vars[key] = var
+        ttk.Entry(frame, textvariable=var, width=width).grid(row=row, column=1,
+                                                            sticky="w", padx=8)
+        cell = ttk.Frame(frame)
+        cell.grid(row=row, column=2, sticky="w")
+        if hint:
+            ttk.Label(cell, text=hint, foreground="#666").pack(side="right")
+        return cell
+
     def _build_numbers(self, parent):
-        frame = self._section(parent, "計算条件")
-        for row, (key, label, _type, hint) in enumerate(NUMBER_FIELDS):
-            ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w", pady=2)
-            var = tk.StringVar()
-            self.vars[key] = var
-            ttk.Entry(frame, textvariable=var, width=14).grid(row=row, column=1,
-                                                              sticky="w", padx=8)
-            cell = ttk.Frame(frame)
-            cell.grid(row=row, column=2, sticky="w")
-            if key == "volume":
-                # 空欄のままだと統計残響式が黙って飛ばされるので、目安を入れられるようにする
-                ttk.Button(cell, text="モデルから見積もる", width=18,
-                           command=self._estimate_volume).pack(side="left",
-                                                               padx=(0, 8))
+        """計算条件。**区分ごとに枠を分ける**（2026-08-21 ユーザー要望）。
+
+        幾何音響の設定（音線数・反射回数・受音球・応答の長さ）と、
+        室の情報（容積）、音源の情報（PWL・騒音）、大気（1 行で済ませる）を分ける。
+        """
+        frame = self._section(parent, "計算条件（幾何音響）")
+        for row, (key, label, _type, hint) in enumerate(GEOMETRY_FIELDS):
+            cell = self._number_row(frame, row, key, label, hint)
             if key == "rays":
-                # 音線がどう飛ぶかは**室形状と関係ない**ので、ここで先に見られるようにする
+                # 音線がどう飛ぶかは**室形状と関係ない**ので、ここで先に見られる
                 ttk.Button(cell, text="音線の飛び方を見る", width=18,
                            command=self._show_directions).pack(side="left",
                                                                padx=(0, 8))
-            ttk.Label(cell, text=hint, foreground="#666").pack(side="left")
+            if key == "max_time":
+                # ★容積・表面積・平均吸音率から理論上の残響時間を出して決める
+                ttk.Button(cell, text="残響から推定", width=14,
+                           command=self._estimate_max_time).pack(side="left",
+                                                                 padx=(0, 8))
+
+        frame = self._section(parent, "室（統計残響式に使う）")
+        cell = self._number_row(frame, 0, "volume", "室容積 [m³]",
+                                "空欄なら閉じた形状から自動算出")
+        ttk.Button(cell, text="モデルから見積", width=16,
+                   command=self._estimate_volume).pack(side="left", padx=(0, 8))
+        self.room_note = ttk.Label(frame, text="", foreground="#3a6ea5",
+                                   justify="left")
+        self.room_note.grid(row=1, column=0, columnspan=3, sticky="w", pady=(4, 0))
+
+        frame = self._section(parent, "音源（音圧レベル・STI に使う）")
+        for row, (key, label, _type, hint) in enumerate(SOURCE_FIELDS):
+            self._number_row(frame, row, key, label, hint)
+
+        # ★大気は 1 行で済ませる（説明は要らないというユーザー判断 2026-08-21）
+        frame = self._section(parent, "大気（音速と空気吸収が決まる）")
+        line = ttk.Frame(frame)
+        line.grid(row=0, column=0, sticky="w")
+        for key, label, _type, _hint in ATMOSPHERE_FIELDS:
+            ttk.Label(line, text=label).pack(side="left")
+            var = tk.StringVar()
+            self.vars[key] = var
+            ttk.Entry(line, textvariable=var, width=8).pack(side="left",
+                                                            padx=(4, 14))
 
     def _build_options(self, parent):
         frame = self._section(parent, "設定")
@@ -219,19 +278,13 @@ class SetupWindow:
             box.grid(row=row, column=1, sticky="w", padx=8)
             return box
 
-        combo(0, "absorption_kind", "吸音率の種類", KIND_CHOICES)
-        ttk.Label(frame, text="★取り違えると吸音を大きく誤ります", foreground="#a33"
-                  ).grid(row=0, column=2, sticky="w")
-        combo(1, "band_number", "周波数バンド", BAND_CHOICES)
-        combo(2, "orient_normals", "法線の向き", NORMAL_CHOICES)
-
-        self.vars["two_sided"] = tk.BooleanVar()
-        ttk.Checkbutton(frame, text="面の裏からの入射も当てる（法線がまちまちなモデルの代替手段）",
-                        variable=self.vars["two_sided"]).grid(row=3, column=1,
-                                                              sticky="w", padx=8, pady=3)
+        # ★吸音率の種類は**条件表の「吸音率」シート**に材料ごとに書くので、
+        #   ここには置かない（2026-08-21 ユーザー指摘）
+        combo(0, "band_number", "周波数バンド", BAND_CHOICES)
+        combo(1, "orient_normals", "法線の向き", NORMAL_CHOICES)
         self.vars["statistical"] = tk.BooleanVar()
         ttk.Checkbutton(frame, text="統計残響式（Sabine / Eyring / Eyring-Knudsen）も計算する",
-                        variable=self.vars["statistical"]).grid(row=4, column=1,
+                        variable=self.vars["statistical"]).grid(row=2, column=1,
                                                                 sticky="w", padx=8)
 
     def _build_buttons(self, parent):
@@ -263,17 +316,14 @@ class SetupWindow:
         self.vars["folder"].set(p.folder)
         self.vars["name"].set(p.name or "")
         self.vars["dxf"].set(p.dxf_path or "")
-        self.vars["absorption_csv"].set(p.absorption_path or "")
         self.vars["condition_csv"].set(p.condition_csv and
                                        (p.resolve(p.condition_csv) or "") or "")
         self._refresh_sheets(p.condition_sheet or "")
         for key, _label, _type, _hint in NUMBER_FIELDS:
             value = getattr(p, key)
             self.vars[key].set("" if value is None else str(value))
-        self._set_combo("absorption_kind", KIND_CHOICES, p.absorption_kind or "")
         self._set_combo("band_number", BAND_CHOICES, p.band_number)
         self._set_combo("orient_normals", NORMAL_CHOICES, p.orient_normals)
-        self.vars["two_sided"].set(bool(p.two_sided))
         self.vars["statistical"].set(bool(p.statistical))
         self._show_status()
 
@@ -299,16 +349,12 @@ class SetupWindow:
         dxf = self.vars["dxf"].get().strip()
         if not dxf or not os.path.exists(dxf):
             return "DXF ファイルが見つかりません"
-        absorption = self.vars["absorption_csv"].get().strip()
-        if absorption and not os.path.exists(absorption):
-            return "吸音率 CSV が見つかりません"
 
         if os.path.abspath(folder) != self.project.folder:
             # フォルダを変えたら、そのフォルダの既存条件を土台にする
             self.project = pj.Project.load(folder)
 
         self.project.dxf = dxf
-        self.project.absorption_csv = absorption
         # 対象室名。**空欄のままにする**（空なら DXF のファイル名が使われる）
         self.project.name = self.vars["name"].get().strip()
         # 条件表と条件シート。**シート名が条件名**になり、結果ファイル名にも入る
@@ -328,12 +374,9 @@ class SetupWindow:
             except ValueError:
                 return f"{_label} の値が数値になっていません: {text!r}"
 
-        self.project.absorption_kind = self._combo_value("absorption_kind",
-                                                         KIND_CHOICES) or None
         self.project.band_number = self._combo_value("band_number", BAND_CHOICES)
         self.project.orient_normals = self._combo_value("orient_normals",
                                                         NORMAL_CHOICES)
-        self.project.two_sided = bool(self.vars["two_sided"].get())
         self.project.statistical = bool(self.vars["statistical"].get())
         return None
 
@@ -368,9 +411,6 @@ class SetupWindow:
         elif key == "condition_csv":
             # 条件表は xlsx が本命。昔の CSV も選べるようにしておく
             patterns = [("条件表", "*.xlsx *.xlsm *.csv"), ("すべて", "*.*")]
-        elif key == "absorption_csv":
-            # 吸音率表も xlsx（「吸音率」シート）を選べる
-            patterns = [("吸音率表", "*.xlsx *.xlsm *.csv"), ("すべて", "*.*")]
         else:
             patterns = [("CSV", "*.csv"), ("すべて", "*.*")]
         path = filedialog.askopenfilename(title="ファイルを選ぶ", filetypes=patterns,
@@ -405,31 +445,128 @@ class SetupWindow:
         except Exception as e:
             messagebox.showerror("表示できませんでした", f"{type(e).__name__}: {e}")
 
+    def _room_summary(self):
+        """いまの条件で**容積・総表面積・平均吸音率・理論残響時間**を出す。
+
+        ★「モデルから見積」と「残響から推定」で共通に使う（2026-08-21 ユーザー要望）。
+        平均吸音率は**上で選んだ条件（シート）に則った**値にする
+        （条件表の材料番号 → 吸音率シート → 安全率まで通した結果）。
+
+        戻り値 dict … 'volume' / 'area' / 'note' / 'alpha'（(nf,) or None）/
+                      'frequencies' / 'reverberation'（統計残響式の結果 or None）
+        """
+        problem = self._collect()
+        if problem:
+            raise ValueError(problem)
+        self.project.save()
+
+        import reverberation as rv
+        import run_project
+
+        model = run_project._model_for(self.project)
+        area = float(model.surface_area)
+        volume = self.project.volume or (abs(model.volume) if model.volume else None)
+        note = ("指定した室容積" if self.project.volume
+                else (f"囲まれた形状から（{model.volume_source}）"
+                      if model.volume else "容積が決まりません"))
+        if volume is None:
+            # 閉じていないモデルは床面積 × 高さで見積もる（従来と同じ手）
+            volume, area_guess, note = estimate_volume(self.project.dxf_path,
+                                                       unit=self.project.unit)
+            area = area or area_guess
+        statistical = None
+        if volume:
+            statistical = rv.statistical_reverberation(
+                model.mesh, abs(volume), atmosphere=self._atmosphere(),
+                verbose=False)
+        return {"volume": volume, "area": area, "note": note,
+                "model": model, "statistical": statistical}
+
+    def _atmosphere(self):
+        from atmosphere import Atmosphere
+        return Atmosphere(temperature=self.project.temperature,
+                          humidity=self.project.humidity,
+                          pressure=self.project.pressure)
+
     def _estimate_volume(self):
-        dxf = self.vars["dxf"].get().strip()
-        if not dxf or not os.path.exists(dxf):
-            messagebox.showerror("モデルを先に選んでください",
-                                 "DXF ファイルが指定されていません")
-            return
+        """モデルから容積を見積もり、**表面積と平均吸音率も併せて出す**。
+
+        ユーザー要望（2026-08-21）：入力するのは容積だけで、
+        表面積と平均吸音率は**確認のための表示**（入力欄は作らない）。
+        """
         try:
-            volume, area, note = estimate_volume(dxf, unit=self.project.unit)
+            found = self._room_summary()
+        except ValueError as error:
+            messagebox.showwarning("条件を確認してください", str(error))
+            return
         except Exception as e:
             messagebox.showerror("見積もれませんでした", f"{type(e).__name__}: {e}")
             return
-        # 総表面積は**参考表示**（入力欄は無い。計算はモデルから直接引く）。
-        # 統計残響式に効くのは容積だけでなく面積もなので、
-        # 「拾えている面が想定どおりか」をここで確かめられるようにした
-        reference = f"\n\n［参考］総表面積 {area:.2f} m²"
-        if volume is None:
-            messagebox.showwarning("見積もれませんでした", note + reference)
+
+        volume, area = found["volume"], found["area"]
+        if volume:
+            self.vars["volume"].set(f"{volume:.2f}")
+        lines = [f"総表面積 {area:.1f} m²",
+                 (f"室容積 {volume:.2f} m³（{found['note']}）" if volume
+                  else f"室容積は決まりません（{found['note']}）")]
+        statistical = found["statistical"]
+        if statistical is not None:
+            alpha = statistical["mean_absorption"]
+            frequencies = statistical["frequencies"]
+            lines.append("平均吸音率 ᾱ（条件『"
+                         + (self.project.condition_label or "既定") + "』）")
+            lines.append("  " + " / ".join(f"{f:.0f}Hz {a:.2f}"
+                                           for f, a in zip(frequencies, alpha)))
+            lines.append(f"  平均自由行程 4V/S = "
+                         f"{4.0 * volume / area:.2f} m" if area else "")
+        else:
+            lines.append("平均吸音率は出せません（容積か材料が決まっていません）")
+        self.room_note.configure(text=chr(10).join(l for l in lines if l))
+        self._show_status()
+
+    def _estimate_max_time(self):
+        """理論上の残響時間から**インパルス応答の長さ**を決める（1 秒刻み）。
+
+        ★容積・表面積・平均吸音率がそろえば残響時間は式で出る、というユーザー指摘。
+        いちばん長いバンドの理論値（Eyring-Knudsen）の **1.5 倍**を取って
+        1 秒単位に切り上げる。T30 は 35 dB 減るまで見るので `0.58 × T60` あれば
+        足りるが、初期の遅れと余裕を見て 1.5 倍にしてある。
+        入力欄はそのまま残すので、任意の値も打ち込める。
+        """
+        try:
+            found = self._room_summary()
+        except ValueError as error:
+            messagebox.showwarning("条件を確認してください", str(error))
             return
-        self.vars["volume"].set(f"{volume:.2f}")
-        free_path = 4.0 * volume / area if area > 0 else 0.0
-        messagebox.showinfo("室容積",
-                            f"{volume:.2f} m³ を入れました\n（{note}）\n\n"
-                            f"統計残響式（Sabine / Eyring-Knudsen）はこの値を使います。"
-                            + reference
-                            + f"\n　平均自由行程 4V/S = {free_path:.3f} m")
+        except Exception as e:
+            messagebox.showerror("推定できませんでした", f"{type(e).__name__}: {e}")
+            return
+
+        statistical = found["statistical"]
+        if statistical is None:
+            messagebox.showwarning(
+                "推定できませんでした",
+                "室容積か材料が決まっていないので理論残響時間が出せません。"
+                "「モデルから見積」で容積を入れてから試してください。")
+            return
+        import numpy as np
+
+        times = np.asarray(statistical["eyring_knudsen"], dtype=float)
+        if not np.any(np.isfinite(times)):
+            times = np.asarray(statistical["sabine"], dtype=float)
+        longest = float(np.nanmax(times))
+        want = max(1.0, float(np.ceil(longest * MAX_TIME_MARGIN)))
+        self.vars["max_time"].set(f"{want:.0f}")
+        band = statistical["frequencies"][int(np.nanargmax(times))]
+        messagebox.showinfo(
+            "インパルス応答の長さ",
+            f"{want:.0f} 秒を入れました。{chr(10)}{chr(10)}"
+            f"理論上いちばん長いのは {band:.0f} Hz の {longest:.2f} 秒"
+            f"（Eyring-Knudsen）。{chr(10)}"
+            f"その {MAX_TIME_MARGIN:g} 倍を 1 秒単位に切り上げています"
+            f"（T30 は 35 dB 減るまで見るので、"
+            f"理論値の 0.58 倍あれば測れます）。{chr(10)}"
+            f"任意の値を打ち込んでも構いません。")
 
     def _on_save(self):
         error = self._collect()
