@@ -55,7 +55,7 @@
   書き残しておくと他端末で追いやすい。
 - `PROGRAM_STRUCTURE.md` … 各モジュールの役割・Fortran との変数対応・実装状況・既知のバグ一覧。
   **コードに手を入れたらこの文書も合わせて更新する。**
-- `tests\test_geosim.py` … 数値検証（483 項目）。pytest 不要、素の Python で走る。
+- `tests\test_geosim.py` … 数値検証（487 項目）。pytest 不要、素の Python で走る。
   **数式に関わるコードを変更したら必ず走らせる**：`.venv\Scripts\python tests\test_geosim.py`
 - `TODO.md` … 作業一覧（A〜G にグルーピング）。着手・完了したらチェックボックスを更新する。
 - `docs\技術説明書.md` … プログラムのフローと数式の意味の解説資料。
@@ -252,6 +252,13 @@
   割り当てた面は `Mesh.material` が材料名になるので
   『吸音率と理論値.csv』が材料別になる。
   DXF の実際のレイヤ名は `DxfModel.face_layers` に別に持っている
+- **左パネルは「設定の面」として 3D と背景を変える**（2026-08-21 ユーザー要望）。
+  パネルは平らな濃紺（`PANEL_BG`）、3D 側は上が明るいグラデーション。
+  境目に細い線（`PANEL_EDGE`）を入れ、見出しの色も変える（`screen_title`）。
+  - ★★`plotter.set_background()` は**既定で全レンダラに掛かる**
+    （`all_renderers=True`）。**片方だけ変えるには `all_renderers=False`**。
+    忘れると後の呼び出しで上書きされ、色を変えたつもりで何も変わらない
+    （実際にそれで気づかず 1 回作業した）
 - **左パネルに入りきらない分は「ページ送り」で見る**（`view_model_gui.ControlPanel`。
   2026-08-21 ユーザー指摘）。実案件では 1920×1080 でも 230 px あふれた。
   - PageUp / PageDown で送る（`enable_scroll()`）。下端の案内に位置を出す

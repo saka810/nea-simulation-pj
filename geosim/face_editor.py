@@ -611,7 +611,8 @@ class FaceEditor:
                                  ytitle="Y [m]", ztitle="Z [m]")
 
         if panel is not None:
-            panel.text(self.title, size=11, color=TEXT_COLOR)
+            # ★左は「設定の面」。背景色を変えてあり、見出しも色を変える
+            panel.screen_title(self.title, note="設定・操作（左）／モデル（右）")
             self.label = panel.reserve_text(LABEL_LINES)
 
             # ★並び順は「短くて必ず要るもの」が上。

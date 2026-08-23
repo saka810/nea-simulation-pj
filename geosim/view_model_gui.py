@@ -63,6 +63,17 @@ BG_BOTTOM = "#1c2027"
 BG_TOP = "#2e3540"
 TEXT_COLOR = "#d6dae2"
 
+# ★左の操作パネルは**別画面として扱う**ので、3D 側と背景を変える
+# （2026-08-21 ユーザー要望）。3D 側は上が明るいグラデーション、
+# パネル側は**平らで暗い**色にして「ここは設定の面」と分かるようにした。
+# 明度差を付けたのは、境目がどの視点でもはっきり見えるようにするため
+# （同系色の濃淡だと、グラデーションの暗い側と見分けが付かなくなる）。
+PANEL_BG = "#0d1220"
+# パネルと 3D の境目の線。細く明るい線を 1 本入れると「面が違う」ことが伝わる
+PANEL_EDGE = "#44506a"
+# パネルの見出し（画面の種類）の色
+PANEL_TITLE_COLOR = "#8fb7ff"
+
 # VTK の既定フォントは日本語を持っていないので、レイヤ名（＝吸音材名）が
 # 豆腐になる。Windows 標準の日本語フォントを順に探して使う。
 _FONT_CANDIDATES = [
@@ -471,6 +482,17 @@ class ControlPanel:
                   lambda visible, a=actor: a.SetVisibility(bool(visible)))
         return actor
 
+    def screen_title(self, message, note="設定・操作"):
+        """パネルのいちばん上に置く見出し。
+
+        ★**ここが「設定の面」だと分かるように**、3D 側と違う色にする
+        （2026-08-21 ユーザー要望。背景の色分けと合わせて別画面に見せる）。
+        """
+        self.text(message, size=11, color=PANEL_TITLE_COLOR)
+        if note:
+            self.text(note, size=8, color="#6b7385")
+        return self
+
     def heading(self, message):
         self.gap(8)
         return self.text(message, size=10, color=TEXT_COLOR)
@@ -834,10 +856,20 @@ def make_plotter(title, window_size, off_screen, panel=True, screen=None):
                              col_weights=[PANEL_RATIO, 1.0 - PANEL_RATIO],
                              window_size=window_size, title=bar,
                              off_screen=off_screen, border=False)
+        # ★★`set_background` は既定で**全レンダラに掛かる**（`all_renderers=True`）。
+        #   片方ずつ変えるには `all_renderers=False` が要る。
+        #   これを忘れて後の呼び出しでパネル側が上書きされ、
+        #   色を変えたつもりで**何も変わっていなかった**（2026-08-21 に気づいた）
         plotter.subplot(0, 0)
-        plotter.set_background(BG_BOTTOM)
+        # 設定の面。3D 側と**別画面に見えるように**平らで暗い色にする
+        plotter.set_background(PANEL_BG, all_renderers=False)
+        try:
+            # 境目に細い線を入れる（枠なので 4 辺に付くが、暗い色なので目立たない）
+            plotter.renderers[0].add_border(color=PANEL_EDGE, width=2)
+        except Exception:
+            pass        # 描けなくても中身は使えるので黙って諦める
         plotter.subplot(0, 1)
-        plotter.set_background(BG_BOTTOM, top=BG_TOP)
+        plotter.set_background(BG_BOTTOM, top=BG_TOP, all_renderers=False)
 
     # タイトルの確定は `show()` の直前（`prepare_window`）。ここではまだ
     # OS のウィンドウが無いので検証できない
@@ -996,7 +1028,7 @@ def build_plotter(model, title="モデルビューア", off_screen=False,
 
     # ---- 左パネルにレイヤの表示切り替えを並べる ----
     if panel is not None:
-        panel.text(f"{title}", size=11, color=TEXT_COLOR)
+        panel.screen_title(f"{title}")
         panel.text(f"三角形 {len(mesh)} 枚 / レイヤ {len(layers)}", size=9)
         panel.heading("レイヤ表示")
         for i, name in enumerate(layers):

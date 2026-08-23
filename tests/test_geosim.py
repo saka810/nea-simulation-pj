@@ -2793,6 +2793,18 @@ def test_panel_scroll():
         panel._update_hint()
         check("入りきるときは案内を出さない", panel._hint.GetInput().strip() == "",
               repr(panel._hint.GetInput()))
+        # ★左は「設定の面」なので 3D 側と背景を変えている（2026-08-21 ユーザー要望）
+        panel_bg = plotter.renderers[0].GetBackground()
+        model_bg = plotter.renderers[1].GetBackground()
+        check("★パネルと 3D で背景が違う（別画面として見せる）",
+              panel_bg != model_bg, f"{panel_bg} / {model_bg}")
+        check("パネルのほうが暗い（設定の面らしく）",
+              sum(panel_bg) < sum(model_bg),
+              f"{sum(panel_bg):.3f} < {sum(model_bg):.3f}")
+        check("パネル側はグラデーションにしない（平らな面にする）",
+              not plotter.renderers[0].GetGradientBackground())
+        check("3D 側はグラデーションのまま",
+              plotter.renderers[1].GetGradientBackground())
     finally:
         plotter.close()
 
