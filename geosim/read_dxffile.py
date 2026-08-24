@@ -117,6 +117,25 @@ DEFAULT_SOURCE_LAYERS = ("src", "source", "音源")
 DEFAULT_RECEIVER_LAYERS = ("rec", "receiver", "受音点")
 
 
+def _layer_matches(low, names):
+    """レイヤ名が音源／受音点のものか。**頭が一致すれば拾う**。
+
+    ★`rec` だけでなく `rec1` `rec2` `rec3` のような**連番レイヤ**も拾う
+    （2026-08-24。受音点を方向別に分けてあるモデルが来た）。
+    後ろに付けてよいのは数字・`_`・`-` だけにして、
+    `record` のような無関係なレイヤを巻き込まないようにする。
+    """
+    for name in names:
+        head = name.lower()
+        if low == head:
+            return True
+        if low.startswith(head):
+            rest = low[len(head):].lstrip("_-")
+            if rest.isdigit() or rest == "":
+                return True
+    return False
+
+
 class DxfModel:
     """DXF から読み取った内容の入れ物。
 
@@ -150,6 +169,11 @@ class DxfModel:
         self.mesh = []
         self.source_points = []
         self.receiver_points = []
+        # どのレイヤの点か（`receiver_points` と同じ並び）。
+        # ★受音点を**方向別にレイヤ分け**してあるモデル（`rec1` `rec2` `rec3`）で、
+        #   測線ごとにまとめて評価するために使う（逆二乗の評価など。2026-08-24）
+        self.source_layer_names = []
+        self.receiver_layer_names = []
         self.unit_scale = 1.0
         self.unit_source = ""
         self.layer_counts = {}
@@ -533,6 +557,114 @@ def read_absorption_csv(file_name, band_number=DEFAULT_BAND_NUMBER):
               f"最後の値で埋めました。"
               f"例: {', '.join(name for name, _ in padded[:3])} …")
     return table
+
+
+# ---- 3DSOLID（ACIS）から箱を起こす（2026-08-24）----------------------------
+#
+# ACIS の中身は独自形式で、まともに読むには面・辺・向きの木を全部たどる必要がある。
+# ただ**直方体**であれば、入っている頂点（`point` レコード）は 8 隅そのものなので、
+# そこから面を起こせる。箱だと確かめられたときだけ使う保険。
+
+ACIS_BOX_EPS = 1.0e-6           # 同じ座標とみなす幅（CAD 単位）
+
+
+def acis_points(file_name):
+    """DXF の中の ACIS データから頂点を拾う。→ [(x, y, z), …]
+
+    版によって置き場が違う:
+      ・R2013 以降 … `ACDSDATA` 節にバイナリ（`310` にヘキサ）
+      ・それ以前   … `3DSOLID` の中に文字（`1` / `3` の行。暗号化されている）
+    いまは**バイナリ版**だけ読む（新しい CAD が出すのはこちら）。
+    """
+    import binascii
+    import struct
+
+    lines = None
+    for encoding in ("utf-8", "cp932", "latin-1"):
+        try:
+            with open(file_name, encoding=encoding) as handle:
+                lines = [line.strip() for line in handle]
+            break
+        except UnicodeDecodeError:
+            continue
+    if lines is None:
+        return []
+
+    chunks, seen = [], False
+    for index, line in enumerate(lines):
+        if line == "ASM_Data":
+            seen = True
+        elif seen and line == "310" and index + 1 < len(lines):
+            chunks.append(lines[index + 1])
+    if not chunks:
+        return []
+    try:
+        data = binascii.unhexlify("".join(chunks))
+    except (binascii.Error, ValueError):
+        return []
+
+    points, at = [], 0
+    while True:
+        at = data.find(b"point", at + 1)
+        if at < 0:
+            break
+        # `point` の少し先に「座標が 3 つ続く」印（0x13）があり、そのあとが倍精度 3 つ
+        mark = data.find(b"\x13", at, at + 64)
+        if mark < 0 or mark + 25 > len(data):
+            continue
+        try:
+            xyz = struct.unpack("<3d", data[mark + 1:mark + 25])
+        except struct.error:
+            continue
+        if all(abs(v) < 1.0e9 for v in xyz):
+            points.append(tuple(xyz))
+    return points
+
+
+def _solid_layer(entities):
+    """最初の 3DSOLID / REGION のレイヤ名（復元した面の名前の頭に使う）。"""
+    for etype, etags in entities:
+        if etype in ("3DSOLID", "REGION"):
+            return (_tag(etags, 8, "") or "").strip() or None
+    return None
+
+
+def box_from_points(points, eps=ACIS_BOX_EPS):
+    """頂点が**直方体の 8 隅**なら、6 つの面（向きの名前つき）にして返す。
+
+    → [(向きの名前, [4 隅]), …]。箱でなければ None（＝復元しない）。
+    """
+    import numpy as np
+
+    if len(points) < 8:
+        return None
+    array = np.asarray(points, dtype=float)
+    lo, hi = array.min(axis=0), array.max(axis=0)
+    if np.any(hi - lo <= eps):
+        return None                     # つぶれている（箱ではない）
+    # 8 隅がそろっていて、頂点が**全部**その 8 隅のどれかであること
+    corners = np.array([[lo[0] if a else hi[0],
+                         lo[1] if b else hi[1],
+                         lo[2] if c else hi[2]]
+                        for a in (True, False) for b in (True, False)
+                        for c in (True, False)])
+    for corner in corners:
+        if not np.any(np.all(np.abs(array - corner) <= eps, axis=1)):
+            return None                 # 欠けている隅がある
+    for point in array:
+        if not np.any(np.all(np.abs(corners - point) <= eps, axis=1)):
+            return None                 # 隅でない頂点がある（箱ではない）
+
+    x0, y0, z0 = lo
+    x1, y1, z1 = hi
+    return [
+        ("床",   [(x0, y0, z0), (x1, y0, z0), (x1, y1, z0), (x0, y1, z0)]),
+        ("天井", [(x0, y0, z1), (x0, y1, z1), (x1, y1, z1), (x1, y0, z1)]),
+        ("壁",   [(x0, y0, z0), (x0, y0, z1), (x1, y0, z1), (x1, y0, z0)]),
+        ("壁",   [(x1, y1, z0), (x1, y1, z1), (x0, y1, z1), (x0, y1, z0)]),
+        ("壁",   [(x0, y1, z0), (x0, y1, z1), (x0, y0, z1), (x0, y0, z0)]),
+        ("壁",   [(x1, y0, z0), (x1, y0, z1), (x1, y1, z1), (x1, y1, z0)]),
+    ]
 
 
 def _add_triangles(model, faces, layer, points):
@@ -1496,10 +1628,12 @@ def read_model(file_name, unit=None, absorption_table=None, default_absorption=N
             layer = (_tag(etags, 8, "0") or "").strip()
             p = np.array([_float(etags, 10), _float(etags, 20), _float(etags, 30)]) * scale
             low = layer.lower()
-            if low in [s.lower() for s in source_layers]:
+            if _layer_matches(low, source_layers):
                 model.source_points.append(p)
-            elif low in [s.lower() for s in receiver_layers]:
+                model.source_layer_names.append(layer)
+            elif _layer_matches(low, receiver_layers):
                 model.receiver_points.append(p)
+                model.receiver_layer_names.append(layer)
             else:
                 model.skipped["非対応エンティティ"][f"POINT(レイヤ'{layer}')"] += 1
             i += 1
@@ -1508,6 +1642,27 @@ def read_model(file_name, unit=None, absorption_table=None, default_absorption=N
         if etype not in ("VERTEX", "SEQEND"):
             model.skipped["非対応エンティティ"][etype] += 1
         i += 1
+
+    # ★面が 1 枚も読めず、3DSOLID / REGION だけがあるとき、**箱なら**起こす
+    #   （2026-08-24。半無響室のモデルが 3DSOLID 1 個で来た）
+    solids = sum(model.skipped["非対応エンティティ"].get(name, 0)
+                 for name in ("3DSOLID", "REGION"))
+    if not faces and solids:
+        box = box_from_points(acis_points(file_name))
+        if box is not None:
+            base = _solid_layer(entities) or "solid"
+            for where, corners in box:
+                name = f"{base}_{where}"
+                _add_triangles(model, faces, name,
+                               [np.asarray(c, dtype=float) * scale
+                                for c in corners])
+            model.face_sources["3DSOLID(直方体として復元)"] += len(box)
+            if verbose:
+                print(f"[read_dxffile] ★3DSOLID を**直方体として復元**しました"
+                      f"（{len(box)} 面）。向きごとにレイヤを分けています: "
+                      f"{base}_床 / {base}_天井 / {base}_壁")
+                print(f"[read_dxffile]   ※箱でない立体は復元できません。"
+                      f"その場合は CAD で面に分解して書き出してください")
 
     # --- 法線を計算し、縮退面を除く ---
     kept = []

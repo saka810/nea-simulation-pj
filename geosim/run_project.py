@@ -353,6 +353,17 @@ def _clock(seconds):
             else f"{minutes}:{second:02d}")
 
 
+def _receiver_groups(project, receivers):
+    """受音点のレイヤ名（測線）。取れなければ空。"""
+    try:
+        points, names = _receivers(project, groups=True)
+    except Exception:
+        return []
+    if len(points) != len(receivers):
+        return []
+    return names
+
+
 def _write_points(project, receivers=None, model=None, verbose=True):
     """**測定点の一覧（CSV）と配置図（平面＋立面 2 方向）**を書く。
 
@@ -379,7 +390,9 @@ def _write_points(project, receivers=None, model=None, verbose=True):
         project.receiver_index = None
         try:
             written = [pj.write_points_csv(project.result_path("points"),
-                                           sources, receivers, azimuths)]
+                                           sources, receivers, azimuths,
+                                           groups=_receiver_groups(project,
+                                                                   receivers))]
             if verbose:
                 print(f"[run] 測定点の一覧: {written[0]}")
             try:
@@ -454,6 +467,12 @@ def _trace_once(project, receivers, verbose=True, progress=None):
         if source is None:
             return None
         rays = sr.soundray_generator(project.rays)
+        # ★面の上に置いた音源なら半球に折り返し、音源も面の上へ置き直す
+        placement = placement_for(project, model, source, verbose=verbose)
+        if placement.on_surface:
+            import source_placement as spl
+            rays = spl.hemisphere(rays, placement.normal)
+            source = placement.point
         recorder = RayRecorder(total_rays=project.rays,
                                max_rays=project.raylog_max_rays,
                                sound_velocity=Atmosphere(
@@ -479,6 +498,24 @@ def _trace_once(project, receivers, verbose=True, progress=None):
         return None, None
 
 
+def placement_for(project, model, source, verbose=True):
+    """音源の置かれ方（面の上か）を調べる。→ `source_placement.Placement`
+
+    ★2026-08-24 ユーザー要望。設定は `project.json` の
+    `source_on_surface` / `source_surface_tolerance` / `source_direction`。
+    """
+    import source_placement as spl
+
+    place = spl.detect(np.asarray(source, dtype=float), model.mesh,
+                       tolerance=getattr(project, "source_surface_tolerance",
+                                         spl.DEFAULT_TOLERANCE),
+                       direction=getattr(project, "source_direction", None),
+                       enabled=bool(getattr(project, "source_on_surface", True)))
+    if verbose:
+        print(f"[run] 音源の置かれ方: {place.describe()}")
+    return place
+
+
 def _prefixed(progress, prefix):
     """受音点が複数あるとき、どの受音点の処理かを段階名に添える。"""
     if progress is None:
@@ -486,14 +523,38 @@ def _prefixed(progress, prefix):
     return lambda stage, fraction=None: progress(prefix + stage, fraction)
 
 
-def _receivers(project):
-    """計算する受音点の一覧。project.receiver の指定が最優先、無ければ DXF から。"""
+def _receivers(project, groups=False):
+    """計算する受音点の一覧。project.receiver の指定が最優先、無ければ DXF から。
+
+    `groups=True` なら **(点, レイヤ名)** の 2 つを返す（受音点を方向別に
+    レイヤ分けしたモデル用。2026-08-24）。
+    ★**音源と重なる点は外す**（そこでは音圧が発散する）。半無響室のモデルは
+      測線の起点（＝音源の位置）が受音点のレイヤに入っていた。
+    """
     import read_dxffile as rd
     if project.receiver is not None:
-        return [np.asarray(project.receiver, dtype=float)]
-    probe = rd.read_model(project.dxf_path, unit=project.unit,
-                          band_number=project.band_number, verbose=False)
-    return [np.asarray(p, dtype=float) for p in probe.receiver_points]
+        points = [np.asarray(project.receiver, dtype=float)]
+        names = [""]
+    else:
+        probe = rd.read_model(project.dxf_path, unit=project.unit,
+                              band_number=project.band_number, verbose=False)
+        points = [np.asarray(p, dtype=float) for p in probe.receiver_points]
+        names = list(getattr(probe, "receiver_layer_names", []) or
+                     ["" for _ in points])
+        source = project.source
+        if source is None and probe.source_points:
+            source = probe.source_points[0]
+        if source is not None:
+            source = np.asarray(source, dtype=float)
+            keep = [k for k, p in enumerate(points)
+                    if float(np.linalg.norm(p - source)) > 1.0e-6]
+            if len(keep) != len(points):
+                print(f"[run] 音源と重なる受音点を "
+                      f"{len(points) - len(keep)} 点はずしました"
+                      f"（その位置では音圧が発散します）")
+            points = [points[k] for k in keep]
+            names = [names[k] for k in keep] if names else names
+    return (points, names) if groups else points
 
 
 def _sub_project(project, index):
@@ -551,6 +612,10 @@ def _run_one(project, receiver, verbose=True, make_figures=True,
         orient_normals=project.orient_normals,
         two_sided=project.two_sided,
         volume=project.volume,
+        # ★面の上に置いた音源（半無響室の床置きなど。2026-08-24）
+        source_on_surface=getattr(project, "source_on_surface", True),
+        source_surface_tolerance=getattr(project, "source_surface_tolerance", 0.0),
+        source_direction=getattr(project, "source_direction", None),
         flip_faces=flip_faces,
         face_materials=face_materials,
         traced_history=traced_history,

@@ -3754,6 +3754,145 @@ def test_camera_save():
           f"{done} / {missed}")
 
 
+def test_hemi_anechoic():
+    """[44] 半無響室のための道具（面上音源・箱の復元・補間・逆二乗）。
+
+    ★2026-08-24 ユーザー要望
+    > 半無響室の検討を行う場合、例えば床面に音源を想定したい。
+    > 面上の場合は半球に広がっていく様をみたい。
+    > 逆に、面上に置いている場合、床面の一回目の反射は見ないようにしたい。
+    """
+    print("\n[44] 半無響室（面上の音源・箱の復元・吸音率の補間・逆二乗）")
+    import loop_reflectionmesh as lr_
+    import read_dxffile as rd_
+    import source_placement as spl
+    import sound_ray as sr_
+
+    model = rd_.read_model(TEST_DXF, verbose=False)
+    mesh = model.mesh
+    lo, hi = model.extents
+
+    # ---- ① 面の上に置いた音源 ----
+    floor = np.array([lo[0] + 0.7, lo[1] + 0.9, lo[2]])
+    place = spl.detect(floor, mesh)
+    check("★床のちょうど上に置いたら「面上」と分かる",
+          place.kind == spl.KIND_FACE and place.on_surface, place.describe())
+    check("★放射方向は室の側（床なら上向き）",
+          place.normal[2] > 0.99, str(np.round(place.normal, 3)))
+    check("音源は面から少しだけ浮かせる（当たり判定が 0 距離にならないように）",
+          abs(place.point[2] - lo[2] - spl.EPSILON) < 1e-9,
+          f"{place.point[2] - lo[2]:.6f} m")
+
+    high = np.array([lo[0] + 0.7, lo[1] + 0.9, lo[2] + 0.05])
+    check("5 cm 浮いていれば、既定（許容 0）では面上にしない",
+          not spl.detect(high, mesh).on_surface)
+    near = spl.detect(high, mesh, tolerance=0.1)
+    check("★許容 0.1 m にすれば面上として扱う（音源の大きさを見込む）",
+          near.on_surface and near.kind == spl.KIND_FACE
+          and abs(near.distance - 0.05) < 1e-9, near.describe())
+    check("面の上に載せ直す（浮いていた分は無くなる）",
+          abs(near.point[2] - lo[2] - spl.EPSILON) < 1e-9)
+
+    corner = np.array([lo[0], lo[1], lo[2]])
+    edge = np.array([lo[0], lo[1] + 0.9, lo[2]])
+    check("辺の上・頂点の上も見分ける",
+          spl.detect(edge, mesh).kind == spl.KIND_EDGE
+          and spl.detect(corner, mesh).kind == spl.KIND_VERTEX,
+          f"{spl.detect(edge, mesh).kind} / {spl.detect(corner, mesh).kind}")
+    check("★頂点でも半球（1/8 にはしない。壁の吸音はふつうに効かせる）",
+          spl.detect(corner, mesh).solid_angle > 6.0,
+          f"{spl.detect(corner, mesh).solid_angle:.3f} sr")
+    up = spl.detect(corner, mesh, direction="+Z")
+    check("★放射方向を指定できる（辺・頂点でどの面に置いたかを決める）",
+          up.normal[2] > 0.99, str(np.round(up.normal, 3)))
+    check("切れば従来どおり全球",
+          not spl.detect(floor, mesh, enabled=False).on_surface)
+
+    # ---- ② 半球に折り返す ----
+    rays = sr_.soundray_generator(2000)
+    folded = spl.hemisphere(rays, place.normal)
+    check("★音線は 1 本も減らない（半分を捨てない）", len(folded) == len(rays))
+    check("★全部が面の側へ向く", np.all(folded @ place.normal >= -1e-12),
+          f"最小 {float(np.min(folded @ place.normal)):.3e}")
+    check("長さは 1 のまま（鏡映なので）",
+          np.allclose(np.linalg.norm(folded, axis=1), 1.0))
+    check("面に平行な向きの分布は変えない（鏡映は 1 対 1）",
+          abs(float(np.mean(folded[:, 0]))) < 0.05,
+          f"{float(np.mean(folded[:, 0])):.3f}")
+
+    # ---- ③ 載っている面の 1 次反射は起きない ----
+    receiver = np.array([lo[0] + 1.2, lo[1] + 2.0, lo[2] + 0.5])
+    history = lr_.loop(place.point, receiver, folded, 3, mesh, 0.2)
+    floor_faces = {k for k, m in enumerate(mesh)
+                   if abs(np.asarray(m.vertexes)[:, 2].max() - lo[2]) < 1e-9
+                   and abs(np.asarray(m.vertexes)[:, 2].min() - lo[2]) < 1e-9}
+    first = [path[0] for path in history if path]
+    check("★載っている面の 1 次反射が経路に出てこない",
+          not any(f in floor_faces for f in first),
+          f"{sum(1 for f in first if f in floor_faces)} / {len(first)} 本")
+    check("受音経路は増える（半分を捨てていた頃より）",
+          len(history) > 0, f"{len(history)} 本")
+
+    # ---- ④ 3DSOLID（直方体）の復元 ----
+    corners = [(x, y, z) for x in (0.0, 2.0) for y in (0.0, 3.0)
+               for z in (0.0, 1.0)]
+    box = rd_.box_from_points(corners)
+    check("★箱なら 6 面に起こせる", box is not None and len(box) == 6,
+          "None" if box is None else f"{len(box)} 面")
+    check("床・天井・壁で名前を分ける（材料を塗り分けられるように）",
+          {name for name, _ in box} == {"床", "天井", "壁"},
+          str(sorted({name for name, _ in box})))
+    check("箱でなければ復元しない（勝手に形を決めない）",
+          rd_.box_from_points(corners[:-1]) is None
+          and rd_.box_from_points(corners + [(1.0, 1.0, 0.5)]) is None)
+
+    # ---- ⑤ 受音点のレイヤ（測線）----
+    check("★`rec1` `rec2` のような連番レイヤも受音点として拾う",
+          rd_._layer_matches("rec1", ("rec",))
+          and rd_._layer_matches("rec_2", ("rec",))
+          and rd_._layer_matches("rec", ("rec",)))
+    check("無関係なレイヤは拾わない",
+          not rd_._layer_matches("record", ("rec",))
+          and not rd_._layer_matches("recess", ("rec",)))
+
+    # ---- ⑥ 吸音率の補間（細かい周波数 → オクターブ）----
+    import absorption_curve as ac
+
+    frequencies = np.array([63.0, 125.0, 250.0, 500.0])
+    flat = np.array([0.5, 0.5, 0.5, 0.5])
+    bands, extrapolated = ac.to_bands(frequencies, flat, [125.0, 250.0])
+    check("一定の吸音率はそのまま出る", np.allclose(bands, 0.5), str(bands))
+    check("バンドの端からはみ出したら知らせる（黙って外挿しない）",
+          ac.to_bands(frequencies, flat, [63.0])[1] == [63.0],
+          str(ac.to_bands(frequencies, flat, [63.0])[1]))
+    slope = np.array([0.2, 0.4, 0.6, 0.8])
+    value = ac.interpolate(frequencies, slope, 176.8)   # 125 と 250 の中間（対数）
+    check("★対数周波数で補間する", abs(value - 0.5) < 0.01, f"{value:.4f}")
+    check("データの外は端の値を保つ",
+          abs(ac.interpolate(frequencies, slope, 20.0) - 0.2) < 1e-9
+          and abs(ac.interpolate(frequencies, slope, 8000.0) - 0.8) < 1e-9)
+
+    # ---- ⑦ 逆二乗からのずれ ----
+    import inverse_square as iq
+
+    distance = np.array([0.5, 1.0, 2.0, 4.0, 7.0])
+    ideal = 94.0 - 20.0 * np.log10(distance)
+    delta, reference = iq.deviations(distance, ideal)
+    check("★理想の 1/r² ならずれは 0", np.allclose(delta, 0.0, atol=1e-9)
+          and abs(reference - 94.0) < 1e-9, f"{np.max(np.abs(delta)):.2e}")
+    shifted = ideal.copy()
+    shifted[2] += 2.0
+    delta, _ = iq.deviations(distance, shifted)
+    check("1 点だけずらすと、そこが最大のずれになる",
+          int(np.argmax(np.abs(delta))) == 2
+          and abs(delta[2] - 1.6) < 1e-9, str(np.round(delta, 2)))
+    check("当てはめは最小二乗（平均のずれが 0）",
+          abs(float(np.mean(delta))) < 1e-9)
+    check("許容値は ISO 3745（参考）",
+          iq.tolerance_of(63) == 1.5 and iq.tolerance_of(1000) == 1.0
+          and iq.tolerance_of(8000) == 1.5)
+
+
 def main():
     print("geosim 数値検証")
     print(f"  Python {sys.version.split()[0]} / numpy {np.__version__}")
@@ -3775,7 +3914,7 @@ def main():
                test_workbook, test_path_reuse, test_conditions_batch,
                test_panel_scroll, test_empty_model, test_impulse_fast,
                test_measurement_points, test_image_source_view,
-               test_ui_2026_08_24, test_camera_save):
+               test_ui_2026_08_24, test_camera_save, test_hemi_anechoic):
         fn()
 
     failed = [name for name, ok in _results if not ok]

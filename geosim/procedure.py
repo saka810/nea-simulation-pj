@@ -54,10 +54,24 @@ def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref
             paths_filename=None, reuse_paths=True, statistical_result=None,
             impulse_method="fast",
             flip_faces=None, face_materials=None, traced_history=None,
+            source_placement=None, source_on_surface=True,
+            source_surface_tolerance=0.0, source_direction=None,
             progress=None):
     """
     閉じた室でも、一面だけの壁のような**開いた形状**でも計算できる
     （当たる壁がなくなった音線はそこで打ち切られる）。
+
+    source_on_surface / source_surface_tolerance / source_direction
+        ★**面の上に置いた音源**の設定（2026-08-24 ユーザー要望）。
+        `source_on_surface=False` なら従来どおり全球に放射する。
+        `source_surface_tolerance` は「面の上とみなす距離 [m]」、
+        `source_direction` は放射方向（`自動` / `+Z` など）。
+        調べた結果は下の `source_placement` に入る（外から渡すこともできる）
+
+    source_placement : source_placement.Placement | None
+        ★**面の上に置いた音源**の扱い（2026-08-24）。`detect()` の戻り値を渡すと、
+        音源を面の上に置き直し（`Placement.point`）、**半球に放射**する。
+        渡さなければ従来どおり全球。`run_project` が作って渡す
 
     soundsource_point / receiver_point : (3,) | None
         None を渡すと DXF の src / rec レイヤの POINT から取る。
@@ -216,6 +230,17 @@ def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref
             raise ValueError("受音点が指定されておらず、DXF に rec レイヤの POINT もありません")
         receiver_point = model.receiver_points[0]
 
+    # ★**面の上に置いた音源**かどうかをここで決める（2026-08-24）。
+    #   呼び出し口が複数あるので、モデルを読んだ直後の 1 か所で判断する
+    if source_placement is None:
+        import source_placement as spl
+        source_placement = spl.detect(
+            np.asarray(soundsource_point, dtype=float), mesh,
+            tolerance=source_surface_tolerance, direction=source_direction,
+            enabled=source_on_surface)
+        if source_placement.on_surface:
+            print(f"[procedure] 音源の置かれ方: {source_placement.describe()}")
+
     # 統計残響式（Sabine / Eyring / Eyring-Knudsen）。音線を飛ばす前に出せる。
     # 面積と吸音率だけから決まるので、あとの計算結果と突き合わせる物差しになる
     report("統計残響式")
@@ -268,6 +293,12 @@ def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref
         # 音線ベクトルを作成
         report("音線を生成中")
         soundray_list = sr.soundray_generator(soundray_number)
+        # ★面の上に置いた音源なら**半球に折り返す**（2026-08-24）。
+        #   音源の位置も面の上へ置き直してある（`Placement.point`）
+        if source_placement is not None and source_placement.on_surface:
+            import source_placement as spl
+            soundray_list = spl.hemisphere(soundray_list, source_placement.normal)
+            soundsource_point = source_placement.point
 
         # 可視化用の軌跡レコーダ（本線の計算には影響しない副チャンネル）
         recorder = None
@@ -292,6 +323,11 @@ def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref
         #   （追跡は受音点に依らない。`loop_reflectionmesh.loop` の受音判定を参照）
         report("音線追跡（済み・受音点間で共有）", 1.0)
         reflection_history = traced_history
+
+    if source_placement is not None and source_placement.on_surface:
+        # ★以降（バックトレース・距離減衰）も**置き直した位置**で通す。
+        #   ここを揃えないと、鏡像の距離が音線追跡と食い違う
+        soundsource_point = source_placement.point
 
     if reused is None:
         # 重複経路の削除
@@ -418,7 +454,12 @@ def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref
             "clarity": clarity_result, "level": level_result, "sti": sti_result,
             "frequencies": frequencies,
             "atmosphere": atmosphere,
-            "soundsource_point": np.asarray(soundsource_point, dtype=float),
+            # ★**CAD に描かれた位置**を返す（面の上に置き直した位置ではない）。
+            #   `run_project` はこれを project.json に書き戻すので、
+            #   置き直したぶん（1 mm）が設定に混ざると回すたびに動いてしまう
+            "soundsource_point": (source_placement.original
+                                  if source_placement is not None
+                                  else np.asarray(soundsource_point, dtype=float)),
             "receiver_point": np.asarray(receiver_point, dtype=float)}
 
 

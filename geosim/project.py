@@ -155,6 +155,16 @@ DEFAULTS = {
     "pressure": 101.325,
     "volume": None,                # 統計残響式に使う容積。None なら閉形状から自動
     "source": None,                # None なら DXF の src レイヤ
+    # ★**面の上に置いた音源**（半無響室の床置きなど。2026-08-24 ユーザー要望）。
+    #   面に載っていると分かったら**半球に放射**し、その面の 1 次反射は起きない。
+    #   詳しくは `source_placement.py`
+    "source_on_surface": True,
+    # 面の上とみなす距離 [m]。**0 なら「ぴったり載っているときだけ」**。
+    # 実寸の音源の大きさを見込むときは 0.1 くらいまで使う想定（ユーザー要望）
+    "source_surface_tolerance": 0.0,
+    # 放射方向（`自動` / `+X` / `-X` / `+Y` / `-Y` / `+Z` / `-Z`）。
+    # 辺や頂点に載っているとき、どの面に置いた音源かを決めるのに使う
+    "source_direction": "自動",
     "receiver": None,              # None なら DXF の rec レイヤ
     # 受音点に置く「人」の正面方向。真上から見た方位角 [度]。
     # **0° = +X 方向、反時計回り**（真上から見て）。
@@ -722,7 +732,7 @@ def write_room_csv(filename, statistical, frequencies=None):
 
 
 def write_points_csv(filename, sources, receivers, azimuths=None,
-                     source_names=None, receiver_names=None):
+                     source_names=None, receiver_names=None, groups=None):
     """音源と受音点の**位置と向きの一覧**を CSV にする（`結果/<室>_測定点.csv`）。
 
     ★**あとで結果を見たときに「どれがどの点か」が分からない**という
@@ -735,6 +745,8 @@ def write_points_csv(filename, sources, receivers, azimuths=None,
 
     ・**正面方位**は水平面の向き（0°=+X、真上から見て反時計回り）。音源には無い
     ・**音源からの距離**は音源ごとに列を作る（音圧レベルの逆二乗の確認に使う）
+    ・`groups` を渡すと **レイヤ**の列が付く（受音点を方向別に分けたモデル用。
+      `rec1` `rec2` `rec3` のような測線ごとの評価に使う。2026-08-24）
     ・図は `plots.measurement_points`（平面図＋立面 2 方向）。
       **平面だけでは点が重なる**というユーザー指摘があるので立面も出す
     """
@@ -754,16 +766,20 @@ def write_points_csv(filename, sources, receivers, azimuths=None,
 
     header = ["区分", "名前", "X_m", "Y_m", "Z_m", "正面方位_deg"]
     header += [f"{name}からの距離_m" for name in source_names]
+    groups = list(groups) if groups else []
+    if groups:
+        header += ["レイヤ"]
 
     rows = []
     for point, name in zip(sources, source_names):
         rows.append(["音源", name] + [f"{v:.3f}" for v in point] + [""]
-                    + ["" for _ in source_names])
+                    + ["" for _ in source_names] + ([""] if groups else []))
     for k, (point, name) in enumerate(zip(receivers, receiver_names)):
         distances = [f"{float(np.linalg.norm(point - src)):.3f}" for src in sources]
         rows.append(["受音点", name] + [f"{v:.3f}" for v in point]
                     + [f"{azimuths[k]:.0f}" if k < len(azimuths) else ""]
-                    + distances)
+                    + distances
+                    + ([groups[k] if k < len(groups) else ""] if groups else []))
 
     os.makedirs(os.path.dirname(os.path.abspath(filename)) or ".", exist_ok=True)
     with open(filename, "w", encoding="utf-8-sig", newline="") as f:
