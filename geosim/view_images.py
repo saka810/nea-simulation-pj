@@ -320,7 +320,11 @@ class ImageSourceDisplay:
             self.plotter.render()
 
     def _draw_receivers(self):
-        """受音点を描く。**選んでいる点だけ濃く**して、どれが相手かを示す。"""
+        """受音点を描く。**選んでいる点だけ濃く**して、どれが相手かを示す。
+
+        ★大きさは変えない（2026-08-24 ユーザー指摘「受音点を大きくしないで良い」）。
+        色だけで十分見分けられるので、大きさをいじると室の中で目障りになる。
+        """
         for actor in self.receiver_actors:
             self.plotter.remove_actor(actor, render=False)
         self.receiver_actors = []
@@ -328,8 +332,7 @@ class ImageSourceDisplay:
         for k, item in enumerate(self.sets):
             chosen = (k == self.index)
             self.receiver_actors.append(self.plotter.add_mesh(
-                pv.Sphere(radius=span * (0.010 if chosen else 0.006),
-                          center=item.receiver),
+                pv.Sphere(radius=span * 0.006, center=item.receiver),
                 color=RECEIVER_COLOR if chosen else DIM_COLOR,
                 lighting=False, reset_camera=False, show_scalar_bar=False))
 

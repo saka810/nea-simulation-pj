@@ -78,6 +78,14 @@ import read_dxffile as rd
 import view_model_gui as vg
 
 # 音線の色分けに使う指標
+# ★左パネルのタブ名（2026-08-24 ユーザー要望「左の欄もタブで切り替える形式に」）。
+#   `RayParticleView.MODES` と 1 対 1 で対応させる
+TAB_RAYS = "音線"
+TAB_PARTICLES = "音粒子"
+TAB_IMAGES = "虚音源"
+MODE_TAB = {"rays": TAB_RAYS, "particles": TAB_PARTICLES, "images": TAB_IMAGES}
+TAB_MODE = {tab: mode for mode, tab in MODE_TAB.items()}
+
 COLOR_MODES = ("energy", "time", "reflection", "ray")
 
 TEXT_COLOR = "#d6dae2"
@@ -660,7 +668,7 @@ class RayParticleView:
     #     音線確認画面と並列にある想定です」）。
     #   同じ計算結果の 3 つの見せ方なので、同居させて切り替えるのが素直
     MODES = ("rays", "particles", "images")
-    MODE_LABEL = {"rays": "音線", "particles": "音粒子", "images": "虚音源"}
+    MODE_LABEL = dict(MODE_TAB)
 
     def __init__(self, plotter, animation=None, rays=None, mode="rays", panel=None,
                  images=None):
@@ -674,17 +682,24 @@ class RayParticleView:
                       and (m != "rays" or rays is not None)]
         self.mode = mode if mode in self.modes else self.modes[0]
         self._was_playing = True
-        panel.heading("表示の切り替え（Tab）")
-        self.label = panel.reserve_text(4)      # 音粒子のときは 4 行になる
-        # ★**この欄はパネルのいちばん上へ動かす**（2026-08-24）。
-        #   作った順に上から積まれる仕組みなので、素直に作ると
-        #   「表示の切り替え」が下のほうに埋まって**ページを送らないと見えない**。
-        #   いま何を見ているかは最初に目に入るべきものなので、先頭に差し替える
+        self.panel = panel
+        # ★**パネルの上にタブを並べる**（2026-08-24 ユーザー要望）。
+        #   「どれが何の設定か分からない」ので、欄そのものもタブで切り替える。
+        #   Tab キーでも同じように動く（`toggle`）
+        self.select_tab = panel.tab_strip(
+            [MODE_TAB[m] for m in self.modes],
+            lambda name: self.set_mode(TAB_MODE[name]),
+            active=self.modes.index(self.mode))
+        # 4 行ぶん取る（音粒子・虚音源のときは操作の案内が 2 行増える）。
+        # ★足りないと**上のタブに文字がかぶる**（実際にかぶった）
+        self.label = panel.reserve_text(4, size=9)
+        # 作った順に上から積まれる仕組みなので、**題名とサマリのすぐ下へ動かす**
+        # （素直に作ると下のほうに埋まってページを送らないと見えない）
         moved = panel.items[-2:]
         del panel.items[-2:]
-        # 題名とサマリ（3 行）のすぐ下に差し込む。題名より上に出すと落ち着かない
         head = min(3, len(panel.items))
         panel.items[head:head] = moved
+        panel.active_group = MODE_TAB[self.mode]
         self.apply(render=False)
 
     def _scalar_bar(self, title):
@@ -738,10 +753,22 @@ class RayParticleView:
             text += "\n下の「虚音源」の欄で絞る\nw 受音点   h 室に寄る"
         ParticleAnimation._set_text(self.label, text)
 
+    def set_mode(self, mode, render=True):
+        """見せ方を変える（タブを押したとき・Tab キーのとき）。"""
+        if mode not in self.modes:
+            return self.mode
+        self.mode = mode
+        if self.panel is not None:
+            # ★**左の欄もこのタブのものだけにする**（ユーザー要望）
+            self.panel.show_group(MODE_TAB[mode], render=False)
+            self.select_tab(MODE_TAB[mode])
+        self.apply(render=render)
+        return self.mode
+
     def toggle(self):
         """Tab で次の見せ方へ（音線 → 音粒子 → 虚音源 → 音線 …）。"""
-        self.mode = self.modes[(self.modes.index(self.mode) + 1) % len(self.modes)]
-        self.apply()
+        following = self.modes[(self.modes.index(self.mode) + 1) % len(self.modes)]
+        return self.set_mode(following)
 
 
 # ------------------------------------------------------------------------------
@@ -1197,39 +1224,43 @@ def _write_gif_fallback(path, images, fps, hold=1):
 VIDEO_FPS = 30.0
 
 
-def movie_plan(animation, seconds, rate):
-    """動画の作り方を決める。`(撮るコマ, 各コマを何枚並べるか, fps, 長さ, 倍速)` を返す。
+def movie_plan(animation, seconds, rate, start=0):
+    """動画の作り方を決める。`(撮るコマ, 各コマを何枚並べるか, fps, 長さ)` を返す。
 
-    ★ここが 2026-08-24 の指摘「動画の長さや再生速度が反映されていない」の答え。
+    ★★**動画は「画面をそのまま `長さ` 秒ぶん録ったもの」**
+    （2026-08-24 ユーザーの意図確認）。
 
-    ★★**動画は「指定した長さの中に全コマを詰める」**（実際に保存してもらって直した）。
-    最初は再生速度をそのまま守る作りにしたが、離散化時間 1 ms・応答 11.4 秒だと
-    全 11,394 コマあり、1 コマ/秒を守ると**10 秒の動画に 10 コマしか入らない**
-    （紙芝居になった）。画面で全部見るには 3 時間かかる速さなので、
-    そのまま動画に持ち込むのが間違いだった。
+    > 離散化時間 1 ms で再生速度 1 コマ/秒とした場合、10 s 間で 10 コマまで
+    > （10 ms まで）しか動画にしない想定です。
+
+    つまり素直に
+
+        コマ数 = 再生速度 × 動画の長さ        （先頭から順に、間引かない）
+
+    ここを一度「長さの中に全コマを詰める」と解釈し直して**間違えた**。
+    全部を早送りで見たいときは**再生速度を上げる**のが筋で、
+    動画側が勝手に早送りするのは意図と違う。
 
     | 設定 | 動画での意味 |
     |---|---|
-    | **動画の長さ [s]** | 動画の長さそのもの。**この中に全コマを詰める** |
-    | **再生速度 [コマ/秒]** | これで見終わるほうが早ければ、そこで終わる（＝速度が効く） |
-    | `VIDEO_FPS`（30） | 動画のなめらかさ。コマが少ないときは同じ絵を並べて間を持たせる |
+    | **再生速度 [コマ/秒]** | 1 秒間に進むコマ数。**画面で見ているとおりの速さ** |
+    | **動画の長さ [s]** | 録る長さ。`再生速度 × 長さ` コマで打ち切る |
+    | `VIDEO_FPS`（30） | 動画のなめらかさ。同じ絵を `hold` 枚並べて速さを合わせる |
 
-    つまり長さ = `min(指定の長さ, 全コマ ÷ 再生速度)`。
-    戻り値の「倍速」は画面で見るのに対して何倍速か（1.0 なら画面と同じ速さ）。
+    応答の終わりまで録りたいときは「長さ = 全コマ ÷ 再生速度」にすればよい
+    （画面に必要な長さを出しているので、そのまま入れられる）。
     """
     total = min(int(animation.frames), len(animation.times))
     rate = max(0.1, float(rate))
     seconds = max(0.5, float(seconds))
-    # 画面の速さで見終わる時間。長さの指定より短ければそちらを採る
-    length = min(seconds, total / rate)
-    shots = min(total, max(1, int(round(VIDEO_FPS * length))))
-    steps = (np.arange(total) if shots >= total
-             else np.unique(np.linspace(0, total - 1, shots).round().astype(int)))
-    # コマが少ないときは同じ絵を並べて長さを合わせる（1 fps の紙芝居にしない）
-    hold = max(1, int(round(VIDEO_FPS * length / len(steps))))
-    fps = float(min(120.0, max(1.0, len(steps) * hold / length)))
-    speed = (total / length) / rate          # 画面で見るのに対して何倍速か
-    return steps, hold, fps, len(steps) * hold / fps, speed
+    start = int(max(0, min(start, max(0, total - 1))))
+    want = max(1, int(round(rate * seconds)))
+    steps = np.arange(start, min(total, start + want))
+    # 同じ絵を `hold` 枚並べて速さを合わせる。**fps は速さの整数倍**にする
+    # （30 に固定すると `30 / 速さ` が割り切れず長さがずれる）
+    hold = max(1, int(round(VIDEO_FPS / rate)))
+    fps = float(min(120.0, max(1.0, rate * hold)))
+    return steps, hold, fps, len(steps) * hold / fps
 
 
 def add_movie_key(plotter, animation, folder, stem="音粒子", key="b",
@@ -1252,17 +1283,24 @@ def add_movie_key(plotter, animation, folder, stem="音粒子", key="b",
                                               getattr(animation,
                                                       "frames_per_second",
                                                       DEFAULT_PLAY_FPS)))
-        steps, hold, fps, length, speed = movie_plan(animation, seconds, rate)
+        # ★**いま見ているコマから**録る（止めた位置から先を録れるように）
+        steps, hold, fps, length = movie_plan(animation, seconds, rate,
+                                              start=animation.step)
         total = min(int(animation.frames), len(animation.times))
 
         playing, keep = animation.playing, animation.step
         animation.playing = False
-        message = (f"動画を作っています… {length:.1f} 秒 / "
-                   f"{len(steps)} コマ（全 {total}）")
+        first = animation.times[steps[0]] * 1000.0
+        last = animation.times[steps[-1]] * 1000.0
+        message = f"動画を作っています… {length:.1f} 秒 / {len(steps)} コマ"
         print(f"[view_rays] {message}")
-        print(f"[view_rays] 応答 {animation.times[steps[-1]] * 1000:.0f} ms までを "
-              f"{length:.1f} 秒に収めます"
-              f"（画面の再生速度 {rate:.1f} コマ/秒 の {speed:.0f} 倍速）")
+        print(f"[view_rays] 応答 {first:.0f}〜{last:.0f} ms を "
+              f"{rate:.1f} コマ/秒（画面と同じ速さ）で {length:.1f} 秒ぶん録ります"
+              f"／全 {total} コマ")
+        if len(steps) < total - steps[0]:
+            print(f"[view_rays] 先まで録るには「動画の長さ」を "
+                  f"{(total - steps[0]) / rate:.0f} 秒にするか、"
+                  f"「再生速度」を上げてください")
         # ★出したまま（`seconds=None`）にして、終わってから消す
         vg.notice(plotter, message, kind="busy", seconds=None)
 
@@ -1291,8 +1329,8 @@ def add_movie_key(plotter, animation, folder, stem="音粒子", key="b",
 
         size = os.path.getsize(path) / 1e6
         print(f"[view_rays] 動画を保存しました: {path}"
-              f"（{len(images)} コマ / {length:.1f} 秒 / {fps:.0f} fps / "
-              f"{size:.1f} MB）")
+              f"（{len(images)} コマ / {first:.0f}〜{last:.0f} ms / "
+              f"{length:.1f} 秒 / {fps:.0f} fps / {size:.1f} MB）")
         vg.notice(plotter, f"動画を保存しました: {os.path.basename(path)}"
                            f"（{length:.1f} 秒 / {size:.1f} MB）")
         return path
@@ -1317,7 +1355,7 @@ def save_movie(raylog, model, filename, index=None, frames=240, band=None,
                                   band=band, point_size=point_size)
     plotter.view_isometric()
 
-    steps, hold, fps, length, speed = movie_plan(animation, seconds, rate)
+    steps, hold, fps, length = movie_plan(animation, seconds, rate)
     images = []
     for step in steps:
         animation.update(int(step))
@@ -1328,8 +1366,10 @@ def save_movie(raylog, model, filename, index=None, frames=240, band=None,
         filename = os.path.splitext(filename)[0] + VIDEO_SUFFIX
     path = write_video(filename, images, fps, hold=hold)
     total = min(int(animation.frames), len(animation.times))
-    print(f"[view_rays] {len(images)} コマ（全 {total}）/ {length:.1f} 秒 / "
-          f"{fps:.0f} fps / 画面の {speed:.0f} 倍速")
+    print(f"[view_rays] {len(images)} コマ（全 {total}）/ "
+          f"{animation.times[steps[0]] * 1000:.0f}〜"
+          f"{animation.times[steps[-1]] * 1000:.0f} ms / "
+          f"{length:.1f} 秒 / {fps:.0f} fps / {rate:.1f} コマ/秒")
     return path
 
 
@@ -1419,8 +1459,10 @@ def view(dxf_path, raylog_path, mode="both", absorption=None, unit=None,
     if want_particles:
         time_label = None
         if panel is not None:
+            panel.begin_group(TAB_PARTICLES)
             panel.heading("時刻")
             time_label = panel.reserve_text(2, size=10)
+            panel.end_group()
         animation = animate(plotter, raylog, index=pool, frames=frames,
                             band=band, point_size=point_size, label=time_label)
         # ★離散化時間の初期値は 1 ms（2026-08-21 ユーザー指定）
@@ -1432,15 +1474,19 @@ def view(dxf_path, raylog_path, mode="both", absorption=None, unit=None,
     if panel is not None:
         vg.add_opacity_control(plotter, font=font, panel=panel, target_key="o")
 
-        panel.heading("表示する本数")
         if rays is not None:
+            panel.begin_group(TAB_RAYS)
+            panel.heading("音線の表示")
             panel.slider("音線の本数", [1, len(pool)], ray_count,
                          lambda v: rays.rebuild(int(round(v))), fmt="%.0f")
             # 反射をどこまで描くか。0 に寄せると**音源から出た向き**がそのまま見える
             panel.slider("描く反射回数", [1, rays.reflection_limit],
                          rays.max_reflection or rays.reflection_limit,
                          lambda v: rays.set_max_reflection(v), fmt="%.0f")
+            panel.end_group()
         if animation is not None:
+            panel.begin_group(TAB_PARTICLES)
+            panel.heading("音粒子の表示")
             panel.slider("音粒子の数", [1, len(pool)], particle_count,
                          lambda v: animation.set_count(int(round(v))), fmt="%.0f")
             # 離散化時間（1 コマあたりの時間）。粗くすると全体を見渡せ、
@@ -1456,13 +1502,18 @@ def view(dxf_path, raylog_path, mode="both", absorption=None, unit=None,
             panel.slider("動画の長さ [s]", [2.0, 30.0], movie_setting["seconds"],
                          lambda v: movie_setting.__setitem__("seconds", float(v)),
                          fmt="%.0f")
+            panel.text("動画は「いまのコマから 再生速度 × 長さ」ぶんを録る\n"
+                       "（画面で見ているとおりの速さ・なめらかさ）", size=8)
+            panel.end_group()
 
         # ---- 注目したい音線だけを残す（p で基準点、k で種類）----
         # 基準点の既定は受音点（クリックしなくても使えるように）
+        panel.begin_group(TAB_RAYS)
         focus = add_focus(plotter, raylog, pool, rays=rays, animation=animation,
                           panel=panel,
                           receiver=(model.receiver_points[0]
                                     if model.receiver_points else None))
+        panel.end_group()
 
         # ★虚音源も同じウィンドウに置き、Tab の輪に入れる（2026-08-24）。
         #   同じ計算結果の見せ方なので、別の入口にしないほうが分かりやすい
@@ -1472,6 +1523,7 @@ def view(dxf_path, raylog_path, mode="both", absorption=None, unit=None,
 
             room_bounds = tuple(plotter.bounds)
             vi._add_room_outline(plotter, model)
+            panel.begin_group(TAB_IMAGES)
             panel.heading("虚音源")
             image_label = panel.reserve_text(3, size=9)
             images = vi.ImageSourceDisplay(plotter, image_sets, label=image_label)
@@ -1480,12 +1532,13 @@ def view(dxf_path, raylog_path, mode="both", absorption=None, unit=None,
             _, image_keys = vi.add_controls(
                 plotter, images, image_sets, panel=panel, font=font,
                 room_bounds=room_bounds, opacity_control=False,
-                colour_key="i", help_window=False)
+                colour_key="i", help_window=False, fit="room")
+            panel.end_group()
             images.set_visible(False, render=False)
 
         switch = None
         if mode == "both" or images is not None:
-            # 音線・音粒子・虚音源を同居させて Tab で切り替える
+            # 音線・音粒子・虚音源を同居させ、**タブと Tab キー**で切り替える
             switch = RayParticleView(plotter, animation=animation, rays=rays,
                                      mode="rays", panel=panel, images=images)
             plotter.add_key_event("Tab", switch.toggle)

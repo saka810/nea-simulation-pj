@@ -3317,50 +3317,61 @@ def test_ui_2026_08_24():
             self.frames = frames
             self.times = np.arange(frames) / 1000.0
 
-    # ★**指定した長さの中に全コマを詰める**（実案件で 11,394 コマを 10 コマに
-    #   間引いて紙芝居になったので、こう決めた）
-    steps, hold, fps, length, speed = vr.movie_plan(FakeAnimation(11394),
-                                                    seconds=10.0, rate=1.0)
-    check("★全コマを指定の長さに詰める（紙芝居にしない）",
-          abs(length - 10.0) < 0.05 and len(steps) >= 250,
-          f"{len(steps)} コマ / {length:.1f} 秒 / {fps:.0f} fps")
-    check("★最後のコマまで入る（応答の終わりまで見える）",
-          steps[-1] == 11393, f"最後は {steps[-1]}")
-    check("何倍速かが分かる（画面の再生速度との比）",
-          abs(speed - 1139.4) < 1.0, f"{speed:.0f} 倍速")
-
-    # コマ数が少ないときは同じ絵を並べて長さを合わせる（1 fps にしない）
-    steps, hold, fps, length, speed = vr.movie_plan(FakeAnimation(10),
-                                                    seconds=10.0, rate=1.0)
-    check("★コマが少なくても 30 fps でなめらか",
-          len(steps) == 10 and hold == 30 and abs(fps - 30.0) < 1e-9,
-          f"{len(steps)} コマ / hold={hold} / {fps:.0f} fps")
-    check("画面の速さで見終わるならその長さ（1 倍速）",
-          abs(length - 10.0) < 1e-9 and abs(speed - 1.0) < 1e-9,
-          f"{length:.1f} 秒 / {speed:.2f} 倍速")
-
-    # ★再生速度が速ければ、長さの指定より早く終わる（速度が効く）
-    steps, hold, fps, length, speed = vr.movie_plan(FakeAnimation(60),
-                                                    seconds=30.0, rate=20.0)
-    check("★再生速度どおりに見終わるなら、そこで終わる",
-          abs(length - 3.0) < 0.1 and abs(speed - 1.0) < 0.05,
-          f"{length:.1f} 秒 / {speed:.2f} 倍速")
-
-    check("撮る枚数は動画のコマ数より多くならない",
-          len(vr.movie_plan(FakeAnimation(100000), 5.0, 1.0)[0]) <= 5 * 30 + 1,
-          f"{len(vr.movie_plan(FakeAnimation(100000), 5.0, 1.0)[0])} 枚")
-
-    # 16 の倍数に切って ffmpeg に渡す（警告を出さない）
-    frame = np.zeros((684, 1280, 3), dtype=np.uint8)
-    cropped = vr._crop_to_block(frame)
-    check("★縦横を 16 の倍数に切る（ffmpeg に伸ばさせない）",
-          cropped.shape[0] % 16 == 0 and cropped.shape[1] % 16 == 0,
-          f"{frame.shape[:2]} → {cropped.shape[:2]}")
-
     check("★動画は MP4（iPad などでそのまま再生できる形式）",
           vr.VIDEO_SUFFIX == ".mp4", vr.VIDEO_SUFFIX)
 
-    # ---- ④ Tab の輪に虚音源が入る（ユーザー指摘「音線確認画面と並列」）----
+    # ---- ④ 動画は「画面をそのまま録る」（2026-08-24 意図確認）----
+    steps, hold, fps, length = vr.movie_plan(FakeAnimation(11394),
+                                             seconds=10.0, rate=1.0)
+    check("★離散化 1 ms・1 コマ/秒・10 秒 → 10 コマ（0〜9 ms）だけ録る",
+          len(steps) == 10 and steps[0] == 0 and steps[-1] == 9,
+          f"{len(steps)} コマ（{steps[0]}〜{steps[-1]}）/ {length:.1f} 秒")
+    check("なめらかさは 30 fps（同じ絵を並べる）",
+          hold == 30 and abs(fps - 30.0) < 1e-9 and abs(length - 10.0) < 1e-9,
+          f"hold={hold} fps={fps:.0f}")
+    steps, hold, fps, length = vr.movie_plan(FakeAnimation(11394),
+                                             seconds=10.0, rate=20.0)
+    check("★再生速度を上げると、その速さで 10 秒ぶん（200 コマ）",
+          len(steps) == 200 and abs(length - 10.0) < 1e-9,
+          f"{len(steps)} コマ / {length:.1f} 秒")
+    steps, hold, fps, length = vr.movie_plan(FakeAnimation(11394), 10.0, 1.0,
+                                             start=100)
+    check("★止めた位置から録れる", steps[0] == 100 and steps[-1] == 109,
+          f"{steps[0]}〜{steps[-1]}")
+    steps, hold, fps, length = vr.movie_plan(FakeAnimation(5), 10.0, 1.0)
+    check("応答が短ければそこで終わる（5 コマ = 5 秒）",
+          len(steps) == 5 and abs(length - 5.0) < 1e-9,
+          f"{len(steps)} コマ / {length:.1f} 秒")
+
+    # ---- ⑤ 左パネルのタブ（ユーザー要望「左の欄もタブで切り替える」）----
+    class FakePanel(vg.ControlPanel):
+        def __init__(self):
+            self.items = []
+            self.controls = []
+            self._group = None
+            self.active_group = None
+
+    panel = FakePanel()
+    panel.begin_group("音線")
+    panel.items.append(vg.PanelItem(10, lambda y: None, None, panel._group))
+    panel.end_group()
+    panel.items.append(vg.PanelItem(10, lambda y: None, None, panel._group))
+    panel.begin_group("音粒子")
+    panel.items.append(vg.PanelItem(10, lambda y: None, None, panel._group))
+    panel.end_group()
+    check("タブの名前が作った順に取れる", panel.groups() == ["音線", "音粒子"],
+          str(panel.groups()))
+    panel.active_group = "音線"
+    visible = [panel._in_active_group(i) for i in panel.items]
+    check("★選んだタブの欄と共通の欄だけ出る", visible == [True, True, False],
+          str(visible))
+    check("高さも選んだタブのぶんだけ数える", panel.content_height() == 20,
+          f"{panel.content_height()} px")
+    panel.active_group = None
+    check("タブを使わない画面では全部出る",
+          all(panel._in_active_group(i) for i in panel.items))
+
+    # ---- ⑥ Tab の輪に虚音源が入る（ユーザー指摘「音線確認画面と並列」）----
     check("★Tab の切り替えに虚音源が入っている",
           "images" in vr.RayParticleView.MODES,
           " → ".join(vr.RayParticleView.MODES))

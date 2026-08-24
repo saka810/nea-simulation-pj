@@ -747,14 +747,13 @@ class FaceEditor:
 
                 # ★**全受音点を一括で向ける**（2026-08-24 ユーザー要望）。
                 #   1 点ずつ回すのは点数が増えると現実的でない
+                # ★**押すだけのボタン**にする（2026-08-24 ユーザー指摘。
+                #   チェックボックスだと「複数選べる設定」に見えてしまう）
                 panel.heading("全受音点を一括で向ける")
-                panel.checkbox("音源側を向く", False,
-                               lambda _v: self.face_all_to_source(),
-                               colour="#ffd166")
+                panel.button("音源側を向く", self.face_all_to_source,
+                             colour="#4a4326")
                 for label, degrees in HEAD_PRESETS:
-                    panel.checkbox(label, False,
-                                   lambda _v, d=degrees: self.face_all(d),
-                                   colour="#4cc9f0")
+                    panel.button(label, lambda d=degrees: self.face_all(d))
 
             # ★操作は**別ウィンドウ（F1）でも全部読める**ようにしてある。
             #   パネルは狭いので、ここには要点だけ短く置く（2026-08-21 ユーザー指摘）
