@@ -548,15 +548,16 @@ def add_controls(plotter, display, sets, panel=None, font=None,
             "l  虚音源と受音点を結ぶ線の表示 ON/OFF",
             "h  室に寄る（虚音源は室の外へ遠く離れるので行き来する）",
             "r  いま描いているもの全部が入るように引く（VTK のキー）",
-            f"数値の枠を押すとその場で打ち込める（Enter で確定・Esc で取り消し）／"
-            f"{vg.VALUE_INPUT_KEY} でまとめて入力",
         ]
         if opacity_control:
             keys.append("o  不透明度の対象を切り替え")
         if save_dir:
             keys.append("g  いまの画面を画像で保存")
         if help_window:
-            keys += ["z / x / c / v  視点（上・正面・横・等角）",
+            # 単独の画面のときだけ。同居するときは音線側の一覧に混ぜてもらう
+            keys += ["数値の枠を押すとその場で打ち込める（Enter 確定 / Esc 取り消し）",
+                     f"▲▼ で 1 段ずつ   {vg.VALUE_INPUT_KEY} でまとめて入力",
+                     "z / x / c / v  視点（上・正面・横・等角）",
                      "PageUp / PageDown  左の欄を送る", "q  閉じる"]
             panel.help_window(keys, title="虚音源 — 操作の一覧", note=IMAGE_NOTE)
         panel.enable_value_input()

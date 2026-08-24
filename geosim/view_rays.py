@@ -1574,7 +1574,6 @@ def view(dxf_path, raylog_path, mode="both", absorption=None, unit=None,
             "▲▼ で 1 段ずつ   t でまとめて入力",
             "k 絞り込みの種類   j 基準点",
                       "0 絞り込みを解除   p 点を拾う（任意）",
-                      f"{vg.VALUE_INPUT_KEY} 値を数字で入力",
                       "z/x/c/v 視点   r リセット   q 終了"]
         if save_dir:
             # ファイル名は**いま何を見ているか**で変える。音粒子は時刻も入れる
