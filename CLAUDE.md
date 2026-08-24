@@ -75,7 +75,7 @@
   書き残しておくと他端末で追いやすい。
 - `PROGRAM_STRUCTURE.md` … 各モジュールの役割・Fortran との変数対応・実装状況・既知のバグ一覧。
   **コードに手を入れたらこの文書も合わせて更新する。**
-- `tests\test_geosim.py` … 数値検証（587 項目）。pytest 不要、素の Python で走る。
+- `tests\test_geosim.py` … 数値検証（595 項目）。pytest 不要、素の Python で走る。
   **数式に関わるコードを変更したら必ず走らせる**：`.venv\Scripts\python tests\test_geosim.py`
 - `TODO.md` … 作業一覧（A〜G にグルーピング）。着手・完了したらチェックボックスを更新する。
 - `docs\pdf\` … **docs の Markdown を PDF にしたもの**（2026-08-23 ユーザー要望
@@ -388,9 +388,20 @@
     逆にすると**枠が数字を覆って読めない**（実際にそうなった）
   - `t` の一括入力も残す（欄ごとは枠を押す）
   - 1 段の幅は表示の桁と範囲から決める（`_default_step`。0〜300 回は 2 ずつ）
-  - ★VTK に「ボタン」が無いのでチェックボックスを流用し、`color_on` と
-    `color_off` を同じ色にして latch して見えないようにする（`_flat_button`）
+  - ★★**テクスチャを使わない**（2026-08-24。実行ログに
+    「Hardware does not support the number of textures defined」が **391 回**出た。
+    `vtkTexturedButtonRepresentation2D` を並べると GPU のテクスチャ上限を超え、
+    シェーダも組めなくなる）。見た目は**文字の背景と枠**
+    （`_label`。`SetBackgroundColor` / `SetFrame`）、押した判定は
+    **クリック座標の当たり判定**（`_hit_area`。`LeftButtonPressEvent` を 1 つだけ
+    見張る）。チェックボックス（レイヤ・吸音材）は数が知れているので流用のまま
+    - 3D 側のクリックは拾わない（回転を邪魔しない）。タブで隠した欄も押せない
   - ★★**作る前に `_panel()` を呼ぶ**（忘れるとモデルの上に四角が並ぶ。実際に踏んだ）
+- ★**画面に渡す吸音率は「計算と同じ決め方」で引く**（2026-08-24。実行ログに
+  「吸音率が未指定のレイヤ → 0.1 を使用」と出ていた）。材料は条件表の
+  「吸音率」シートで決まるので、`absorption_csv` が空でも表は作れる。
+  `run_project._absorption_table_for()` を面の確認（`face_editor.load_model_for`）と
+  可視化（`app._absorption_for`）の両方から呼ぶ
 - ★**保存したことは画面にも出す**（`view_model_gui.notice()`。2026-08-24 ユーザー要望）。
   画面下に色つきで出て 3 秒で消える（VTK のタイマー。`time.sleep` だと固まる）。
   動画の書き出し中は `seconds=None` で出しっぱなしにし、終わってから消す
