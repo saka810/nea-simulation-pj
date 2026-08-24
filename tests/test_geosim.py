@@ -3258,6 +3258,113 @@ def test_image_source_view():
     shutil.rmtree(folder, ignore_errors=True)
 
 
+
+# ------------------------------ 画面の手直し（2026-08-24 ユーザー指摘）
+def test_ui_2026_08_24():
+    print(chr(10) + "[42] 画面の手直し（スピンボックス・一括の向き・動画）")
+    import face_editor as fe
+    import view_model_gui as vg
+    import view_rays as vr
+
+    # ---- ① スピンボックスの 1 段の幅（表示の桁と範囲から決める）----
+    check("整数の欄は 1 ずつ", vg._default_step("%.0f", 0.0, 10.0) == 1.0,
+          f"{vg._default_step('%.0f', 0.0, 10.0)}")
+    check("★範囲が広いときは 1 段を広げる（0〜300 回を 1 ずつは遠い）",
+          vg._default_step("%.0f", 0.0, 300.0) >= 2.0,
+          f"{vg._default_step('%.0f', 0.0, 300.0)}")
+    check("小数 2 桁の欄は 0.01 より粗くしない",
+          vg._default_step("%.2f", 0.0, 1.0) >= 0.01,
+          f"{vg._default_step('%.2f', 0.0, 1.0)}")
+    check("範囲が 0 でも落ちない", vg._default_step("%.1f", 5.0, 5.0) > 0.0)
+
+    # ---- ② 受音点の向きを一括で決める（ユーザー要望）----
+    model, src, rec = load_test_room()
+    editor = fe.FaceEditor(model, head_azimuth=[0.0] * len(model.receiver_points))
+    editor.face_all(90.0)
+    check("★全受音点を同じ方位に向けられる",
+          all(abs(a - 90.0) < 1e-9 for a in editor.head_azimuth),
+          str(editor.head_azimuth))
+    editor.face_all(-30.0)
+    check("負の角度は 0〜360 に直る",
+          all(abs(a - 330.0) < 1e-9 for a in editor.head_azimuth),
+          str(editor.head_azimuth))
+
+    editor.face_all_to_source()
+    source = np.asarray(model.source_points[0], dtype=float)
+    ok = True
+    for k, point in enumerate(model.receiver_points):
+        towards = source - np.asarray(point, dtype=float)
+        want = np.degrees(np.arctan2(towards[1], towards[0])) % 360.0
+        ok = ok and abs(editor.head_azimuth[k] - want) < 1e-9
+    check("★全受音点を音源側へ向けられる（水平面の向き）", ok,
+          " / ".join(f"{a:.1f}°" for a in editor.head_azimuth))
+
+    # 音源と受音点が真上・真下に重なっている点は動かさない（向きが決まらない）
+    above = type(model)()
+    above.mesh = model.mesh
+    above.source_points = [np.array([1.0, 1.0, 0.5])]
+    above.receiver_points = [np.array([1.0, 1.0, 1.5])]
+    above.extents = model.extents
+    editor2 = fe.FaceEditor(above, head_azimuth=[123.0])
+    editor2.face_all_to_source()
+    check("真上・真下に重なる点は動かさない",
+          abs(editor2.head_azimuth[0] - 123.0) < 1e-9,
+          f"{editor2.head_azimuth[0]:.1f}°")
+
+    # ---- ③ 動画の長さと再生速度（ユーザー指摘「反映されていない」）----
+    class FakeAnimation:
+        def __init__(self, frames):
+            self.frames = frames
+            self.times = np.arange(frames) / 1000.0
+
+    # 全部が長さに収まるとき：コマは全部使い、同じ絵を並べて速さを合わせる
+    steps, hold, fps, length = vr.movie_plan(FakeAnimation(10), seconds=10.0,
+                                             rate=1.0)
+    check("★再生速度 1 コマ/秒・長さ 10 秒 → 10 コマ・ちょうど 10 秒",
+          len(steps) == 10 and abs(length - 10.0) < 1e-9,
+          f"{len(steps)} コマ / {length:.1f} 秒 / hold={hold}")
+    check("★動画そのものは 30 fps でなめらか（1 fps の紙芝居にしない）",
+          fps == vr.VIDEO_FPS and hold == 30, f"fps={fps} hold={hold}")
+    check("同じ絵を並べて速さを合わせている（撮る枚数は増えない）",
+          abs(length - len(steps) * hold / fps) < 1e-9)
+
+    # 収まらないときは等間隔に間引く（そのぶん早送り）
+    steps, hold, fps, length = vr.movie_plan(FakeAnimation(200), seconds=10.0,
+                                             rate=1.0)
+    check("★長さに収まらないぶんは間引く（先頭と末尾は残す）",
+          len(steps) == 10 and steps[0] == 0 and steps[-1] == 199,
+          f"{len(steps)} コマ / 最後は {steps[-1]}")
+    check("間引いても長さは指定どおり", abs(length - 10.0) < 1e-9,
+          f"{length:.1f} 秒")
+
+    # 速度を上げれば、同じ長さでも細かく見られる
+    steps, hold, fps, length = vr.movie_plan(FakeAnimation(200), seconds=10.0,
+                                             rate=20.0)
+    check("★再生速度を上げると同じ長さで全コマ入る",
+          len(steps) == 200 and abs(length - 10.0) < 1e-9,
+          f"{len(steps)} コマ / {length:.1f} 秒 / hold={hold} / fps={fps:.0f}")
+    check("★fps は速さの整数倍（30 で割り切れなくても長さがずれない）",
+          abs(fps - 20.0 * hold) < 1e-9 and 20.0 <= fps <= 120.0,
+          f"fps={fps:.0f} hold={hold}")
+
+    # 長さを伸ばしても、速度が同じなら 1 秒あたりに進むコマ数は変わらない
+    steps, hold, fps, length = vr.movie_plan(FakeAnimation(200), seconds=20.0,
+                                             rate=1.0)
+    check("長さを 2 倍にすると入るコマも 2 倍",
+          len(steps) == 20 and abs(length - 20.0) < 1e-9,
+          f"{len(steps)} コマ / {length:.1f} 秒")
+
+    check("★動画は MP4（iPad などでそのまま再生できる形式）",
+          vr.VIDEO_SUFFIX == ".mp4", vr.VIDEO_SUFFIX)
+
+    # ---- ④ Tab の輪に虚音源が入る（ユーザー指摘「音線確認画面と並列」）----
+    check("★Tab の切り替えに虚音源が入っている",
+          "images" in vr.RayParticleView.MODES,
+          " → ".join(vr.RayParticleView.MODES))
+    check("見せ方の名前がそろっている",
+          set(vr.RayParticleView.MODE_LABEL) == set(vr.RayParticleView.MODES))
+
+
 def main():
     print("geosim 数値検証")
     print(f"  Python {sys.version.split()[0]} / numpy {np.__version__}")
@@ -3278,7 +3385,8 @@ def main():
                test_speech_transmission_index, test_condition_table,
                test_workbook, test_path_reuse, test_conditions_batch,
                test_panel_scroll, test_empty_model, test_impulse_fast,
-               test_measurement_points, test_image_source_view):
+               test_measurement_points, test_image_source_view,
+               test_ui_2026_08_24):
         fn()
 
     failed = [name for name, ok in _results if not ok]

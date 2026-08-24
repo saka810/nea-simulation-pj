@@ -27,3 +27,12 @@ pyvista>=0.44,<1
 # 結果一式の Excel（.xlsx）出力。geosim/workbook.py が使う。
 # **CSV 出力はこれが無くても動く**（Excel だけ作れなくなる）
 openpyxl>=3.1,<4
+
+# 音粒子の動画を **MP4（H.264）**で書き出す。geosim/view_rays.py が使う。
+# ★2026-08-24 に追加（ユーザー要望「GIF ではなく、再生・停止が押せる形式、
+#   できれば iPad などでも見れる形式で保存して欲しい」）。
+#   imageio-ffmpeg は ffmpeg の実行ファイルを同梱しているので、
+#   別途 ffmpeg を入れる必要はない（約 31 MB）。
+# **これが無くても止まらない**（GIF に落ちて、そのことを知らせる）
+imageio>=2.31,<3
+imageio-ffmpeg>=0.4,<1

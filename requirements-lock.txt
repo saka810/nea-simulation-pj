@@ -1,4 +1,4 @@
-# 2026-08-21 に HBN240018（Windows 11 / Python 3.10.11）で動作確認した厳密な組み合わせ。
+# 2026-08-24 に HBN240018（Windows 11 / Python 3.10.11）で動作確認した厳密な組み合わせ。
 # 端末間で挙動を完全に揃えたいときはこちらを使う:
 #     pip install -r requirements-lock.txt
 # 普段は requirements.txt でよい（間接依存まで固定すると更新が面倒なため）。
@@ -12,6 +12,8 @@ docstring_parser==0.18.0
 et_xmlfile==2.0.0
 fonttools==4.63.0
 idna==3.18
+imageio-ffmpeg==0.6.0
+imageio==2.37.4
 kiwisolver==1.5.0
 markdown-it-py==4.2.0
 matplotlib==3.10.9
@@ -27,8 +29,8 @@ pyparsing==3.3.2
 python-dateutil==2.9.0.post0
 pyvista==0.48.4
 requests==2.34.2
-rich==15.0.0
 rich-rst==2.1.0
+rich==15.0.0
 scipy==1.15.3
 scooby==0.11.2
 six==1.17.0

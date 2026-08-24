@@ -21,7 +21,7 @@
     # 片方だけにする
     python view_rays.py ..\\test.dxf ..\\結果\\test_raylog.npz --mode particles
     # GIF に書き出す
-    python view_rays.py ..\\test.dxf ..\\結果\\test_raylog.npz --mode particles --movie 広がり.gif
+    python view_rays.py ..\\test.dxf ..\\結果\\test_raylog.npz --mode particles --movie 広がり.mp4
 
 **画面は左右に分かれている**（2026-08-15）。左 1/4 が操作パネル、右 3/4 が 3D 表示。
 以前は 3D の上に操作系を重ねていたため、モデルが見えなくなるうえ
@@ -655,16 +655,36 @@ class RayParticleView:
     進めたままだと、見えていないのに毎フレーム位置計算が走ることになる。
     """
 
-    MODES = ("rays", "particles")
+    # ★**虚音源も同じ Tab の輪に入れる**（2026-08-24 ユーザー指摘
+    #   「虚音源を見るが最初の画面にあるのはなぜですか？
+    #     音線確認画面と並列にある想定です」）。
+    #   同じ計算結果の 3 つの見せ方なので、同居させて切り替えるのが素直
+    MODES = ("rays", "particles", "images")
+    MODE_LABEL = {"rays": "音線", "particles": "音粒子", "images": "虚音源"}
 
-    def __init__(self, plotter, animation=None, rays=None, mode="rays", panel=None):
+    def __init__(self, plotter, animation=None, rays=None, mode="rays", panel=None,
+                 images=None):
         self.plotter = plotter
         self.animation = animation
         self.rays = rays
-        self.mode = mode if mode in self.MODES else "rays"
+        self.images = images
+        self.modes = [m for m in self.MODES
+                      if (m != "images" or images is not None)
+                      and (m != "particles" or animation is not None)
+                      and (m != "rays" or rays is not None)]
+        self.mode = mode if mode in self.modes else self.modes[0]
         self._was_playing = True
-        panel.heading("表示の切り替え")
+        panel.heading("表示の切り替え（Tab）")
         self.label = panel.reserve_text(4)      # 音粒子のときは 4 行になる
+        # ★**この欄はパネルのいちばん上へ動かす**（2026-08-24）。
+        #   作った順に上から積まれる仕組みなので、素直に作ると
+        #   「表示の切り替え」が下のほうに埋まって**ページを送らないと見えない**。
+        #   いま何を見ているかは最初に目に入るべきものなので、先頭に差し替える
+        moved = panel.items[-2:]
+        del panel.items[-2:]
+        # 題名とサマリ（3 行）のすぐ下に差し込む。題名より上に出すと落ち着かない
+        head = min(3, len(panel.items))
+        panel.items[head:head] = moved
         self.apply(render=False)
 
     def _scalar_bar(self, title):
@@ -679,6 +699,8 @@ class RayParticleView:
 
     def apply(self, render=True):
         rays = self.mode == "rays"
+        particles = self.mode == "particles"
+        images = self.mode == "images"
 
         if self.rays is not None:
             self.rays.set_visible(rays)
@@ -686,33 +708,39 @@ class RayParticleView:
             self._set_visible(self._scalar_bar(title), rays)
 
         if self.animation is not None:
-            self._set_visible(self.animation.actor, not rays)
-            self._set_visible(self.animation.label, not rays)
-            self._set_visible(self._scalar_bar(PARTICLE_BAR_TITLE), not rays)
+            self._set_visible(self.animation.actor, particles)
+            self._set_visible(self.animation.label, particles)
+            self._set_visible(self._scalar_bar(PARTICLE_BAR_TITLE), particles)
             slider = getattr(self.animation, "slider", None)
             if slider is not None:
-                slider.On() if not rays else slider.Off()
-            if rays:
+                slider.On() if particles else slider.Off()
+            if not particles:
                 # 隠している間は止めておく（見えないコマを進めても意味がない）
                 self._was_playing = self.animation.playing
                 self.animation.playing = False
             else:
                 self.animation.playing = self._was_playing
 
+        if self.images is not None:
+            self.images.set_visible(images, render=False)
+
         self._refresh_label()
         if render:
             self.plotter.render()
 
     def _refresh_label(self):
-        if self.mode == "rays":
-            text = "いま: 音線\nTab で音粒子へ"
-        else:
-            text = ("いま: 音粒子\nTab で音線へ\n"
-                    "スペース 再生/停止\n← → コマ送り   Home 先頭")
+        following = self.modes[(self.modes.index(self.mode) + 1) % len(self.modes)]
+        text = (f"いま: {self.MODE_LABEL[self.mode]}\n"
+                f"Tab で{self.MODE_LABEL[following]}へ")
+        if self.mode == "particles":
+            text += "\nスペース 再生/停止\n← → コマ送り   Home 先頭"
+        elif self.mode == "images":
+            text += "\n下の「虚音源」の欄で絞る\nw 受音点   h 室に寄る"
         ParticleAnimation._set_text(self.label, text)
 
     def toggle(self):
-        self.mode = "particles" if self.mode == "rays" else "rays"
+        """Tab で次の見せ方へ（音線 → 音粒子 → 虚音源 → 音線 …）。"""
+        self.mode = self.modes[(self.modes.index(self.mode) + 1) % len(self.modes)]
         self.apply()
 
 
@@ -1089,62 +1117,167 @@ def run_animation(plotter, animation, interval=30):
     return animation
 
 
+VIDEO_SUFFIX = ".mp4"
+VIDEO_QUALITY = 8          # imageio の目安（1〜10。8 で見た目と容量の釣り合いが良い）
+
+
+def write_video(path, images, fps, hold=1, quality=VIDEO_QUALITY):
+    """コマ（RGB の配列）を **MP4（H.264）**にする。書けたパスを返す。
+
+    ★**GIF をやめた理由**（2026-08-24 ユーザー指摘）：
+    「GIF の画質が粗すぎる」「再生・停止が押せる形式、できれば iPad でも見れる形式」。
+    GIF は色数 256 が上限で、粒子の色分けが潰れる。再生・停止もできない。
+    **MP4（H.264）**なら iPad・iPhone・Windows・ブラウザのどれでも
+    そのまま再生でき、プレイヤーの再生・停止・シークが使える。
+
+    書き出しには `imageio` ＋ `imageio-ffmpeg`（ffmpeg の実行ファイル同梱）を使う。
+    入っていなければ GIF に落として、そのことを知らせる（止めない）。
+    """
+    try:
+        import imageio.v2 as imageio
+    except ImportError:
+        return _write_gif_fallback(path, images, fps, hold)
+
+    try:
+        # macro_block_size … H.264 は縦横が 16 の倍数だと素直に通る。
+        #   端数は imageio が黒で埋めてくれる（切り落とさない）
+        writer = imageio.get_writer(path, fps=max(1.0, float(fps)), codec="libx264",
+                                    quality=quality, macro_block_size=16,
+                                    ffmpeg_params=["-pix_fmt", "yuv420p"])
+    except Exception as error:
+        print(f"[view_rays] MP4 が作れないので GIF にします（{type(error).__name__}）")
+        return _write_gif_fallback(path, images, fps, hold)
+
+    try:
+        for image in images:
+            frame = np.asarray(image)
+            # ★同じ絵を `hold` 枚並べて「進む速さ」を合わせる（`movie_plan` 参照）
+            for _ in range(max(1, int(hold))):
+                writer.append_data(frame)
+    finally:
+        writer.close()
+    return path
+
+
+def _write_gif_fallback(path, images, fps, hold=1):
+    """`imageio` が無いときの保険。GIF で書く（画質は落ちる）。
+
+    GIF は 1 コマの表示時間を指定できるので、`hold` は時間に読み替える。
+    """
+    from PIL import Image
+
+    path = os.path.splitext(path)[0] + ".gif"
+    frames = [Image.fromarray(np.asarray(f)).convert(
+        "P", palette=Image.ADAPTIVE, colors=128) for f in images]
+    interval = max(20, int(round(1000.0 * max(1, int(hold))
+                                 / max(1.0, float(fps)))))
+    frames[0].save(path, save_all=True, append_images=frames[1:],
+                   duration=interval, loop=0, optimize=True)
+    print("[view_rays] ※ imageio が無いので GIF にしました"
+          "（`pip install -r requirements.txt` で MP4 になります）")
+    return path
+
+
+# 動画そのもののコマ数 [コマ/秒]。**なめらかさ**を決めるだけの値で、
+# 音粒子が進む速さ（再生速度）とは別（下の `movie_plan` を参照）
+VIDEO_FPS = 30.0
+
+
+def movie_plan(animation, seconds, rate, max_shots=900):
+    """動画の作り方を決める。`(撮るコマ, 各コマを何枚並べるか, fps, 長さ)` を返す。
+
+    ★ここが 2026-08-24 の指摘「動画の長さや再生速度が反映されていない」の要。
+    それまでは GIF の 1 コマの表示時間を長さから割り出すだけで、
+    **再生速度（コマ/秒）は画面の再生にしか効いていなかった**。
+
+    ★★**「進む速さ」と「動画のなめらかさ」を分ける**のが要点。
+    再生速度をそのまま動画の fps にすると、既定の 1 コマ/秒では
+    **1 fps の紙芝居**になってしまう（実際にそうなった）。
+
+    | 設定 | 動画での意味 |
+    |---|---|
+    | **再生速度 [コマ/秒]** | 音粒子が 1 秒間に進むコマ数。**画面で見ているとおりの速さ** |
+    | **動画の長さ [s]** | 上限。収まらないぶんは**等間隔に間引く**（そのぶん早送り） |
+    | `VIDEO_FPS`（30） | 動画のコマ数。同じ絵を `hold` 枚並べて速さを合わせる |
+
+    つまり「画面で見ている速さのまま、指定した長さで収まる、なめらかな動画」。
+    撮る枚数は `len(steps)` だけなので、`hold` を増やしても撮る手間は増えない
+    （同じ絵を並べるだけ。H.264 なら容量もほとんど増えない）。
+    """
+    total = min(int(animation.frames), len(animation.times))
+    rate = max(0.1, float(rate))
+    want = max(1, int(round(float(seconds) * rate)))         # 長さに収まるコマ数
+    if total <= want:
+        steps = np.arange(total)
+    else:
+        steps = np.unique(np.linspace(0, total - 1, want).round().astype(int))
+    if len(steps) > max_shots:           # 保険（撮る枚数の頭打ち）
+        steps = np.unique(np.linspace(0, len(steps) - 1,
+                                      max_shots).round().astype(int))
+        rate = len(steps) / max(1e-9, float(seconds))
+    # ★**動画の fps は「進む速さ」の整数倍**にする。
+    #   同じ絵を `hold` 枚並べて速さを合わせる仕組みなので、`hold` は整数。
+    #   fps を 30 に固定すると `hold = 30/rate` が割り切れず**長さがずれる**
+    #   （速さ 20 コマ/秒・長さ 10 秒で 13.3 秒になった）。
+    #   fps = rate × hold にすれば長さは `コマ数 ÷ 速さ` で厳密に合う
+    hold = max(1, int(round(VIDEO_FPS / rate)))
+    fps = float(min(120.0, max(1.0, rate * hold)))
+    return steps, hold, fps, len(steps) * hold / fps
+
+
 def add_movie_key(plotter, animation, folder, stem="音粒子", key="b",
-                  max_width=720, max_frames=400, duration=40, colors=128,
-                  movie_setting=None):
-    """`b` で、**いまの視点・いまの設定のまま**音粒子の動画（GIF）を保存する。
+                  max_width=1280, movie_setting=None, play_setting=None):
+    """`b` で、**いまの視点・いまの設定のまま**音粒子の動画（MP4）を保存する。
 
     `save_movie()` が別に off-screen で作り直すのと違い、こちらは
     **画面に出ているウィンドウをそのまま録る**。回して見つけた角度や、
     絞った粒子数・離散化時間がそのまま動画になる。
 
-    GIF にしているのは追加の依存を増やさないため（Pillow は matplotlib の依存で
-    既に入っている。mp4 には ffmpeg が要る）。
-
-    そのぶんの制約:
-      ・`max_width` に縮めて、コマごとに 128 色へ落とす（GIF の色数上限は 256）
-      ・コマ数は `max_frames` で頭打ちにして等間隔に間引く
-        （離散化時間を 0.2 ms にすると 3 秒で 15000 コマになり、
-          そのまま溜めるとメモリが持たない）
+    ★**書き出し中は画面に「動画を作っています」と出す**（2026-08-24 ユーザー要望）。
+    コマを 1 枚ずつ撮る間は画面が止まるので、出しておかないと固まったように見える。
     """
     def save():
-        from PIL import Image
-
-        path = vg.next_free_path(folder, stem, ".gif")
-        # `frames` と `times` は `set_time_step()` が揃えているが、
-        # 食い違っていても落ちないように短いほうに合わせる
-        total = min(int(animation.frames), len(animation.times))
-        steps = np.arange(total)
-        if total > max_frames:
-            steps = np.unique(np.linspace(0, total - 1,
-                                          max_frames).round().astype(int))
-            print(f"[view_rays] コマが多いので {total} → {len(steps)} に"
-                  f"間引きます（動画の長さは変わりません）")
-
-        # ★**動画の長さを決める**（2026-08-21 ユーザー要望。長いと容量が大きい）。
-        #   コマ数は上で間引いてあるので、1 コマの表示時間を長さから割り出す
+        path = vg.next_free_path(folder, stem, VIDEO_SUFFIX)
         seconds = float((movie_setting or {}).get("seconds",
                                                   DEFAULT_MOVIE_SECONDS))
-        interval = max(20, int(round(seconds * 1000.0 / max(1, len(steps)))))
+        # 進む速さは**画面の再生速度そのまま**（スピンボックスで変えた値が効く）
+        rate = float((play_setting or {}).get("rate",
+                                              getattr(animation,
+                                                      "frames_per_second",
+                                                      DEFAULT_PLAY_FPS)))
+        steps, hold, fps, length = movie_plan(animation, seconds, rate)
+        total = min(int(animation.frames), len(animation.times))
+        thinned = len(steps) < total
 
         playing, keep = animation.playing, animation.step
         animation.playing = False
-        print(f"[view_rays] 動画を作っています（{len(steps)} コマ）…")
+        message = (f"動画を作っています… {len(steps)} コマ / "
+                   f"{length:.1f} 秒 / {rate:.1f} コマ/秒")
+        print(f"[view_rays] {message}")
+        if thinned:
+            print(f"[view_rays] 指定の長さに収めるため {total} → {len(steps)} コマに"
+                  f"間引きます（そのぶん早送りになります）")
+        # ★出したまま（`seconds=None`）にして、終わってから消す
+        vg.notice(plotter, message, kind="busy", seconds=None)
 
         images = []
         try:
             for step in steps:
                 animation.update(int(step))
-                image = Image.fromarray(plotter.screenshot(return_img=True))
-                if image.width > max_width:
-                    height = round(image.height * max_width / image.width)
-                    image = image.resize((max_width, height), Image.LANCZOS)
-                images.append(image.convert("P", palette=Image.ADAPTIVE,
-                                            colors=colors))
-            images[0].save(path, save_all=True, append_images=images[1:],
-                           duration=interval, loop=0, optimize=True)
+                image = plotter.screenshot(return_img=True)
+                if max_width and image.shape[1] > max_width:
+                    from PIL import Image
+
+                    picture = Image.fromarray(image)
+                    height = round(picture.height * max_width / picture.width)
+                    image = np.asarray(picture.resize((max_width, height),
+                                                      Image.LANCZOS))
+                images.append(image)
+            path = write_video(path, images, fps, hold=hold)
         except Exception as e:
             print(f"[view_rays] 動画を保存できませんでした: {type(e).__name__}: {e}")
+            vg.notice(plotter, f"動画を保存できませんでした（{type(e).__name__}）",
+                      kind="error")
             return None
         finally:
             animation.update(keep)
@@ -1152,8 +1285,10 @@ def add_movie_key(plotter, animation, folder, stem="音粒子", key="b",
 
         size = os.path.getsize(path) / 1e6
         print(f"[view_rays] 動画を保存しました: {path}"
-              f"（{len(images)} コマ / {len(images) * interval / 1000.0:.1f} 秒 / "
-              f"{size:.1f} MB）")
+              f"（{len(images)} コマ / {length:.1f} 秒 / "
+              f"{rate:.1f} コマ/秒 / {size:.1f} MB）")
+        vg.notice(plotter, f"動画を保存しました: {os.path.basename(path)}"
+                           f"（{length:.1f} 秒 / {size:.1f} MB）")
         return path
 
     plotter.add_key_event(key, save)
@@ -1161,14 +1296,13 @@ def add_movie_key(plotter, animation, folder, stem="音粒子", key="b",
 
 
 def save_movie(raylog, model, filename, index=None, frames=240, band=None,
-               point_size=9.0, opacity=0.12, window_size=(960, 720), duration=40):
-    """音粒子アニメーションを GIF に書き出す。
+               point_size=9.0, opacity=0.12, window_size=(1280, 900),
+               rate=DEFAULT_PLAY_FPS, seconds=DEFAULT_MOVIE_SECONDS):
+    """音粒子アニメーションを **MP4** に書き出す（画面を開かずに）。
 
-    追加の依存を増やさないよう、コマを画像として集めて Pillow で GIF にする
-    （Pillow は matplotlib の依存で既に入っている）。
+    2026-08-24 に GIF から MP4 へ変えた（`write_video` の説明を参照）。
+    長さと再生速度の扱いは画面から保存するときと同じ（`movie_plan`）。
     """
-    from PIL import Image
-
     # 動画はパネル無しで（3D だけを大きく写す）
     plotter = vg.build_plotter(model, title="音粒子", off_screen=True,
                                show_normals=False, opacity=opacity,
@@ -1177,15 +1311,24 @@ def save_movie(raylog, model, filename, index=None, frames=240, band=None,
                                   band=band, point_size=point_size)
     plotter.view_isometric()
 
+    steps, hold, fps, length = movie_plan(animation, seconds, rate)
     images = []
-    for step in range(frames):
-        animation.update(step)
-        images.append(Image.fromarray(plotter.screenshot(return_img=True)))
+    for step in steps:
+        animation.update(int(step))
+        images.append(plotter.screenshot(return_img=True))
     plotter.close()
 
-    images[0].save(filename, save_all=True, append_images=images[1:],
-                   duration=duration, loop=0, optimize=True)
-    return filename
+    if os.path.splitext(filename)[1].lower() not in (".mp4", ".gif"):
+        filename = os.path.splitext(filename)[0] + VIDEO_SUFFIX
+    path = write_video(filename, images, fps, hold=hold)
+    print(f"[view_rays] {len(images)} コマ / {length:.1f} 秒 / "
+          f"{rate:.1f} コマ/秒（動画は {fps:.0f} fps）")
+    if len(steps) < min(int(animation.frames), len(animation.times)):
+        print(f"[view_rays] 指定の長さに収めるため "
+              f"{min(int(animation.frames), len(animation.times))} → "
+              f"{len(steps)} コマに間引きました（そのぶん早送りになります）。"
+              f"細かく見たいときは再生速度か動画の長さを上げてください")
+    return path
 
 
 # ------------------------------------------------------------------------------
@@ -1197,7 +1340,7 @@ def view(dxf_path, raylog_path, mode="both", absorption=None, unit=None,
          max_particles=None, pool_size=2000,
          max_reflection=None, colour="energy", band=None, frames=240,
          opacity=0.12, layer_opacity=None, movie=None, point_size=9.0,
-         screenshot=None, interval=30, save_dir=None):
+         screenshot=None, interval=30, save_dir=None, image_sets=None):
     """モデルの上に音線と音粒子を重ねて表示する。
 
     max_rays / max_particles
@@ -1319,15 +1462,34 @@ def view(dxf_path, raylog_path, mode="both", absorption=None, unit=None,
                           receiver=(model.receiver_points[0]
                                     if model.receiver_points else None))
 
+        # ★虚音源も同じウィンドウに置き、Tab の輪に入れる（2026-08-24）。
+        #   同じ計算結果の見せ方なので、別の入口にしないほうが分かりやすい
+        images, image_keys = None, []
+        if image_sets:
+            import view_images as vi
+
+            room_bounds = tuple(plotter.bounds)
+            vi._add_room_outline(plotter, model)
+            panel.heading("虚音源")
+            image_label = panel.reserve_text(3, size=9)
+            images = vi.ImageSourceDisplay(plotter, image_sets, label=image_label)
+            # `m`（不透明度の表示 ON/OFF）と `g`（画像保存）は音線側が持っているので、
+            # 色は `i`、画像保存とヘルプは渡さない
+            _, image_keys = vi.add_controls(
+                plotter, images, image_sets, panel=panel, font=font,
+                room_bounds=room_bounds, opacity_control=False,
+                colour_key="i", help_window=False)
+            images.set_visible(False, render=False)
+
         switch = None
-        if mode == "both":
-            # 音線と音粒子を同居させて Tab で切り替える
+        if mode == "both" or images is not None:
+            # 音線・音粒子・虚音源を同居させて Tab で切り替える
             switch = RayParticleView(plotter, animation=animation, rays=rays,
-                                     mode="rays", panel=panel)
+                                     mode="rays", panel=panel, images=images)
             plotter.add_key_event("Tab", switch.toggle)
 
         # ---- いまの画面をそのまま保存する（G-12）----
-        help_lines = ["k 絞り込みの種類   j 基準点",
+        help_lines = list(image_keys) + ["k 絞り込みの種類   j 基準点",
                       "0 絞り込みを解除   p 点を拾う（任意）",
                       f"{vg.VALUE_INPUT_KEY} 値を数字で入力",
                       "z/x/c/v 視点   r リセット   q 終了"]
@@ -1434,7 +1596,7 @@ def main():
                         "指定しないレイヤは --opacity を使う")
     p.add_argument("--interval", type=int, default=30,
                    help="アニメーションのコマ間隔 [ms]")
-    p.add_argument("--movie", help="GIF に書き出す（ウィンドウを開かない）")
+    p.add_argument("--movie", help="MP4 に書き出す（ウィンドウを開かない）")
     p.add_argument("--screenshot", help="静止画に書き出す（ウィンドウを開かない）")
     a = p.parse_args()
 

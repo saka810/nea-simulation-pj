@@ -125,6 +125,11 @@ SHELL_ROLE_NAMES = {"outer": "外殻（容積を囲む）",
 # 開いた辺の色。穴なのか T 字接合なのかを目で確かめるために重ねて描く
 OPEN_EDGE_COLOR = "#e5484d"
 # 同一平面パッチの輪郭の色（三角形の割れ目は描かず、これだけを描く）
+# ★全受音点を一括で向けるときの方位（2026-08-24 ユーザー要望「四方に一括で向く」）。
+#   0° = +X、反時計回り（`project.head_azimuth` と同じ約束）
+HEAD_PRESETS = [("+X 方向（0°）", 0.0), ("+Y 方向（90°）", 90.0),
+                ("−X 方向（180°）", 180.0), ("−Y 方向（270°）", 270.0)]
+
 PATCH_EDGE_COLOR = "#3a4150"
 
 # 受音点の正面方向の矢印。**いま調整している点**とそれ以外を色で分ける
@@ -740,6 +745,17 @@ class FaceEditor:
                               if len(self.head_azimuth) > 1 else "黄色い矢印が正面です"),
                            size=8)
 
+                # ★**全受音点を一括で向ける**（2026-08-24 ユーザー要望）。
+                #   1 点ずつ回すのは点数が増えると現実的でない
+                panel.heading("全受音点を一括で向ける")
+                panel.checkbox("音源側を向く", False,
+                               lambda _v: self.face_all_to_source(),
+                               colour="#ffd166")
+                for label, degrees in HEAD_PRESETS:
+                    panel.checkbox(label, False,
+                                   lambda _v, d=degrees: self.face_all(d),
+                                   colour="#4cc9f0")
+
             # ★操作は**別ウィンドウ（F1）でも全部読める**ようにしてある。
             #   パネルは狭いので、ここには要点だけ短く置く（2026-08-21 ユーザー指摘）
             keys = [
@@ -883,6 +899,63 @@ class FaceEditor:
             self._say("選択から面番号を取れませんでした")
             return
         self.select(np.concatenate(ids))
+
+    def face_all(self, degrees, render=True):
+        """★**全受音点を同じ方位へ向ける**（2026-08-24 ユーザー要望）。
+
+        「四方に一括で向く」ためのもの。矢印もまとめて描き直す。
+        """
+        if not self.head_azimuth:
+            return None
+        self.head_azimuth = [float(degrees) % 360.0 for _ in self.head_azimuth]
+        self._after_bulk_head(f"全受音点を {float(degrees) % 360.0:.0f}° に向けました",
+                              render=render)
+        return self.head_azimuth
+
+    def face_all_to_source(self, render=True):
+        """★**全受音点を音源側へ向ける**（2026-08-24 ユーザー要望）。
+
+        受音点から音源を見込む向き（水平面）を各点ごとに出す。
+        上下は扱わない（実務では水平面で足りる、というユーザー判断）ので、
+        **XY 平面へ投影**してから方位を取る。
+        音源と受音点が真上・真下に重なっている点は動かさない（向きが決まらない）。
+        """
+        if not self.head_azimuth or not self.model.receiver_points:
+            return None
+        source = self._source_point()
+        if source is None:
+            self._notice("音源が分からないので向けられません（src レイヤか条件を確認）",
+                         kind="error")
+            return None
+        moved = 0
+        for k, point in enumerate(self.model.receiver_points):
+            towards = np.asarray(source, dtype=float) - np.asarray(point, dtype=float)
+            if float(np.hypot(towards[0], towards[1])) < 1.0e-9:
+                continue                # 真上・真下に重なっている（向きが決まらない）
+            self.head_azimuth[k] = float(
+                np.degrees(np.arctan2(towards[1], towards[0])) % 360.0)
+            moved += 1
+        self._after_bulk_head(f"{moved} 点を音源側へ向けました", render=render)
+        return self.head_azimuth
+
+    def _source_point(self):
+        """音源の位置（条件で指定があればそれ、無ければ DXF の src レイヤ）。"""
+        if getattr(self, "source_point", None) is not None:
+            return np.asarray(self.source_point, dtype=float)
+        points = getattr(self.model, "source_points", None)
+        return np.asarray(points[0], dtype=float) if points else None
+
+    def _after_bulk_head(self, message, render=True):
+        """一括で向きを変えたあとの後始末（矢印・スピンボックス・知らせ）。"""
+        self.set_head_azimuth(self.head_azimuth[self.head_index], render=render)
+        if self.head_slider is not None:
+            self.head_slider["show"](self.head_azimuth[self.head_index])
+        self._notice(message)
+        print(f"[面の確認] {message}")
+
+    def _notice(self, message, kind="ok"):
+        if self.plotter is not None:
+            vg.notice(self.plotter, message, kind=kind)
 
     def set_head_azimuth(self, degrees, render=True):
         """**いま選んでいる受音点**の正面方向を変え、矢印を描き直す。

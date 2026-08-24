@@ -64,7 +64,18 @@ def _visualise(project, results=None):
         # ※「音線がどう飛ぶか」（球状に出ている様子）は室形状と関係ないので、
         #   条件入力の「音線の飛び方を見る」（view_directions.py）で見る。
         #   こちらで全音線を描くと室内が線で埋まって読めなくなる
-        vr.view(project.dxf_path, raylog, mode="both",
+        # ★虚音源も同じウィンドウに置く（Tab で切り替え。2026-08-24 ユーザー指摘
+        #   「音線確認画面と並列にある想定です」）。
+        #   パルス列から復元するだけなので計算はやり直さない。
+        #   読めなくても音線の画面は開けるようにする（保険）
+        image_sets = None
+        try:
+            import view_images as vi
+            image_sets = vi.load_sets(project, verbose=True)
+        except Exception as error:
+            print(f"[app] 虚音源は開けません（{type(error).__name__}: {error}）")
+
+        vr.view(project.dxf_path, raylog, mode="both", image_sets=image_sets,
                 absorption=project.absorption_path,
                 unit=project.unit, band_number=project.band_number,
                 orient_normals=project.orient_normals,

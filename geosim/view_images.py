@@ -208,6 +208,7 @@ class ImageSourceDisplay:
         self.opacity = opacity
         self.label = label
         self.show_lines = True
+        self.visible = True
         self.actors = []
         self.receiver_actors = []
         self.rebuild(render=False)
@@ -292,7 +293,29 @@ class ImageSourceDisplay:
                    if not flat else paint)))
 
         self._draw_receivers()
+        # 隠している間に作り直しても、隠れたままにする（Tab で戻したら見える）
+        if not self.visible:
+            for actor in self.actors + self.receiver_actors:
+                actor.SetVisibility(False)
         self._update_label(len(index))
+        if render:
+            self.plotter.render()
+
+    def set_visible(self, flag, render=True):
+        """★**表示の ON/OFF**（音線の画面と Tab で切り替えるために要る。2026-08-24）。
+
+        隠している間も持ち物は残しておく（作り直さずに戻せるように）。
+        """
+        self.visible = bool(flag)
+        for actor in self.actors + self.receiver_actors:
+            actor.SetVisibility(self.visible)
+        for title in COLOUR_BAR_TITLE.values():
+            try:
+                self.plotter.scalar_bars[title].SetVisibility(self.visible)
+            except (KeyError, AttributeError):
+                pass
+        if self.label is not None:
+            self.label.SetVisibility(self.visible)
         if render:
             self.plotter.render()
 
@@ -440,13 +463,46 @@ def view(dxf_path, sets, absorption=None, unit=None, band_number=None,
     label = None
     if panel is not None:
         # ★題名は `build_plotter` がすでに出しているので、ここでは出さない
-        #   （出すと同じ文字が 2 回並ぶ）
         panel.heading("いま描いているもの")
         label = panel.reserve_text(3, size=9)
 
     display = ImageSourceDisplay(plotter, sets, index=receiver, start=start,
                                  end=end, count=count, mode=mode, label=label)
+    add_controls(plotter, display, sets, panel=panel, font=font,
+                 room_bounds=room_bounds, save_dir=save_dir, fit=fit,
+                 opacity_control=True)
 
+    if off_screen:
+        plotter.show(auto_close=False)
+        plotter.screenshot(screenshot)
+        print(f"[虚音源] 画像を保存しました: {screenshot}")
+        vg.release_window(plotter, display)
+        return display
+
+    plotter.show()
+    vg.release_window(plotter, display)
+    return display
+
+
+def add_controls(plotter, display, sets, panel=None, font=None,
+                 room_bounds=None, save_dir=None, fit="all",
+                 opacity_control=True, colour_key="m", help_window=True):
+    """虚音源のスピンボックスとキーを組み立て、`(display, 操作の一覧)` を返す。
+
+    ★**虚音源だけの画面（`view_images.view`）と、音線・音粒子と同居する画面
+    （`view_rays.view`）の両方から呼ぶ**ので関数にしてある
+    （2026-08-24 ユーザー指摘「虚音源を見るが最初の画面にあるのはなぜですか？
+    音線確認画面と並列にある想定です」）。
+
+    同居する画面では、すでにあるものと**取り合いにならないように**外から指定する。
+
+    | 引数 | 同居する画面では | なぜ |
+    |---|---|---|
+    | `opacity_control` | False | 不透明度の欄は音線側が作っている |
+    | `colour_key` | `"i"` | `m` は不透明度の表示 ON/OFF が使っている |
+    | `help_window` | False | F1 は音線側が持っている（一覧に混ぜてもらう） |
+    | `save_dir` | None | 画像保存の `g` も音線側が持っている |
+    """
     if panel is not None:
         limit = display.order_limit
         if len(sets) > 1:
@@ -475,63 +531,67 @@ def view(dxf_path, sets, absorption=None, unit=None, band_number=None,
         panel.slider("本数", [1.0, float(min(POOL_SIZE, max(len(s) for s in sets)))],
                      float(display.count), display.set_count, fmt="%.0f")
 
-        vg.add_opacity_control(plotter, font=font, panel=panel, target_key="o")
+        if opacity_control:
+            vg.add_opacity_control(plotter, font=font, panel=panel, target_key="o")
 
-        panel.heading("操作")
-        panel.text("w 受音点を切り替え   m 色を切り替え\n"
-                   "l 線の表示 ON/OFF   o 不透明度の対象\n"
-                   "z / x / c / v 視点   q 閉じる", size=8, color="#7f8794")
+        panel.heading("虚音源の操作")
+        panel.text(f"w 受音点を切り替え   {colour_key} 色を切り替え\n"
+                   "l 線の表示 ON/OFF\n"
+                   "h 室に寄る   r 全部が入る", size=8, color="#7f8794")
         keys = [
             "w  受音点を切り替え（濃い水色がいま選んでいる点）",
-            "m  色（反射回数 / エネルギー / 到来時刻）",
+            f"{colour_key}  虚音源の色（反射回数 / エネルギー / 到来時刻）",
             "l  虚音源と受音点を結ぶ線の表示 ON/OFF",
             "h  室に寄る（虚音源は室の外へ遠く離れるので行き来する）",
             "r  いま描いているもの全部が入るように引く（VTK のキー）",
-            "o  不透明度の対象を切り替え",
-            f"{vg.VALUE_INPUT_KEY}  スライダの値を数字で入れる",
-            "z / x / c / v  視点（上・正面・横・等角）",
-            "PageUp / PageDown  左の欄を送る",
-            "q  閉じる",
+            f"{vg.VALUE_INPUT_KEY}  数値の欄をまとめて数字で入れる（欄ごとは … ボタン）",
         ]
+        if opacity_control:
+            keys.append("o  不透明度の対象を切り替え")
         if save_dir:
-            keys.insert(-1, "g  いまの画面を画像で保存")
-        panel.help_window(keys, title="虚音源 — 操作の一覧",
-                          note="虚音源と受音点を結ぶ直線は"
-                               "「折れた経路を伸ばしたもの」です。"
-                               "壁を貫いて見えるのが正しい姿で、"
-                               "線の長さが経路長（音速 × 到来時刻）になります。"
-                               "★描いているのは**受音点に届いた経路の虚音源だけ**で、"
-                               "鏡像として作れる虚音源すべてではありません"
-                               "（届かないものは経路として成立していないので"
-                               "バックトレースが却下しています）。")
+            keys.append("g  いまの画面を画像で保存")
+        if help_window:
+            keys += ["z / x / c / v  視点（上・正面・横・等角）",
+                     "PageUp / PageDown  左の欄を送る", "q  閉じる"]
+            panel.help_window(keys, title="虚音源 — 操作の一覧", note=IMAGE_NOTE)
         panel.enable_value_input()
         panel.enable_scroll()
 
+    _register_keys(plotter, display, room_bounds=room_bounds, fit=fit,
+                   colour_key=colour_key, save_dir=save_dir)
+    return display, (keys if panel is not None else [])
+
+
+# 虚音源の図を読むときの注意（操作の一覧の下に出す）
+IMAGE_NOTE = ("虚音源と受音点を結ぶ直線は「折れた経路を伸ばしたもの」です。"
+              "壁を貫いて見えるのが正しい姿で、"
+              "線の長さが経路長（音速 × 到来時刻）になります。"
+              "★描いているのは受音点に届いた経路の虚音源だけで、"
+              "鏡像として作れる虚音源すべてではありません"
+              "（届かないものは経路として成立していないので"
+              "バックトレースが却下しています）。")
+
+
+def _register_keys(plotter, display, room_bounds=None, fit="all",
+                   colour_key="m", save_dir=None):
+    """虚音源のキーを登録する。
+
+    同居する画面（`view_rays`）と取り合いにならないよう、色のキーは外から渡す。
+    """
     # ★目盛りは室の範囲で引き直す（虚音源に合わせると室の目盛りが読めない）。
     #   カメラは `fit="room"` のときだけ室に寄せる（既定は全部が入る形）
-    _fit_to_room(plotter, room_bounds, camera=(fit == "room"))
-
+    if room_bounds is not None:
+        _fit_to_room(plotter, room_bounds, camera=(fit == "room"))
+        # ★★`h`（室に寄る）の登録が抜けていたことがある（2026-08-24）。
+        #   操作の一覧には書いてあったのに**キーが効かなかった**。
+        #   `r`（全部が入る）は VTK が元から持っているキーなのでそのまま使う
+        plotter.add_key_event(
+            "h", lambda: _fit_to_room(plotter, room_bounds, camera=True))
     plotter.add_key_event("w", display.next_receiver)
-    plotter.add_key_event("m", display.next_mode)
+    plotter.add_key_event(colour_key, display.next_mode)
     plotter.add_key_event("l", display.toggle_lines)
-    # ★★`h`（室に寄る）の登録が抜けていた（2026-08-24 に気づいた）。
-    #   操作の一覧には書いてあったのに**キーが効かなかった**。
-    #   前の編集が失敗して保存されず、説明文だけ入っていたため。
-    #   `r`（全部が入る）は VTK が元から持っているキーなのでそのまま使う
-    plotter.add_key_event("h",
-                          lambda: _fit_to_room(plotter, room_bounds, camera=True))
     if save_dir:
         vg.add_screenshot_key(plotter, save_dir, "虚音源", key="g")
-
-    if off_screen:
-        plotter.show(auto_close=False)
-        plotter.screenshot(screenshot)
-        print(f"[虚音源] 画像を保存しました: {screenshot}")
-        vg.release_window(plotter, display)
-        return display
-
-    plotter.show()
-    vg.release_window(plotter, display)
     return display
 
 
