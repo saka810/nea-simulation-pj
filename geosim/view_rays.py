@@ -1407,7 +1407,8 @@ def view(dxf_path, raylog_path, mode="both", absorption=None, unit=None,
          max_particles=None, pool_size=2000,
          max_reflection=None, colour="energy", band=None, frames=240,
          opacity=0.12, layer_opacity=None, movie=None, point_size=9.0,
-         screenshot=None, interval=30, save_dir=None, image_sets=None):
+         screenshot=None, interval=30, save_dir=None, image_sets=None,
+         camera_path=None):
     """モデルの上に音線と音粒子を重ねて表示する。
 
     max_rays / max_particles
@@ -1416,6 +1417,10 @@ def view(dxf_path, raylog_path, mode="both", absorption=None, unit=None,
         音粒子は点なので多いほど広がりが分かる（既定は候補すべて）。
     pool_size
         描く候補として抱えておく音線の本数。スライダの上限になる。
+    camera_path
+        画角（見る向き）を残すファイル。★条件を変えて計算し直したときに
+        **同じ画角で見比べる**ためのもの（2026-08-24 ユーザー要望）。
+        既定は `プロジェクトフォルダ/視点.json`（`view_camera.default_path`）。
     """
     # バンド数は計算時と揃える。既定のままだと「列が足りない」と注意が出て紛らわしい
     kwargs = {} if band_number is None else {"band_number": band_number}
@@ -1591,6 +1596,18 @@ def view(dxf_path, raylog_path, mode="both", absorption=None, unit=None,
                 add_movie_key(plotter, animation, save_dir, key="b",
                               movie_setting=movie_setting)
                 help_lines.insert(1, "b いまの視点で動画（MP4）を保存")
+
+        # ★**画角のセーブ・ロード**（2026-08-24 ユーザー要望
+        #   「条件違いで計算した結果を比較したい時に、…画角などを合わせたい」）。
+        #   どのタブでも押せるように**共通の欄**へ置く（`add_controls` の中で
+        #   `end_group()` してから作る）
+        if camera_path:
+            import view_camera as vc
+            vc.add_controls(panel, plotter, camera_path,
+                            on_tab=(lambda tab: switch.set_mode(TAB_MODE[tab]))
+                            if switch is not None else None)
+            help_lines.append("画角を保存／読込（左の欄のボタン）"
+                              "＝条件を変えても同じ向きで見比べられる")
 
         # 「音線の情報」は起動時にコンソールへ出しているのでパネルには載せない
         # （操作が増えて入りきらなくなったため。2026-08-19）

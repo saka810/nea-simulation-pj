@@ -88,6 +88,7 @@ import numpy as np
 import pyvista as pv
 
 import read_dxffile as rd
+import view_camera
 import view_model_gui as vg
 from view_model import LAYER_PALETTE
 
@@ -206,7 +207,8 @@ class FaceEditor:
     """
 
     def __init__(self, model, flipped=None, face_materials=None, materials=None,
-                 title="面の確認", head_azimuth=None, save_dir=None):
+                 title="面の確認", head_azimuth=None, save_dir=None,
+                 camera_path=None):
         # 受音点に置く「人」の正面方向 [度]（真上から見て +X から反時計回り）。
         # G-5 の伝搬方向の図で「前・後ろ・左・右」を決めるのに使う。
         # CAD で表すのは難しいという判断で、ここ（3D が見えている画面）で決める
@@ -233,6 +235,8 @@ class FaceEditor:
         self.title = title
         # `g` で撮った画像の置き場（`図/画面/`）。指定が無ければ撮影キーを出さない
         self.save_dir = save_dir
+        # 画角（見る向き）を残すファイル。条件を変えても同じ向きで見比べるため
+        self.camera_path = camera_path
 
         # 面グループ（同一平面パッチ）。**法線の向きに依らない幾何の性質**なので、
         # 反転しても組み替わらない（read_dxffile.coplanar_groups の説明を参照）
@@ -755,6 +759,13 @@ class FaceEditor:
                 for label, degrees in HEAD_PRESETS:
                     panel.button(label, lambda d=degrees: self.face_all(d))
 
+            # ★**画角のセーブ・ロード**（2026-08-24 ユーザー要望）。
+            #   面の確認と結果の画面で**同じファイル**を使うので、
+            #   モデルを見た向きのまま結果を見る、という使い方もできる
+            if self.camera_path:
+                import view_camera as vc
+                vc.add_controls(panel, self.plotter, self.camera_path)
+
             # ★操作は**別ウィンドウ（F1）でも全部読める**ようにしてある。
             #   パネルは狭いので、ここには要点だけ短く置く（2026-08-21 ユーザー指摘）
             keys = [
@@ -1066,7 +1077,8 @@ def edit(project, model=None, off_screen=False, screenshot=None):
                         title=f"{project.name} — 面の確認（法線・吸音材）",
                         head_azimuth=project.head_azimuth_list(
                             len(model.receiver_points)),
-                        save_dir=project.screenshot_dir())
+                        save_dir=project.screenshot_dir(),
+                        camera_path=view_camera.default_path(project))
     saved = editor.show(off_screen=off_screen, screenshot=screenshot)
     if saved:
         path = project.save_flipped_faces(editor.flipped, editor.count,

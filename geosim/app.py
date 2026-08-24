@@ -69,6 +69,7 @@ def _absorption_for(project):
 def _visualise(project, results=None):
     """計算結果の可視化ウィンドウを開く（音線 ↔ 音粒子を Tab で切替）。"""
     import project as pj
+    import view_camera
     import view_rays as vr
 
     raylog = project.result_path("raylog")     # 受音点に依らないので `結果/` 直下
@@ -103,7 +104,10 @@ def _visualise(project, results=None):
                 orient_normals=project.orient_normals,
                 received_only=True, max_rays=60, max_reflection=4,
                 colour="time", opacity=0.10, frames=300, point_size=7,
-                save_dir=project.screenshot_dir())
+                save_dir=project.screenshot_dir(),
+                # ★画角を残しておけば、条件を変えて計算し直しても同じ向きで
+                #   見比べられる（2026-08-24 ユーザー要望）
+                camera_path=view_camera.default_path(project))
     except Exception:
         print("[app] 可視化ウィンドウでエラーが起きました:")
         traceback.print_exc()

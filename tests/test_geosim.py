@@ -3383,6 +3383,42 @@ def test_ui_2026_08_24():
           hits == ["5"], str(hits))
     plotter.close()
 
+    # ---- ①b' 入力位置の棒（ユーザー指摘「キャレットが見えない」）----
+    #
+    # ★以前は文字列に `|` を挟んでいた。数字と同じ色で埋もれるうえ、
+    #   挟むと桁がずれて数字が動くので、別の絵（明るい棒）に変えた。
+    plotter = vg.build_plotter(room, off_screen=True, panel=True,
+                               show_normals=False)
+    panel = vg.control_panel(plotter)
+    control = panel.spinbox("吸音率", (0.0, 1.0), 0.45, lambda v: None, fmt="%.2f")
+    plotter.show(auto_close=False)
+    panel.relayout()
+
+    panel.start_edit(control, caret=3)          # 「0.45」の 4 の直後
+    bar = panel._caret_actor
+    check("★入力位置は棒で見える（文字に `|` を挟まない）",
+          bar is not None and bool(bar.GetVisibility())
+          and "|" not in panel._buffer, repr(panel._buffer))
+    check("★棒の色は数字と混ざらない（琥珀色）",
+          bar.GetTextProperty().GetBackgroundColor()[2] < 0.5,
+          str(bar.GetTextProperty().GetBackgroundColor()))
+    x3 = bar.position[0]
+    panel._editor_key("Left", None)
+    x2 = panel._caret_actor.position[0]
+    panel._editor_key("Home", None)
+    x0 = panel._caret_actor.position[0]
+    panel._editor_key("End", None)
+    x4 = panel._caret_actor.position[0]
+    check("★棒が入力位置に付いて動く（← → Home End）",
+          x0 < x2 < x3 < x4, f"{x0} < {x2} < {x3} < {x4}")
+    check("棒は数字の左より右にある（枠の中に立つ）",
+          x0 >= control["caret_at"]()[0] - 2,
+          f"{x0} / 数字の左 {control['caret_at']()[0]}")
+    panel.commit_edit()
+    check("★編集をやめたら棒は消える",
+          not bool(panel._caret_actor.GetVisibility()))
+    plotter.close()
+
     # ---- ①c 押せる四角（テクスチャを使わないボタン。2026-08-24）----
     #
     # ★`vtkTexturedButtonRepresentation2D` を並べると**テクスチャが GPU の上限を
@@ -3536,6 +3572,92 @@ def test_ui_2026_08_24():
           set(vr.RayParticleView.MODE_LABEL) == set(vr.RayParticleView.MODES))
 
 
+def test_camera_save():
+    """[43] 画角（見る向き）のセーブ・ロード。
+
+    ★2026-08-24 ユーザー要望
+    > 条件違いで計算した結果を比較したい時に，音線の結果など画角などを合わせたい。
+    > 画角などの情報をセーブ・ロードできる機能とボタンを追加しておいて
+    """
+    print("\n[43] 画角のセーブ・ロード（条件を変えても同じ向きで見比べる）")
+    import read_dxffile as rd_
+    import tempfile
+    import view_camera as vc
+    import view_model_gui as vg
+
+    room = rd_.read_model(TEST_DXF, verbose=False)
+    plotter = vg.build_plotter(room, off_screen=True, panel=True,
+                               show_normals=False)
+    panel = vg.control_panel(plotter)
+    reflect = panel.spinbox("反射回数", (0, 300), 4, lambda v: None, fmt="%.0f")
+    panel.begin_group("音線")
+    opacity = panel.spinbox("不透明度", (0.0, 1.0), 0.10, lambda v: None,
+                            fmt="%.2f")
+    panel.end_group()
+    panel.active_group = "音線"
+    plotter.show(auto_close=False)
+    panel.relayout()
+
+    plotter.camera.SetPosition(3.0, -8.0, 2.5)
+    plotter.camera.SetFocalPoint(1.0, 1.5, 0.5)
+    plotter.camera.SetViewUp(0.0, 0.0, 1.0)
+    reflect["set"](7.0)
+    opacity["set"](0.42)
+    path = os.path.join(tempfile.mkdtemp(), vc.FILE_NAME)
+    vc.save(path, plotter, panel=panel)
+    check("画角のファイルが書ける", os.path.exists(path), path)
+
+    saved = vc.read(path)
+    check("★カメラを書き出している（視点・注視点・上向き・画角）",
+          all(key in saved["camera"] for key in
+              ("position", "focal_point", "up", "view_angle")),
+          str(sorted(saved["camera"])))
+    check("★左パネルの数値も一緒に残す（「画角など」を合わせたいという要望）",
+          len(saved["controls"]) == 2, str(saved["controls"]))
+    check("開いていたタブも残す", saved["tab"] == "音線", str(saved["tab"]))
+
+    # 別の条件で開き直したつもりで崩してから読み戻す
+    plotter.camera.SetPosition(0.0, -1.0, 50.0)
+    plotter.camera.SetFocalPoint(0.0, 0.0, 0.0)
+    reflect["set"](1.0)
+    opacity["set"](0.90)
+    tabs = []
+    ok, message = vc.load(path, plotter, panel=panel, on_tab=tabs.append)
+    position = tuple(round(v, 6) for v in plotter.camera.GetPosition())
+    focal = tuple(round(v, 6) for v in plotter.camera.GetFocalPoint())
+    check("★読み込むと画角が戻る", ok and position == (3.0, -8.0, 2.5)
+          and focal == (1.0, 1.5, 0.5), f"{position} / {focal} / {message}")
+    check("★数値も戻る（反射回数・不透明度）",
+          abs(reflect["value"] - 7.0) < 1e-9
+          and abs(opacity["value"] - 0.42) < 1e-9,
+          f"{reflect['value']} / {opacity['value']}")
+    check("タブも合わせる", tabs == ["音線"], str(tabs))
+    check("★`camera_set` を立てる（立てないと show() が視点を戻す）",
+          bool(plotter.camera_set))
+
+    ok, message = vc.load(os.path.join(os.path.dirname(path), "無い.json"),
+                          plotter)
+    check("ファイルが無ければ、そう知らせて落ちない", ok is False, message)
+    plotter.close()
+
+    # 欄が違う画面（面の確認）で読んでも落ちない・関係ない欄は触らない
+    plotter = vg.build_plotter(room, off_screen=True, panel=True,
+                               show_normals=False)
+    panel = vg.control_panel(plotter)
+    other = panel.spinbox("矢印の長さ", (0.0, 2.0), 0.5, lambda v: None,
+                          fmt="%.2f")
+    plotter.show(auto_close=False)
+    panel.relayout()
+    ok, message = vc.load(path, plotter, panel=panel)
+    check("★欄が違う画面で読んでも落ちない（無い設定は飛ばす）",
+          ok and abs(other["value"] - 0.5) < 1e-9, message)
+    plotter.close()
+
+    done, missed = vc.apply_panel(panel, [{"label": "無い欄", "value": 1.0}])
+    check("当てられなかった見出しを返す", done == 0 and missed == ["無い欄"],
+          f"{done} / {missed}")
+
+
 def main():
     print("geosim 数値検証")
     print(f"  Python {sys.version.split()[0]} / numpy {np.__version__}")
@@ -3557,7 +3679,7 @@ def main():
                test_workbook, test_path_reuse, test_conditions_batch,
                test_panel_scroll, test_empty_model, test_impulse_fast,
                test_measurement_points, test_image_source_view,
-               test_ui_2026_08_24):
+               test_ui_2026_08_24, test_camera_save):
         fn()
 
     failed = [name for name, ok in _results if not ok]

@@ -120,6 +120,25 @@ VTK_RESERVED_KEYS = {
 VALUE_INPUT_KEY = "t"
 
 
+def _text_width(actor, text, renderer):
+    """`text` を `actor` の書体で描いたときの幅 [px]。
+
+    測るには文字を入れ替えるしかないので、**必ず元に戻す**。
+    入力位置の棒を置く場所（`ControlPanel._place_caret`）と、
+    押した桁を決めるところ（`_caret_from_x`）の両方から使う。
+    """
+    if not text:
+        return 0.0
+    keep = actor.GetInput()
+    size = [0, 0]
+    try:
+        actor.SetInput(text)
+        actor.GetSize(renderer, size)
+        return float(size[0])
+    finally:
+        actor.SetInput(keep)
+
+
 def _caret_from_x(actor, text, left, x, renderer):
     """押した x が `text` の何文字目かを返す（文字の幅を測って決める）。
 
@@ -127,22 +146,14 @@ def _caret_from_x(actor, text, left, x, renderer):
     測れないときは末尾（`len(text)`）を返す——末尾なら必ず安全に編集できる。
     """
     try:
-        keep = actor.GetInput()
-        size = [0, 0]
         # ★**いちばん近い「文字の境目」**に付ける（「その文字より前／後」で
         #   決めると 1 桁ずれる。実際にずれた）
         best, gap = len(text), None
         for index in range(len(text) + 1):
-            if index:
-                actor.SetInput(text[:index])
-                actor.GetSize(renderer, size)
-                width = float(size[0])
-            else:
-                width = 0.0
+            width = _text_width(actor, text[:index], renderer)
             distance = abs(left + width - x)
             if gap is None or distance < gap:
                 best, gap = index, distance
-        actor.SetInput(keep)
         return best
     except Exception:
         return len(text)
@@ -241,7 +252,11 @@ class ControlPanel:
     #   パネルより暗い地＋明るい細枠＋左寄せの数字＝入力欄、
     #   ▲▼ はパネルより明るい地＝押すもの、と見た目を分ける
     FIELD_FACE = "#101318"      # 数値の枠（入力欄。ほぼ黒）
-    FIELD_EDIT = "#18283f"      # 打ち込んでいる最中（青みを入れて分かるように）
+    FIELD_EDIT = "#213655"      # 打ち込んでいる最中（青みを入れて分かるように）
+    # ★入力位置は**明るい棒**で見せる（2026-08-24 ユーザー指摘
+    #   「キャレットが見えないです。…どこにいるのかが見え辛いです」）。
+    #   文字列に `|` を挟む形だと、数字と同じ色で埋もれるうえ桁がずれて動く
+    CARET_COLOR = "#ffd24a"     # 入力位置の棒（琥珀色。数字と混ざらない色）
     FIELD_TEXT = "#eef2f8"      # 枠の中の数字（明るく）
     FRAME_COLOR = "#7f8794"     # 枠線（入力欄らしく、はっきり見える明るさ）
     ARROW_FACE = "#4a5261"      # ▲▼ の地（パネルより明るくして押すものに見せる）
@@ -271,6 +286,7 @@ class ControlPanel:
         self._editing = None
         self._buffer = ""
         self._caret = 0            # 入力位置（`_buffer` の何文字目の前か）
+        self._caret_actor = None   # 入力位置の棒（1 本を作り置きして使い回す）
         self._editor_tag = None
         # 押せる四角（テクスチャを使わないボタン。2026-08-24）
         self._hits = []
@@ -341,7 +357,11 @@ class ControlPanel:
         return True
 
     def _hit_area(self, on_click):
-        """押せる四角を 1 つ登録する。戻り値で位置と表示を差し替える。"""
+        """押せる四角を 1 つ登録する。戻り値で位置と表示を差し替える。
+
+        `on_click` は**押した位置（x, y）を受ける形**で呼ばれる。位置が要らない
+        ボタン・タブは、呼ぶ側で `lambda *_: …` として受け流している。
+        """
         self._install_clicker()
         hit = {"rect": (0, 0, -1, -1), "on_click": on_click, "visible": True}
         self._hits.append(hit)
@@ -476,6 +496,7 @@ class ControlPanel:
         """打ち込んだ値を確定する（Enter）。"""
         control, text = self._editing, self._buffer
         self._editing, self._buffer = None, ""
+        self._hide_caret()
         if control is None:
             return None
         control["highlight"](False)
@@ -492,6 +513,7 @@ class ControlPanel:
         """打ち込みをやめる（Escape・関係ないキー・別の欄へ移ったとき）。"""
         control = self._editing
         self._editing, self._buffer = None, ""
+        self._hide_caret()
         if control is None:
             return None
         control["highlight"](False)
@@ -499,12 +521,50 @@ class ControlPanel:
         self.plotter.render()
         return control
 
+    def _caret_bar(self):
+        """入力位置の棒。1 本だけ作り置きする（同時に編集するのは 1 つの欄）。"""
+        if self._caret_actor is None:
+            # 空白 1 文字ぶんの明るい地＝縦棒に見える（線の部品は要らない）
+            self._caret_actor = self._label(" ", background=self.CARET_COLOR)
+            self._caret_actor.SetVisibility(False)
+        return self._caret_actor
+
+    def _hide_caret(self):
+        """入力位置の棒を消す（編集をやめたとき・欄が隠れたとき）。"""
+        if self._caret_actor is not None:
+            self._caret_actor.SetVisibility(False)
+
+    def _place_caret(self, control, prefix):
+        """入力位置の棒を、`prefix`（左側の文字）の幅ぶん右に置く。"""
+        at, measure = control.get("caret_at"), control.get("measure")
+        shown = control.get("field_visible")
+        if at is None or measure is None or (shown is not None and not shown()):
+            self._hide_caret()      # 位置が分からない欄・隠れている欄
+            return None
+        bar = self._caret_bar()
+        try:
+            x, y = at()
+            bar.SetDisplayPosition(int(round(x + measure(prefix))) - 1, int(y))
+            bar.SetVisibility(True)
+        except Exception:
+            self._hide_caret()
+            return None
+        return bar
+
     def _draw_buffer(self):
-        """打っている途中の文字を枠に出す。**入力位置に `|` を挟む。**"""
-        if self._editing is None:
+        """打っている途中の文字を枠に出し、**入力位置に明るい棒**を立てる。
+
+        ★以前は文字列に `|` を挟んでいたが、
+        「キャレットが見えない・どこにいるのか分かり辛い」（2026-08-24 ユーザー指摘）。
+        `|` は数字と同じ色・同じ細さで埋もれるうえ、**挟むと桁がずれて数字が動く**。
+        いまは数字だけを出し、別の絵として棒を重ねる（`_place_caret`）。
+        """
+        control = self._editing
+        if control is None:
             return
-        caret = max(0, min(len(self._buffer), self._caret))
-        self._editing["draw"](self._buffer[:caret] + "|" + self._buffer[caret:])
+        self._caret = max(0, min(len(self._buffer), self._caret))
+        control["draw"](self._buffer)
+        self._place_caret(control, self._buffer[:self._caret])
         self.plotter.render()
 
     def open_value_input(self, only=None):
@@ -658,6 +718,9 @@ class ControlPanel:
             item.place(y)
             if item.show is not None:
                 item.show(y >= bottom - 1 and y + item.height <= top + 1)
+        if self._editing is not None:
+            # 欄が動いたら入力位置の棒も置き直す（置きっぱなしだと取り残される）
+            self._place_caret(self._editing, self._buffer[:self._caret])
         self._update_hint()
         if render:
             self.plotter.render()
@@ -983,6 +1046,8 @@ class ControlPanel:
             low, high = high, low
         step = float(step) if step else _default_step(fmt, low, high)
         state = {"value": float(min(max(value, low), high))}
+        # 数字の始まる位置（入力位置の棒を置く基準）。`place()` で入れ直す
+        geom = {"x": 0.0, "y": 0.0}
 
         def show_value(v=None):
             if v is not None:
@@ -1039,6 +1104,11 @@ class ControlPanel:
                    "format": fmt, "step": step,
                    "set": lambda v: apply(v), "show": show_value,
                    "draw": draw_text, "highlight": highlight,
+                   # 入力位置の棒を置くための情報（`ControlPanel._place_caret`）
+                   "caret_at": lambda: (geom["x"], geom["y"]),
+                   "measure": lambda text: _text_width(field, text,
+                                                       self.plotter.renderer),
+                   "field_visible": lambda: bool(field.GetVisibility()),
                    "widget": None}
         self.controls.append(control)
         show_value()
@@ -1051,6 +1121,7 @@ class ControlPanel:
             name.SetDisplayPosition(self.margin, int(y) + 5)
             name.SetInput(self.fit(title, field_x - self.margin - 6))
             field.SetDisplayPosition(int(field_x), int(y) + 4)
+            geom["x"], geom["y"] = field_x + self.FIELD_PAD, int(y) + 4
             up.SetDisplayPosition(int(arrow_x) + 3, int(y) + half + 1)
             down.SetDisplayPosition(int(arrow_x) + 3, int(y) + 1)
             field_hit["rect"] = (field_x, y, arrow_x - 1, y + self.SPIN)
