@@ -22,7 +22,9 @@
   z / x / c / v   上 / 正面 / 横 / 等角 の視点
   n               法線矢印の表示切り替え
   g               いまの画面をそのまま画像で保存（`add_screenshot_key` を付けた画面のみ）
-  t               スライダの値を数字で入力（`enable_value_input` を付けた画面のみ）
+  数値の枠を押す  ★**その場で打ち込める**（Enter 確定 / Esc 取り消し）。別窓は開かない
+  ▲▼             1 段ずつ増減（枠の右にくっついている。Excel と同じ形）
+  t               数値の欄をまとめて入力（`enable_value_input` を付けた画面のみ）
   w / s           ワイヤフレーム / 面（VTK の既定キー）
   r               視点リセット、q でウィンドウを閉じる
 
@@ -232,6 +234,7 @@ class ControlPanel:
     ARROW_FONT = 6      # ▲▼ の文字の大きさ（半分の高さに収める）
     BUTTON_FACE = "#3a4150"
     FIELD_FACE = "#20252f"      # 数値の枠（押すと手入力）。入力欄らしく暗く
+    FIELD_EDIT = "#3d4a63"      # 打ち込んでいる最中の枠（明るくして分かるように）
     TAB_HEIGHT = 20             # タブの見出しの高さ [px]
     TAB_ACTIVE = "#2f6f9f"      # 選んでいるタブ
     TAB_IDLE = "#2b303a"        # 選んでいないタブ
@@ -251,6 +254,12 @@ class ControlPanel:
         # `active_group` は「いま開いているタブ」。None なら全部出す
         self._group = None
         self.active_group = None
+        # ★**枠の中で数字を打つ**ための状態（2026-08-24 ユーザー要望
+        #   「任意入力する場合は別ウィンドウが開くのではなく、その中で完結させたい」）。
+        #   `_editing` は編集中の欄（`controls` の 1 件）、`_buffer` は打った文字
+        self._editing = None
+        self._buffer = ""
+        self._editor_tag = None
         self.scroll = 0.0                  # ページ送りの量 [px]
         self._help_lines = []              # 重ねて出す操作の一覧
         self._help_title = "操作の一覧"
@@ -280,6 +289,109 @@ class ControlPanel:
             print(f"[view] 警告: キー {key!r} は VTK が使っています"
                   f"（{VTK_RESERVED_KEYS[key]}）。別のキーにしてください")
         self.plotter.add_key_event(key, self.open_value_input)
+
+    # ---- 枠の中で数字を打つ（2026-08-24）------------------------------
+    #
+    # VTK には文字入力の部品が無いので、**キー入力を横取りして自前で組む**。
+    # `KeyPressEvent` を**高い優先度**で見張り、編集中だけ受け取って
+    # `AbortFlagOn()` で先へ流さない（流すと `q` で閉じたり数字でレイヤが
+    # 切り替わったりしてしまう）。編集していないときは素通しする。
+
+    # 打ち込みに使える文字（数字・小数点・符号）
+    EDIT_CHARS = "0123456789.-+"
+
+    def _install_editor(self):
+        """キー入力の見張りを 1 回だけ仕込む。"""
+        if self._editor_tag is not None:
+            return True
+        interactor = getattr(getattr(self.plotter, "iren", None), "interactor", None)
+        if interactor is None:
+            return False                # off_screen などで interactor が無い
+
+        def on_key(caller, _event):
+            if self._editing is None:
+                return                  # 編集していないので何もしない（素通し）
+            keep = self._editor_key(caller.GetKeySym(), caller.GetKeyCode())
+            if keep:
+                # ★編集に使ったキーは**先へ流さない**
+                command = caller.GetCommand(self._editor_tag)
+                if command is not None:
+                    command.AbortFlagOn()
+
+        # 優先度を上げて pyvista のキー処理より先に受け取る
+        self._editor_tag = interactor.AddObserver("KeyPressEvent", on_key, 10.0)
+        return True
+
+    def _editor_key(self, keysym, keycode):
+        """編集中のキー 1 つを処理する。戻り値 True なら先へ流さない。
+
+        ★**編集に関係ないキーが来たら編集をやめて素通しする**。
+        こうしておかないと、打ち込んでいる最中に `q` を押しても閉じられない。
+        """
+        if keysym in ("Return", "KP_Enter"):
+            self.commit_edit()
+            return True
+        if keysym == "Escape":
+            self.cancel_edit()
+            return True
+        if keysym == "BackSpace":
+            self._buffer = self._buffer[:-1]
+            self._draw_buffer()
+            return True
+        if keycode and keycode in self.EDIT_CHARS:
+            self._buffer += keycode
+            self._draw_buffer()
+            return True
+        # 関係ないキー → 編集をやめて、そのキーは本来の役目に回す
+        self.cancel_edit()
+        return False
+
+    def start_edit(self, control):
+        """★枠を押したときに呼ばれる。**その枠の中で**打ち込みを始める。"""
+        if self._editing is not None and self._editing is not control:
+            self.commit_edit()          # 別の欄へ移ったら、それまでの分を確定
+        if not self._install_editor():
+            # 見張りを仕込めない環境では、従来どおり別窓で受ける（保険）
+            return self.open_value_input(only=control)
+        self._editing = control
+        self._buffer = ""
+        control["highlight"](True)
+        self._draw_buffer()
+        return control
+
+    def commit_edit(self):
+        """打ち込んだ値を確定する（Enter）。"""
+        control, text = self._editing, self._buffer
+        self._editing, self._buffer = None, ""
+        if control is None:
+            return None
+        control["highlight"](False)
+        try:
+            value = float(text)
+        except ValueError:
+            control["show"]()           # 空・数字でない → もとの値に戻す
+            self.plotter.render()
+            return None
+        control["set"](value)
+        return value
+
+    def cancel_edit(self):
+        """打ち込みをやめる（Escape・関係ないキー・別の欄へ移ったとき）。"""
+        control = self._editing
+        self._editing, self._buffer = None, ""
+        if control is None:
+            return None
+        control["highlight"](False)
+        control["show"]()
+        self.plotter.render()
+        return control
+
+    def _draw_buffer(self):
+        """打っている途中の文字を枠に出す（末尾に文字入力の印を付ける）。"""
+        if self._editing is None:
+            return
+        self._editing["draw"](self._buffer + "_")
+        self.plotter.render()
 
     def open_value_input(self, only=None):
         """数字を打ち込む窓を出す。`only` を渡すとその欄だけにする。
@@ -775,8 +887,9 @@ class ControlPanel:
 
         # ★★**四角を先に、文字をあとに作る**。VTK は**あとに作ったものが上**に
         #   描かれるので、逆にすると**枠が数字を覆って読めない**（実際にそうなった）。
-        #   数値の枠そのものが「押すと手入力」のボタン（`…` は置かない）
-        field = self._flat_button(lambda: self.open_value_input(only=control),
+        #   ★数値の枠そのものが「押すと**その場で**打ち込める」ボタン
+        #   （2026-08-24 ユーザー要望。別窓は開かない）
+        field = self._flat_button(lambda: self.start_edit(control),
                                   colour=self.FIELD_FACE)
         up = self._flat_button(lambda: apply(state["value"] + step), glyph="▲",
                                font_size=self.ARROW_FONT)
@@ -791,9 +904,26 @@ class ControlPanel:
                                             color=TEXT_COLOR, font_file=self.font)
         self._model()
 
+        def draw_text(text):
+            """打ち込んでいる途中の文字をそのまま枠に出す。"""
+            set_actor_text(shown_value, text)
+
+        def highlight(flag):
+            """打ち込み中は枠を明るくする（どこに入るか分かるように）。"""
+            colour = self.FIELD_EDIT if flag else self.FIELD_FACE
+            representation = field[0].GetRepresentation()
+            texture = _colour_texture(colour)
+            for index in range(2):
+                try:
+                    representation.SetButtonTexture(index, texture)
+                except Exception:
+                    break
+            representation.Modified()
+
         control = {"label": title, "range": (low, high), "value": state["value"],
                    "format": fmt, "step": step,
                    "set": lambda v: apply(v), "show": show_value,
+                   "draw": draw_text, "highlight": highlight,
                    "widget": None}
         self.controls.append(control)
         show_value()

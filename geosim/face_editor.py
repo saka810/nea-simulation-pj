@@ -767,7 +767,8 @@ class FaceEditor:
                 "a  自動判定にする    d  CAD の巻き順に戻す",
                 "n  法線の矢印    o  不透明度の対象を切り替え",
                 "z / x / c / v  視点（上・正面・横・等角）",
-                f"{vg.VALUE_INPUT_KEY}  スライダの値を数字で入れる",
+                "数値の枠を押すとその場で打ち込める（Enter 確定 / Esc 取り消し）",
+                f"{vg.VALUE_INPUT_KEY}  数値の欄をまとめて入力",
             ]
             if len(self.head_azimuth) > 1:
                 keys.append("w  向きを調整する受音点を切り替え")

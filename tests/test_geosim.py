@@ -3277,6 +3277,76 @@ def test_ui_2026_08_24():
           f"{vg._default_step('%.2f', 0.0, 1.0)}")
     check("範囲が 0 でも落ちない", vg._default_step("%.1f", 5.0, 5.0) > 0.0)
 
+    # ---- ①b 枠の中で数字を打つ（2026-08-24 ユーザー要望）----
+    #
+    # > 任意入力する場合は別ウィンドウが開くのではなく、その中で完結させたい
+    #
+    # VTK に文字入力の部品は無いので、キー入力を横取りして自前で組んでいる。
+    # **編集していないときは素通しする**（数字でレイヤが切り替わる画面があるため）
+    import read_dxffile as rd_
+
+    room = rd_.read_model(TEST_DXF, verbose=False)
+    plotter = vg.build_plotter(room, off_screen=True, panel=True,
+                               show_normals=False)
+    panel = vg.control_panel(plotter)
+    applied = []
+    panel.slider("試し [m]", [0.0, 100.0], 12.5, lambda v: applied.append(v),
+                 fmt="%.1f")
+    control = panel.controls[-1]
+    plotter.show(auto_close=False)
+    raw = plotter.iren.interactor
+
+    def press(keysym, keycode=None):
+        raw.SetKeySym(keysym)
+        raw.SetKeyCode(keycode if keycode is not None else chr(0))
+        raw.InvokeEvent("KeyPressEvent")
+
+    panel.start_edit(control)
+    check("★枠を押すと編集が始まる（別窓は開かない）",
+          panel._editing is control)
+    for character in "37.5":
+        press(character, character)
+    check("打った文字が溜まる", panel._buffer == "37.5", panel._buffer)
+    press("Return")
+    check("★Enter で確定して値になる",
+          abs(control["value"] - 37.5) < 1e-9 and applied
+          and abs(applied[-1] - 37.5) < 1e-9,
+          f"{control['value']} / callback {applied}")
+    check("確定したら編集は終わっている", panel._editing is None)
+
+    panel.start_edit(control)
+    for character in "99":
+        press(character, character)
+    press("Escape")
+    check("★Esc で取り消せる（値は変わらない）",
+          abs(control["value"] - 37.5) < 1e-9, f"{control['value']}")
+
+    panel.start_edit(control)
+    for character in "500":
+        press(character, character)
+    press("Return")
+    check("範囲の外は丸める", abs(control["value"] - 100.0) < 1e-9,
+          f"{control['value']}")
+
+    panel.start_edit(control)
+    press("BackSpace")
+    check("BackSpace で 1 文字消せる", panel._buffer == "")
+    press("Escape")
+
+    fired = []
+    plotter.add_key_event("j", lambda: fired.append("j"))
+    panel.start_edit(control)
+    press("j", "j")
+    check("★関係ないキーは編集をやめて本来の役目に回す（`q` で閉じられる）",
+          panel._editing is None and fired == ["j"], str(fired))
+
+    hits = []
+    plotter.add_key_event("5", lambda: hits.append("5"))
+    press("5", "5")
+    check("★編集していないときの数字は素通し（レイヤ選択を邪魔しない）",
+          hits == ["5"], str(hits))
+    plotter.close()
+
     # ---- ② 受音点の向きを一括で決める（ユーザー要望）----
     model, src, rec = load_test_room()
     editor = fe.FaceEditor(model, head_azimuth=[0.0] * len(model.receiver_points))
