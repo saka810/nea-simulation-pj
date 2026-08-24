@@ -1487,12 +1487,19 @@ def notice(plotter, message, kind="ok", seconds=NOTICE_SECONDS):
     text = str(message)
     colour = NOTICE_COLORS.get(kind, NOTICE_COLORS["ok"])
     try:
+        # ★★書体は **`font_file`** で渡す（2026-08-24 に実行ログで見つけた）。
+        #   `font=` は「arial / courier / times」の**名前**を受ける口なので、
+        #   ファイルの場所を渡すと `KeyError` になり、**知らせが画面に出ず
+        #   端末への `print` に落ちていた**（下の except に毎回入っていた）。
+        #   パネルの文字（`_label`）と同じ渡し方に揃える
         plotter.add_text(text, name="geosim_notice", position="lower_edge",
-                         font_size=11, color=colour, font=japanese_font(),
-                         shadow=True)
-    except Exception:
-        # 文字が出せなくても本体は動かす（フォントが無い環境など）
-        print(f"[view] {text}")
+                         font_size=11, color=colour,
+                         font_file=japanese_font(), shadow=True)
+    except Exception as error:
+        # 文字が出せなくても本体は動かす（フォントが無い環境など）。
+        # ★**理由も出す**。黙って落ちると、上のような取り違えに気づけない
+        print(f"[view] {text}（画面に出せません: "
+              f"{type(error).__name__}: {error}）")
         return None
     plotter.render()
     if seconds:

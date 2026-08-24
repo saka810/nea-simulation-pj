@@ -3419,6 +3419,21 @@ def test_ui_2026_08_24():
           not bool(panel._caret_actor.GetVisibility()))
     plotter.close()
 
+    # ---- ①b'' 画面の知らせが**本当に画面に出る**か ----
+    #
+    # ★★書体は `font_file` で渡す。`font=` は「arial / courier / times」の名前を
+    #   受ける口なので、ファイルの場所を渡すと `KeyError` になる。
+    #   実行ログで見つけるまで、知らせは毎回**端末への print に落ちていた**。
+    plotter = vg.build_plotter(room, off_screen=True, panel=True,
+                               show_normals=False)
+    shown = vg.notice(plotter, "画角を保存しました")
+    check("★知らせが画面に出る（端末への print に落ちない）",
+          shown is not None and "geosim_notice" in list(plotter.actors),
+          str(list(plotter.actors)[-1:]))
+    vg.clear_notice(plotter)
+    check("知らせは消せる", "geosim_notice" not in list(plotter.actors))
+    plotter.close()
+
     # ---- ①c 押せる四角（テクスチャを使わないボタン。2026-08-24）----
     #
     # ★`vtkTexturedButtonRepresentation2D` を並べると**テクスチャが GPU の上限を
