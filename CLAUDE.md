@@ -75,7 +75,7 @@
   書き残しておくと他端末で追いやすい。
 - `PROGRAM_STRUCTURE.md` … 各モジュールの役割・Fortran との変数対応・実装状況・既知のバグ一覧。
   **コードに手を入れたらこの文書も合わせて更新する。**
-- `tests\test_geosim.py` … 数値検証（604 項目）。pytest 不要、素の Python で走る。
+- `tests\test_geosim.py` … 数値検証（622 項目）。pytest 不要、素の Python で走る。
   **数式に関わるコードを変更したら必ず走らせる**：`.venv\Scripts\python tests\test_geosim.py`
 - `TODO.md` … 作業一覧（A〜G にグルーピング）。着手・完了したらチェックボックスを更新する。
 - `docs\pdf\` … **docs の Markdown を PDF にしたもの**（2026-08-23 ユーザー要望
