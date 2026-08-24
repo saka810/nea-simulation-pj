@@ -3328,9 +3328,23 @@ def test_ui_2026_08_24():
     check("範囲の外は丸める", abs(control["value"] - 100.0) < 1e-9,
           f"{control['value']}")
 
+    # ★押した時点では**いまの値が残る**（2026-08-24 ユーザー指摘
+    #   「入力しようとしたら、数字が消えてしまいます」）。
+    #   最初の 1 文字で置き換わり、BackSpace から始めれば直す形になる
     panel.start_edit(control)
+    check("★押した時点で値が残っている（消えない）", panel._buffer == "100.0",
+          repr(panel._buffer))
     press("BackSpace")
-    check("BackSpace で 1 文字消せる", panel._buffer == "")
+    check("BackSpace で 1 文字消せる（値を直す使い方）",
+          panel._buffer == "100.", repr(panel._buffer))
+    press("5", "5")
+    check("BackSpace のあとは置き換えず続けて打てる",
+          panel._buffer == "100.5", repr(panel._buffer))
+    press("Escape")
+    panel.start_edit(control)
+    press("7", "7")
+    check("★最初の 1 文字は置き換える（表計算と同じ）", panel._buffer == "7",
+          repr(panel._buffer))
     press("Escape")
 
     fired = []

@@ -207,9 +207,15 @@ class ControlPanel:
     ARROW = 15          # ▲▼ の幅 [px]（枠の右にくっつける）
     ARROW_FONT = 6      # ▲▼ の文字の大きさ（半分の高さに収める）
     BUTTON_FACE = "#3a4150"
-    FIELD_FACE = "#20252f"      # 数値の枠（押すと手入力）。入力欄らしく暗く
-    FIELD_EDIT = "#3d4a63"      # 打ち込んでいる最中の枠（明るくして分かるように）
-    FRAME_COLOR = "#5a6270"     # 枠線
+    # ★数値の枠は**入力欄に見えるように**する（2026-08-24 ユーザー指摘
+    #   「今どちらかと言うとボタンになってないですか？」）。
+    #   パネルより暗い地＋明るい細枠＋左寄せの数字＝入力欄、
+    #   ▲▼ はパネルより明るい地＝押すもの、と見た目を分ける
+    FIELD_FACE = "#101318"      # 数値の枠（入力欄。ほぼ黒）
+    FIELD_EDIT = "#18283f"      # 打ち込んでいる最中（青みを入れて分かるように）
+    FIELD_TEXT = "#eef2f8"      # 枠の中の数字（明るく）
+    FRAME_COLOR = "#7f8794"     # 枠線（入力欄らしく、はっきり見える明るさ）
+    ARROW_FACE = "#4a5261"      # ▲▼ の地（パネルより明るくして押すものに見せる）
     TAB_HEIGHT = 20             # タブの見出しの高さ [px]
     TAB_ACTIVE = "#2f6f9f"      # 選んでいるタブ
     TAB_IDLE = "#2b303a"        # 選んでいないタブ
@@ -234,6 +240,7 @@ class ControlPanel:
         #   `_editing` は編集中の欄（`controls` の 1 件）、`_buffer` は打った文字
         self._editing = None
         self._buffer = ""
+        self._fresh = False        # 最初の 1 文字で置き換えるか（`start_edit` 参照）
         self._editor_tag = None
         # 押せる四角（テクスチャを使わないボタン。2026-08-24）
         self._hits = []
@@ -372,10 +379,16 @@ class ControlPanel:
             self.cancel_edit()
             return True
         if keysym == "BackSpace":
+            # いまの値を直す使い方。ここから先は「置き換え」をやめる
+            self._fresh = False
             self._buffer = self._buffer[:-1]
             self._draw_buffer()
             return True
         if keycode and keycode in self.EDIT_CHARS:
+            if self._fresh:
+                # ★最初の 1 文字で置き換える（表計算と同じ感じ）
+                self._buffer = ""
+                self._fresh = False
             self._buffer += keycode
             self._draw_buffer()
             return True
@@ -391,7 +404,12 @@ class ControlPanel:
             # 見張りを仕込めない環境では、従来どおり別窓で受ける（保険）
             return self.open_value_input(only=control)
         self._editing = control
-        self._buffer = ""
+        # ★★**押した時点では、いまの値をそのまま残す**（2026-08-24 ユーザー指摘
+        #   「入力しようとしたら、数字が消えてしまいます」）。
+        #   Excel と同じ流儀で、**最初の 1 文字を打った時点で置き換わる**
+        #   （`_fresh`）。BackSpace から始めれば、いまの値を直す形にもなる
+        self._buffer = (control["format"] % control["value"]).strip()
+        self._fresh = True
         control["highlight"](True)
         self._draw_buffer()
         return control
@@ -925,9 +943,10 @@ class ControlPanel:
             self.plotter.render()
 
         name = self._label(size=self.LABEL_FONT)
-        field = self._label(background=self.FIELD_FACE, frame=True)
-        up = self._label("▲", size=self.ARROW_FONT, background=self.BUTTON_FACE)
-        down = self._label("▼", size=self.ARROW_FONT, background=self.BUTTON_FACE)
+        field = self._label(background=self.FIELD_FACE, frame=True,
+                            colour=self.FIELD_TEXT)
+        up = self._label("▲", size=self.ARROW_FONT, background=self.ARROW_FACE)
+        down = self._label("▼", size=self.ARROW_FONT, background=self.ARROW_FACE)
 
         # 押せる四角（枠＝手入力、▲▼＝1 段ずつ）
         field_hit = self._hit_area(lambda: self.start_edit(control))
