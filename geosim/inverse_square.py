@@ -240,9 +240,11 @@ def write_figure(project, result, bands=None, verbose=True):
                      color=colour, markersize=3, linewidth=1.2, label=label)
             bottom.plot(data["distances"], data["deviation"][:, band], "o-",
                         color=colour, markersize=3, linewidth=1.2, label=label)
+        # ★理想の線は**どのバンドに合わせたか**を書く（当てはめた高さは
+        #   バンドごとに違うので、1 本だけ引くと他のバンドがずれて見える）
         ideal = data["reference"][bands[0]] - 20.0 * np.log10(data["distances"])
         top.plot(data["distances"], ideal, "--", color="#888888", linewidth=1.0,
-                 label="理想（1/r²）")
+                 label=f"理想（1/r²・{frequencies[bands[0]]:.0f} Hz に合わせた線）")
         allowed = tolerance_of(frequencies[bands[-1]])
         bottom.axhspan(-allowed, allowed, color="#4c78a8", alpha=0.10)
         bottom.axhline(0.0, color="#888888", linewidth=0.8)
