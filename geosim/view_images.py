@@ -80,6 +80,12 @@ IMAGE_COLOR = "#ffd166"         # 虚音源の点（色分けしないとき）
 RECEIVER_COLOR = "#4cc9f0"
 SOURCE_COLOR = "#ff5f5f"
 DIM_COLOR = "#5a6270"           # 選んでいない受音点
+OUTLINE_COLOR = "#8b93a3"       # 室の形（同一平面パッチの外周）
+
+# ★壁の不透明度（2026-08-24 ユーザー指摘「壁が見えなくなっている」）。
+#   音線の画面は 0.10 だが、この画面は虚音源との位置関係を見るものなので
+#   **壁がはっきり見えるほうがよい**。あわせて外周の線も重ねる
+DEFAULT_OPACITY = 0.30
 
 
 # ------------------------------------------------------------------------------
@@ -381,7 +387,7 @@ def _receivers(project):
 # ------------------------------------------------------------------------------
 
 def view(dxf_path, sets, absorption=None, unit=None, band_number=None,
-         orient_normals="cad", source_points=None, opacity=0.10,
+         orient_normals="cad", source_points=None, opacity=DEFAULT_OPACITY,
          layer_opacity=None, start=DEFAULT_ORDER_START, end=DEFAULT_ORDER_END,
          count=DEFAULT_COUNT, mode="reflection", screenshot=None, save_dir=None,
          receiver=0, fit="all"):
@@ -417,6 +423,11 @@ def view(dxf_path, sets, absorption=None, unit=None, band_number=None,
     #   **室が画面の真ん中の点になって何も読めない**（実際にそうなった）。
     #   ここで室の範囲を覚えておき、虚音源を足したあとで戻す。
     room_bounds = tuple(plotter.bounds)
+
+    # ★**室の形を線で重ねる**（2026-08-24 ユーザー指摘）。
+    #   壁を薄く描くと形が読めなくなるので、同一平面パッチの外周を引く。
+    #   これがあると不透明度を 0 まで下げても室の輪郭が残る
+    _add_room_outline(plotter, model)
 
     # 音源（虚音源と見比べるため。直接音の虚音源はここに一致する）
     points = source_points if source_points is not None else model.source_points
@@ -524,6 +535,31 @@ def view(dxf_path, sets, absorption=None, unit=None, band_number=None,
     return display
 
 
+def _add_room_outline(plotter, model):
+    """室の形（同一平面パッチの外周）を線で重ねる。
+
+    ★壁を薄くしても形が分かるようにするためのもの（2026-08-24 ユーザー指摘
+    「壁が見えなくなっている」）。三角形の辺を全部引くと網目になるので外周だけ。
+    """
+    try:
+        segments = rd.patch_outline_segments(
+            np.array([np.asarray(m.vertexes, dtype=float) for m in model.mesh]),
+            np.array([np.asarray(m.normal, dtype=float) for m in model.mesh]))
+    except Exception as error:
+        print(f"[虚音源] 室の輪郭を描けませんでした: {type(error).__name__}: {error}")
+        return None
+    if not len(segments):
+        return None
+    points = segments.reshape(-1, 3)
+    lines = np.column_stack([np.full(len(segments), 2),
+                             np.arange(0, 2 * len(segments), 2),
+                             np.arange(1, 2 * len(segments), 2)]).ravel()
+    return plotter.add_mesh(pv.PolyData(points, lines=lines),
+                            color=OUTLINE_COLOR, line_width=1.0, lighting=False,
+                            opacity=0.75, reset_camera=False,
+                            show_scalar_bar=False)
+
+
 def _fit_to_room(plotter, bounds, camera=True):
     """カメラと目盛りを**室の範囲**に合わせ直す。
 
@@ -582,7 +618,8 @@ def main():
                    help="表示する本数（エネルギーの大きい順）")
     p.add_argument("--colour", default="reflection", choices=list(COLOUR_MODES),
                    help="色の付け方")
-    p.add_argument("--opacity", type=float, default=0.10, help="壁の不透明度")
+    p.add_argument("--opacity", type=float, default=DEFAULT_OPACITY,
+                   help="壁の不透明度（既定 %(default)s。外周の線は常に出る）")
     p.add_argument("--receiver", type=int, default=1,
                    help="どの受音点を相手にするか（1 始まり。画面では w キー）")
     p.add_argument("--fit", default="all", choices=("all", "room"),

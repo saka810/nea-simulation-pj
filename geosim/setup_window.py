@@ -125,7 +125,11 @@ class SetupWindow:
     def run(self):
         self.root = tk.Tk()
         self.root.title("幾何音響シミュレーション — 計算条件")
-        self.root.geometry("900x720")
+        # ★**ボタンが隠れない大きさで開く**（2026-08-24 ユーザー指摘。
+        #   900 px だと「面を確認」のボタンが右へ押し出されて見えなかった）。
+        #   `minsize` も入れて、**縮めても隠れない**ようにする
+        self.root.geometry("1180x840")
+        self.root.minsize(1040, 560)
 
         # ★**縦にスクロールできるようにする**（2026-08-21 ユーザー指摘。
         #   画面を広げないと下のボタンが見切れていた）。
@@ -294,31 +298,74 @@ class SetupWindow:
                                                                 sticky="w", padx=8)
 
     def _build_buttons(self, parent):
+        """下端のボタン。**状態の文とボタンで行を分ける**（2026-08-24 ユーザー指摘）。
+
+        以前は 1 行に「状態の文（左）＋ボタン（右）」を詰めていたので、
+        窓が狭いと**ボタンが右へ押し出されて見えなかった**
+        （「面を確認」が消えていた）。行を分け、ボタンは `grid` で並べて
+        **足りなければ 2 段目に折り返す**ようにした。
+        """
+        # ① 状態の文（左のログっぽいもの）は独立した行
+        line = ttk.Frame(parent)
+        line.pack(fill="x", pady=(4, 2))
+        self.status = ttk.Label(line, text="", foreground="#333", anchor="w",
+                                justify="left")
+        self.status.pack(side="left", fill="x", expand=True)
+
+        # ② ボタンの行。**右端から並べる**が、幅が足りなければ折り返す
         frame = ttk.Frame(parent)
-        frame.pack(fill="x", pady=(6, 0))
+        frame.pack(fill="x", pady=(2, 0))
+        self._button_row = frame
 
-        self.status = ttk.Label(frame, text="", foreground="#333")
-        self.status.pack(side="left")
+        # （左寄りの補助的なもの → 右寄りの本命）の順に並べる
+        items = [
+            ("条件だけ保存", self._on_save),
+            ("面を確認…（法線・吸音材）", self._on_normals),
+            ("前回の結果を見る", self._on_view),
+            # ★同じフォルダの条件表を全部回す（2026-08-21 ユーザー要望）。
+            #   経路は吸音に依らないので 2 件目以降は一瞬で終わる（F-9）
+            ("全条件を一括 ▶▶", self._on_run_all),
+            ("計算する ▶", self._on_run),
+            ("閉じる", self._close),
+        ]
+        self._buttons = []
+        for text, command in items:
+            button = ttk.Button(frame, text=text, command=command)
+            self._buttons.append(button)
+            if text == "前回の結果を見る":
+                self.view_button = button
+        self._layout_buttons()
+        frame.bind("<Configure>", lambda _e: self._layout_buttons())
 
-        ttk.Button(frame, text="閉じる", command=self._close).pack(side="right", padx=4)
-        ttk.Button(frame, text="計算する ▶", command=self._on_run).pack(side="right", padx=4)
-        # ★同じフォルダの条件表を全部回す（2026-08-21 ユーザー要望）。
-        #   経路は吸音に依らないので 2 件目以降は一瞬で終わる（F-9）
-        ttk.Button(frame, text="全条件を一括 ▶▶",
-                   command=self._on_run_all).pack(side="right", padx=4)
-        # 既存プロジェクトを開いたときは、計算し直さずに前回の結果を見たいことがある
-        self.view_button = ttk.Button(frame, text="前回の結果を見る",
-                                      command=self._on_view)
-        self.view_button.pack(side="right", padx=4)
-        # ★虚音源の可視化（2026-08-24 ユーザー要望）。計算はやり直さず、
-        #   保存済みのパルス列から虚音源を復元して描くだけなのですぐ開く
-        self.images_button = ttk.Button(frame, text="虚音源を見る",
-                                        command=self._on_images)
-        self.images_button.pack(side="right", padx=4)
-        ttk.Button(frame, text="面を確認…（法線・吸音材）", command=self._on_normals).pack(side="right",
-                                                                           padx=4)
-        ttk.Button(frame, text="条件だけ保存", command=self._on_save).pack(side="right",
-                                                                        padx=4)
+    def _layout_buttons(self):
+        """ボタンを幅に合わせて並べ直す。**入りきらなければ 2 段にする。**
+
+        ★隠さないのが約束（ユーザー指摘）。`pack(side="right")` は入りきらない
+        ぶんを黙って画面外へ出してしまうので、`grid` で段を作る。
+        """
+        frame = getattr(self, "_button_row", None)
+        if frame is None:
+            return
+        width = frame.winfo_width() or 1
+        needed = [b.winfo_reqwidth() + 8 for b in self._buttons]
+        # 1 行に何個入るか（最低 1 個）
+        per_row, total = 0, 0
+        for w in needed:
+            if total + w > width and per_row:
+                break
+            total += w
+            per_row += 1
+        per_row = max(1, per_row)
+        if per_row == getattr(self, "_button_per_row", None):
+            return                          # 並びが変わらないなら触らない
+        self._button_per_row = per_row
+        for b in self._buttons:
+            b.grid_forget()
+        for index, button in enumerate(self._buttons):
+            row, column = divmod(index, per_row)
+            button.grid(row=row, column=column, padx=4, pady=2, sticky="ew")
+        for column in range(per_row):
+            frame.columnconfigure(column, weight=1)
 
     # ---- 値のやりとり --------------------------------------------------
 
@@ -698,21 +745,6 @@ class SetupWindow:
             os.startfile(path)
         except Exception:
             messagebox.showinfo("条件表", f"ここにあります: {path}")
-
-    def _on_images(self):
-        """★虚音源を見る（2026-08-24 ユーザー要望）。
-
-        パルス列（`結果/recN/<室>_pulses.csv`）から虚音源の位置を復元して描くだけで、
-        **計算はやり直さない**。だから結果があればいつでも開ける。
-        """
-        if not pj.has_results(self.project):
-            messagebox.showinfo("結果がありません",
-                                f"{self.project.folder} にまだ計算結果がありません。\n"
-                                f"虚音源はパルス列から作るので、"
-                                f"先に「計算する ▶」を実行してください。")
-            return
-        self.action = "images"
-        self.root.destroy()
 
     def _on_view(self):
         """計算し直さずに、保存済みの結果を開く。"""

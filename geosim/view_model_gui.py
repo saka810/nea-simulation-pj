@@ -117,6 +117,27 @@ VTK_RESERVED_KEYS = {
 VALUE_INPUT_KEY = "t"
 
 
+def _default_step(fmt, low, high):
+    """スピンボックスの 1 段。表示の桁と範囲の広さから決める。"""
+    digits = 0
+    if "." in fmt:
+        try:
+            digits = int(fmt.split(".")[1][0])
+        except (IndexError, ValueError):
+            digits = 0
+    unit = 10.0 ** (-digits)                    # 表示できる最小の刻み
+    span = abs(high - low)
+    rough = span / 100.0 if span else unit
+    if rough <= unit:
+        return unit
+    # 1 / 2 / 5 × 10^n の形に丸める（0.01 → 0.02 → 0.05 → 0.1 …）
+    import math
+    exponent = math.floor(math.log10(rough))
+    base = rough / (10.0 ** exponent)
+    nice = 1.0 if base < 1.5 else (2.0 if base < 3.5 else 5.0)
+    return max(unit, nice * (10.0 ** exponent))
+
+
 class PanelItem:
     """パネルに積んだ要素 1 つ。**高さ・置き直し方・隠し方**を持つ。
 
@@ -158,6 +179,8 @@ class ControlPanel:
     # スライダのバーぶんの高さ [px]（見出しは別に 1 行取る）。
     # 操作が増えてパネルに入りきらなくなったので 34 → 28 に詰めた（2026-08-19）
     SLIDER = 28
+    SPIN = 18           # スピンボックスの ▼ ▲ ボタンの一辺 [px]
+    BUTTON_FACE = "#3a4150"
     LABEL_FONT = 8      # レイヤ名など、横に長くなりがちな文字
     LINE = 18           # font_size 9 のときの 1 行 [px]（外から参照される既定値）
     WHEEL = 60          # ホイール 1 段で送る量 [px]（3 行ぶん）
@@ -200,7 +223,12 @@ class ControlPanel:
                   f"（{VTK_RESERVED_KEYS[key]}）。別のキーにしてください")
         self.plotter.add_key_event(key, self.open_value_input)
 
-    def open_value_input(self):
+    def open_value_input(self, only=None):
+        """数字を打ち込む窓を出す。`only` を渡すとその欄だけにする。
+
+        ★欄ごとの `[123]` ボタンからは `only` 付きで呼ばれる（2026-08-24）。
+        `t` キーからは全部まとめて出す（従来どおり）。
+        """
         import tkinter as tk
         from tkinter import ttk
 
@@ -214,7 +242,8 @@ class ControlPanel:
                                           sticky="w", pady=(0, 8))
 
         entries = []
-        for row, control in enumerate(self.controls, start=1):
+        targets = [only] if only is not None else self.controls
+        for row, control in enumerate(targets, start=1):
             low, high = control["range"]
             ttk.Label(frame, text=control["label"]).grid(row=row, column=0,
                                                         sticky="w", pady=3)
@@ -583,8 +612,142 @@ class ControlPanel:
         self._add(self.CHECK + 4, place, show)
         return widget
 
-    def slider(self, title, value_range, value, callback, fmt="%.2f"):
-        """横向きのスライダ。見出しと値は**自前の文字**で出す。
+    def slider(self, title, value_range, value, callback, fmt="%.2f", step=None):
+        """数値の設定。★**中身はスピンボックス**（2026-08-24 ユーザー要望）。
+
+        > 数字の設定がスライダーになっていますが、
+        > スピンボックス（手入力機能もあり）の方がよいです。
+
+        呼んでいる場所が多いので**名前は `slider` のまま**にしてある
+        （呼び出し側を触らずに全画面が切り替わる）。
+        つまみのスライダが要るときは `slider_widget()` を直接呼ぶ。
+        """
+        return self.spinbox(title, value_range, value, callback, fmt=fmt,
+                            step=step)
+
+    def spinbox(self, title, value_range, value, callback, fmt="%.2f", step=None):
+        """▼ ▲ で 1 段ずつ動かし、`[123]` を押すと**数字で打ち込める**欄。
+
+        ★スライダをやめた理由（ユーザー要望 2026-08-24）：つまみは
+        「だいたいの値」を選ぶのは速いが、**狙った値にできない**
+        （反射回数を 7 回にしたい、音線を 137 本にしたい、など）。
+        1 段ずつ動かせて数字も打てるほうが実務に合う。
+
+        `step` を省いたときの 1 段は、表示の桁から決める
+        （`%.0f` なら 1、`%.2f` なら 0.01…）。範囲が広いときは
+        「範囲の 1/100」と比べて大きいほうを採る（0〜300 回を 1 ずつは遠い）。
+        """
+        low, high = float(value_range[0]), float(value_range[1])
+        if high < low:
+            low, high = high, low
+        step = float(step) if step else _default_step(fmt, low, high)
+        state = {"value": float(min(max(value, low), high))}
+
+        # 見出し＋値（左）と、▼ ▲ [123]（右）を **1 行に収める**。
+        # ★★**作る前にパネル側のレンダラを選ぶ**（`_panel()`）。忘れると
+        #   文字もボタンも**3D の中に置かれる**（実際にモデルの上に四角が並んだ）。
+        #   `checkbox()` が最初にこれを呼んでいるのと同じ理由
+        self._panel()
+        text = self.plotter.add_text(" ", position=(0, 0),
+                                     font_size=self.LABEL_FONT, color=TEXT_COLOR,
+                                     font_file=self.font)
+
+        def show_value(v=None):
+            if v is not None:
+                state["value"] = float(v)
+            set_actor_text(text, f"{title}  {fmt % state['value']}")
+
+        def apply(v, notify=True):
+            v = float(min(max(v, low), high))
+            if abs(v - state["value"]) < 1e-12 and notify:
+                return                      # 端で押し続けたときに呼び直さない
+            state["value"] = v
+            control["value"] = v
+            show_value()
+            self._model()
+            if notify:
+                callback(v)
+            self.plotter.render()
+
+        buttons = []
+        for glyph, delta in (("▼", -step), ("▲", +step)):
+            buttons.append(self._flat_button(
+                glyph, lambda d=delta: apply(state["value"] + d)))
+        # ★数字を打ち込む口を**その欄の隣**に置く（`t` の一括入力とは別に）。
+        #   どの欄を直したいかが決まっているときは、こちらのほうが速い
+        # ★字は 1 文字にする（ボタンの四角は `SPIN` の正方形しか作れないので、
+        #   「123」だと四角からはみ出して読みにくかった）
+        buttons.append(self._flat_button(
+            "…", lambda: self.open_value_input(only=control)))
+
+        control = {"label": title, "range": (low, high), "value": state["value"],
+                   "format": fmt, "step": step,
+                   "set": lambda v: apply(v), "show": show_value,
+                   "widget": None}
+        self.controls.append(control)
+        show_value()
+
+        def place(y):
+            # 右端から [123] ▲ ▼ の順に詰める（右寄せ）
+            x = self.width - self.margin
+            for widget, glyph, span in reversed(buttons):
+                x -= span
+                representation = widget.GetRepresentation()
+                representation.SetPlaceFactor(1.0)
+                representation.PlaceWidget([x, x + span, y, y + self.SPIN, 0.0, 0.0])
+                representation.Modified()
+                representation.BuildRepresentation()
+                glyph.SetDisplayPosition(int(x + span * 0.5 - 4), int(y) + 4)
+                x -= 4
+            text.SetDisplayPosition(self.margin, int(y) + 4)
+            text.SetInput(self.fit(f"{title}  {fmt % state['value']}",
+                                   x - self.margin))
+
+        shown = {"on": True}
+
+        def show(visible):
+            text.SetVisibility(bool(visible))
+            for _, glyph, _ in buttons:
+                glyph.SetVisibility(bool(visible))
+            if bool(visible) == shown["on"]:
+                return
+            shown["on"] = bool(visible)
+            for widget, _, _ in buttons:
+                widget.On() if visible else widget.Off()
+
+        self._add(self.SPIN + 6, place, show)
+        return control
+
+    def _flat_button(self, glyph, on_click, width=None):
+        """押しても見た目が変わらない小さなボタン（▼ ▲ [123] に使う）。
+
+        ★VTK には「ボタン」が無いので**チェックボックスを流用する**。
+        押すと状態が入れ替わるが、`color_on` と `color_off` を同じにしてあるので
+        latch しているように見えない。状態そのものは使わず、
+        **変化したこと＝押されたこと**として扱う。
+        """
+        width = int(width or self.SPIN)
+        self._panel()               # ★パネル側に置く（上記と同じ理由）
+        widget = self.plotter.add_checkbox_button_widget(
+            lambda _state: on_click(), value=False, position=(self.margin, 0),
+            size=self.SPIN, border_size=1,
+            color_on=self.BUTTON_FACE, color_off=self.BUTTON_FACE,
+            background_color=self.BUTTON_FACE)
+        label = self.plotter.add_text(glyph, position=(0, 0),
+                                      font_size=self.LABEL_FONT,
+                                      color=TEXT_COLOR, font_file=self.font)
+        self._model()
+        self._pin(widget)
+        self._widgets.append(widget)
+        return (widget, label, width)
+
+    def slider_widget(self, title, value_range, value, callback, fmt="%.2f"):
+        """横向きのスライダ（**参照実装として残してある**。いまは使っていない）。
+
+        2026-08-24 に数値の設定はスピンボックスへ移した（`spinbox`）。
+        つまみで連続的に動かしたい場面が出たらこちらを使う。
+
+        見出しと値は**自前の文字**で出す。
 
         VTK のスライダにも見出し・値の表示はあるが、こちらで位置を動かしたときに
         文字が追随せず**消えたように見えた**。自分で描けば位置も内容も確実で、
@@ -822,6 +985,71 @@ def next_free_path(folder, stem, suffix=".png", digits=2):
         number += 1
 
 
+# 画面に出す知らせの色。よい知らせ・待たせる知らせ・悪い知らせで分ける
+NOTICE_COLORS = {"ok": "#7ee787", "busy": "#ffd166", "error": "#ff7b72"}
+NOTICE_SECONDS = 3.0
+
+
+def notice(plotter, message, kind="ok", seconds=NOTICE_SECONDS):
+    """★**画面の真ん中下に一時的な知らせを出す**（2026-08-24 ユーザー要望）。
+
+    > 画面の画像保存ボタンを押した時に、保存しました。みたいな表示をして欲しい
+    > 動画保存時は、動画保存中みたいな表示が欲しい
+
+    それまでは端末に `print` していただけで、画面を見ている人には
+    保存できたのか分からなかった。
+
+    `seconds` 秒たったら自分で消える（`add_timer_event`）。
+    消えるのを待たずに次の知らせが来たら、そのまま置き換わる。
+    `seconds=None` にすると消えない（`clear_notice()` で消す。動画の書き出し中など、
+    終わるまで出しっぱなしにしたいとき）。
+    """
+    text = str(message)
+    colour = NOTICE_COLORS.get(kind, NOTICE_COLORS["ok"])
+    try:
+        plotter.add_text(text, name="geosim_notice", position="lower_edge",
+                         font_size=11, color=colour, font=japanese_font(),
+                         shadow=True)
+    except Exception:
+        # 文字が出せなくても本体は動かす（フォントが無い環境など）
+        print(f"[view] {text}")
+        return None
+    plotter.render()
+    if seconds:
+        _hide_notice_later(plotter, seconds)
+    return text
+
+
+def clear_notice(plotter):
+    """出している知らせを消す。"""
+    try:
+        plotter.remove_actor("geosim_notice", render=False)
+        plotter.render()
+    except Exception:
+        pass
+
+
+def _hide_notice_later(plotter, seconds):
+    """`seconds` 秒後に知らせを消す。
+
+    ★VTK のタイマーを使う（`time.sleep` で待つと画面が固まる）。
+    タイマーが使えない場面（off_screen など）では出したままにする
+    ——消えないほうがましなので、黙って諦める。
+    """
+    state = {"count": 0}
+
+    def tick(step=None):
+        state["count"] += 1
+        if state["count"] >= 1:
+            clear_notice(plotter)
+
+    try:
+        plotter.add_timer_event(max_steps=1, duration=int(seconds * 1000),
+                                callback=tick)
+    except Exception:
+        pass
+
+
 def add_screenshot_key(plotter, folder, stem, key="p"):
     """`p` で「いま画面に出ているとおり」を PNG に保存する。
 
@@ -830,6 +1058,9 @@ def add_screenshot_key(plotter, folder, stem, key="p"):
 
     `stem` は文字列でも、呼ぶたびにファイル名の芯を返す関数でもよい
     （音粒子は時刻をファイル名に入れたいので関数を渡す）。
+
+    ★保存したら**画面にも知らせる**（2026-08-24 ユーザー要望）。
+    それまでは端末に print するだけで、画面を見ている人には分からなかった。
     """
     def save():
         name = stem() if callable(stem) else stem
@@ -838,8 +1069,11 @@ def add_screenshot_key(plotter, folder, stem, key="p"):
             plotter.screenshot(path)
         except Exception as e:
             print(f"[view] 画像を保存できませんでした: {type(e).__name__}: {e}")
+            notice(plotter, f"画像を保存できませんでした（{type(e).__name__}）",
+                   kind="error")
             return None
         print(f"[view] 画像を保存しました: {path}")
+        notice(plotter, f"画像を保存しました: {os.path.basename(path)}")
         return path
 
     plotter.add_key_event(key, save)
@@ -1216,13 +1450,17 @@ def add_opacity_control(plotter, font=None, panel=None, target_key="o"):
         plotter.render()
 
     panel.heading("透過設定")
-    slider = panel.slider("不透明度", [0.0, 1.0], current_opacity(), apply)
+    # ★スピンボックスになったので、戻り値は VTK のウィジェットではなく
+    #   `controls` の 1 件（`{"set": …, "show": …}`）。2026-08-24
+    control = panel.spinbox("不透明度", [0.0, 1.0], current_opacity(), apply,
+                            step=0.05)
     label = panel.reserve_text(2)
     state["ready"] = True
 
     def set_slider(value):
+        """対象を切り替えたときに、**表示だけ**その対象の値に合わせる。"""
         state["ready"] = False          # 表示だけ更新し、適用はしない
-        slider.GetRepresentation().SetValue(value)
+        control["show"](float(value))
         state["ready"] = True
 
     def next_target():
@@ -1244,7 +1482,7 @@ def add_opacity_control(plotter, font=None, panel=None, target_key="o"):
     plotter.add_key_event(target_key, next_target)
     plotter.add_key_event("m", toggle_model)
     refresh_label()
-    return slider
+    return control
 
 
 def _visibility_callback(plotter, face_actor, arrow_actor, state):

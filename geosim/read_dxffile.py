@@ -1073,6 +1073,41 @@ COPLANAR_ANGLE_DEGREES = 1.0
 COPLANAR_DISTANCE = 1.0e-3
 
 
+def patch_outline_segments(triangles, normals, angle_degrees=None):
+    """**同一平面パッチの外周**を線分 (M,2,3) で返す。
+
+    三角形の辺を全部引くと網目になって形が読めないので、
+    パッチの中で**1 回しか現れない辺＝外周**だけを残す。
+
+    ★壁を薄く（不透明度 0.1〜0.3）描く画面では、これを重ねないと
+    **形が見えない**（2026-08-24 ユーザー指摘「壁が見えなくなっている」）。
+    測定点の配置図（`plots.measurement_points`）と虚音源の画面
+    （`view_images`）で共用している。
+    """
+    triangles = np.asarray(triangles, dtype=float)
+    normals = np.asarray(normals, dtype=float)
+    if not len(triangles):
+        return np.zeros((0, 2, 3))
+    kwargs = {} if angle_degrees is None else {"angle_degrees": angle_degrees}
+    try:
+        groups = coplanar_groups(triangles, normals, **kwargs)
+    except Exception:
+        groups = np.arange(len(triangles))
+
+    segments = []
+    for group in np.unique(groups):
+        seen = {}
+        for tri in triangles[groups == group]:
+            for a, b in ((0, 1), (1, 2), (2, 0)):
+                ka, kb = tuple(np.round(tri[a], 6)), tuple(np.round(tri[b], 6))
+                key = (ka, kb) if ka <= kb else (kb, ka)
+                seen[key] = seen.get(key, 0) + 1
+        segments += [key for key, count in seen.items() if count == 1]
+    if not segments:
+        return np.zeros((0, 2, 3))
+    return np.array(segments, dtype=float)
+
+
 def coplanar_groups(triangles, normals, angle_degrees=COPLANAR_ANGLE_DEGREES,
                     distance=COPLANAR_DISTANCE, tol=1.0e-9):
     """同一平面で辺を共有している三角形をまとめ、面ごとのグループ番号 (M,) を返す。

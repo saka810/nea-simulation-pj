@@ -1131,25 +1131,10 @@ def _patch_outline_segments(model):
 
     if not getattr(model, "mesh", None):
         return np.zeros((0, 2, 3))
-    triangles = np.array([np.asarray(m.vertexes, dtype=float) for m in model.mesh])
-    normals = np.array([np.asarray(m.normal, dtype=float) for m in model.mesh])
-    try:
-        groups = rd.coplanar_groups(triangles, normals)
-    except Exception:
-        groups = np.arange(len(triangles))
-
-    segments = []
-    for group in np.unique(groups):
-        seen = {}
-        for tri in triangles[groups == group]:
-            for a, b in ((0, 1), (1, 2), (2, 0)):
-                ka, kb = tuple(np.round(tri[a], 6)), tuple(np.round(tri[b], 6))
-                key = (ka, kb) if ka <= kb else (kb, ka)
-                seen[key] = seen.get(key, 0) + 1
-        segments += [key for key, count in seen.items() if count == 1]
-    if not segments:
-        return np.zeros((0, 2, 3))
-    return np.array(segments, dtype=float)
+    # ★中身は `read_dxffile.patch_outline_segments`（虚音源の画面と共用。2026-08-24）
+    return rd.patch_outline_segments(
+        np.array([np.asarray(m.vertexes, dtype=float) for m in model.mesh]),
+        np.array([np.asarray(m.normal, dtype=float) for m in model.mesh]))
 
 
 def measurement_points(model, path, sources=None, receivers=None,
