@@ -159,6 +159,48 @@ def _caret_from_x(actor, text, left, x, renderer):
         return len(text)
 
 
+def help_key(line):
+    """操作の一覧の 1 行から「キー」を取り出す（無ければ None）。
+
+    `"g いまの画面を画像で保存"` → `"g"`。説明文と見分けるため、
+    **1 文字か、Tab / F1 / PageUp のような決まった綴りだけ**をキーとみなす。
+    """
+    head = str(line).strip().split()
+    if not head:
+        return None
+    word = head[0]
+    if len(word) == 1 and (word.isalnum() or word in "0123456789"):
+        return word.lower()
+    if word in ("Tab", "F1", "Enter", "Esc", "PageUp", "PageDown", "Home",
+                "End", "BackSpace", "Delete"):
+        return word
+    return None
+
+
+def dedupe_help(lines):
+    """操作の一覧から重複を落とす（**同じキーの説明は先に出た方を残す**）。
+
+    ★2026-08-24 ユーザー指摘「画像保存の説明など重複しているものもあります」。
+    画面ごとに一覧を作って足し合わせているので、同じキーを別の言い方で
+    2 度書いてしまう（`g いまの画面を画像で保存` と `g  画像で保存`）。
+    """
+    seen_lines, seen_keys, kept = set(), set(), []
+    for line in lines:
+        text = str(line).rstrip()
+        if not text.strip():
+            continue
+        if text in seen_lines:
+            continue
+        key = help_key(text)
+        if key is not None and key in seen_keys:
+            continue
+        seen_lines.add(text)
+        if key is not None:
+            seen_keys.add(key)
+        kept.append(text)
+    return kept
+
+
 def _rgb(colour):
     """`"#3a4150"` のような色を (r, g, b)（0〜1）にする。
 
@@ -257,6 +299,11 @@ class ControlPanel:
     #   「キャレットが見えないです。…どこにいるのかが見え辛いです」）。
     #   文字列に `|` を挟む形だと、数字と同じ色で埋もれるうえ桁がずれて動く
     CARET_COLOR = "#ffd24a"     # 入力位置の棒（琥珀色。数字と混ざらない色）
+    # ★**棒は透かす**（2026-08-24 ユーザー指摘「キャレット色が濃すぎて、
+    #   元々の数字が見えなかったです。透明度あげれますか？」）。
+    #   棒は数字の**上**に描かれる（あとに作ったものが上）ので、
+    #   塗りつぶすと下の桁が隠れる。透かせば桁を見ながら直せる
+    CARET_OPACITY = 0.45
     FIELD_TEXT = "#eef2f8"      # 枠の中の数字（明るく）
     FRAME_COLOR = "#7f8794"     # 枠線（入力欄らしく、はっきり見える明るさ）
     ARROW_FACE = "#4a5261"      # ▲▼ の地（パネルより明るくして押すものに見せる）
@@ -526,6 +573,9 @@ class ControlPanel:
         if self._caret_actor is None:
             # 空白 1 文字ぶんの明るい地＝縦棒に見える（線の部品は要らない）
             self._caret_actor = self._label(" ", background=self.CARET_COLOR)
+            # ★透かす（下の桁が読めるように。2026-08-24 ユーザー指摘）
+            self._caret_actor.GetTextProperty().SetBackgroundOpacity(
+                self.CARET_OPACITY)
             self._caret_actor.SetVisibility(False)
         return self._caret_actor
 
@@ -773,8 +823,32 @@ class ControlPanel:
         except Exception:
             pass        # ホイールが取れない環境でもキーで送れる
 
+    def help_list(self, lines, title="操作", note=None, size=8,
+                  color="#9aa4b2"):
+        """★操作の一覧を**左の欄にそのまま置く**（2026-08-24 ユーザー要望）。
+
+        > F1 で操作一覧出してもらってますが、スクロール機能がしっかりした今、
+        > 左の枠内に戻しても良いです。画像保存の説明など重複しているものも
+        > ありますし。
+
+        ページ送り（`enable_scroll`）が入ったので、全部を欄に置いても読める。
+        **重複は落とす**（`dedupe_help`）。重ねて出す `help_window` は
+        参照実装として残してあるが、既定では使わない。
+        """
+        lines = dedupe_help(lines)
+        if title:
+            self.heading(title)
+        if note:
+            self.text(note, size=size, color="#ffd166")
+        self.text(chr(10).join(lines), size=size, color=color)
+        return lines
+
     def help_window(self, lines, key="F1", title="操作の一覧", note=None):
         """操作の一覧を **3D の上に重ねて**出す（`key` で表示/非表示）。
+
+        ★**いまは使っていない**（2026-08-24 ユーザー要望で `help_list` に移した。
+        操作の一覧は左の欄に置く）。重ねて出したい画面が出てきたときのために
+        参照実装として残してある。
 
         ★はじめは tkinter の別ウィンドウにしたが、**開いている間は元の画面を
         閉じられない**（tkinter が入力を握る）とユーザー指摘を受けて作り直した。

@@ -766,8 +766,8 @@ class FaceEditor:
                 import view_camera as vc
                 vc.add_controls(panel, self.plotter, self.camera_path)
 
-            # ★操作は**別ウィンドウ（F1）でも全部読める**ようにしてある。
-            #   パネルは狭いので、ここには要点だけ短く置く（2026-08-21 ユーザー指摘）
+            # ★操作は**左の欄にそのまま置く**（2026-08-24 ユーザー要望
+            #   「スクロール機能がしっかりした今、左の枠内に戻しても良いです」）
             keys = [
                 "r  枠で選ぶ（もう一度押すと解除）",
                 "0  選択を解除    j  全部を選ぶ    h  選択を反転",
@@ -788,16 +788,10 @@ class FaceEditor:
             keys += ["PageUp / PageDown  左の欄を送る",
                      "s  保存して閉じる    q  保存せずに閉じる"]
 
-            panel.heading("操作")
-            panel.text("r 枠選択  0 解除  j 全選択\n"
-                       "h 反転  k 同じ平面  t 平面＋レイヤ  l 同じ吸音材\n"
-                       "i 法線を反転  m 法線⇔吸音材\n"
-                       "s 保存して閉じる  q 保存せず閉じる",
-                       size=8, color="#7f8794")
             self.status = panel.reserve_text(2, size=9, color="#ffd166")
-            panel.help_window(keys, title="面の確認 — 操作の一覧",
-                              note="選んでから適用する二段階です。"
-                                   "枠で囲んで選び、キーで操作します。")
+            panel.help_list(keys, title="操作",
+                            note="選んでから適用する二段階です。"
+                                 "枠で囲んで選び、キーで操作します。")
 
             # 吸音材の一覧は長くなりうるので**いちばん下**（上の説明を参照）
             self._build_material_panel(panel)

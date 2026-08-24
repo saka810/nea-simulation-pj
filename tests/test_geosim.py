@@ -3414,9 +3414,33 @@ def test_ui_2026_08_24():
     check("棒は数字の左より右にある（枠の中に立つ）",
           x0 >= control["caret_at"]()[0] - 2,
           f"{x0} / 数字の左 {control['caret_at']()[0]}")
+    check("★棒は透ける（下の桁が読める。ユーザー指摘「色が濃すぎて数字が見えない」）",
+          0.2 < bar.GetTextProperty().GetBackgroundOpacity() < 0.8,
+          f"{bar.GetTextProperty().GetBackgroundOpacity():.2f}")
     panel.commit_edit()
     check("★編集をやめたら棒は消える",
           not bool(panel._caret_actor.GetVisibility()))
+
+    # ---- ①b'' 操作の一覧を左の欄に戻す（ユーザー要望）----
+    #
+    # ★「F1 で出してもらってますが、スクロール機能がしっかりした今、
+    #   左の枠内に戻しても良いです。画像保存の説明など重複しているものも
+    #   ありますし」（2026-08-24）
+    kept = vg.dedupe_help(["g いまの画面を画像で保存", "w  受音点を切り替え",
+                           "g  画像で保存", "w  受音点を切り替え", "",
+                           "q  閉じる"])
+    check("★同じキーの説明は 1 度だけにする（重複を落とす）",
+          kept == ["g いまの画面を画像で保存", "w  受音点を切り替え", "q  閉じる"],
+          str(kept))
+    check("キーとして拾うのは 1 文字と決まった綴りだけ",
+          vg.help_key("PageUp / PageDown  左の欄を送る") == "PageUp"
+          and vg.help_key("z/x/c/v 視点") is None
+          and vg.help_key("数値の枠を押すと…") is None)
+    before = len(panel.items)
+    lines = panel.help_list(["g 画像で保存", "g 画像で保存（重複）", "q 閉じる"])
+    check("★操作の一覧が左の欄に載る（重複は落ちる）",
+          lines == ["g 画像で保存", "q 閉じる"] and len(panel.items) > before,
+          str(lines))
     plotter.close()
 
     # ---- ①b'' 画面の知らせが**本当に画面に出る**か ----
@@ -3595,6 +3619,8 @@ def test_camera_save():
     > 画角などの情報をセーブ・ロードできる機能とボタンを追加しておいて
     """
     print("\n[43] 画角のセーブ・ロード（条件を変えても同じ向きで見比べる）")
+    import io
+    import json
     import read_dxffile as rd_
     import tempfile
     import view_camera as vc
@@ -3619,10 +3645,10 @@ def test_camera_save():
     reflect["set"](7.0)
     opacity["set"](0.42)
     path = os.path.join(tempfile.mkdtemp(), vc.FILE_NAME)
-    vc.save(path, plotter, panel=panel)
+    vc.save(path, plotter, panel=panel, name="正面から")
     check("画角のファイルが書ける", os.path.exists(path), path)
 
-    saved = vc.read(path)
+    saved = vc._document(path)["views"]["正面から"]
     check("★カメラを書き出している（視点・注視点・上向き・画角）",
           all(key in saved["camera"] for key in
               ("position", "focal_point", "up", "view_angle")),
@@ -3631,13 +3657,23 @@ def test_camera_save():
           len(saved["controls"]) == 2, str(saved["controls"]))
     check("開いていたタブも残す", saved["tab"] == "音線", str(saved["tab"]))
 
+    # ★**名前を付けて何本でも**（2026-08-24 ユーザー要望「角度は色々保存したい」）
+    plotter.camera.SetPosition(0.0, -20.0, 15.0)
+    reflect["set"](2.0)
+    vc.save(path, plotter, panel=panel, name="上から")
+    check("★名前を付けて何本でも持てる",
+          vc.view_names(path) == ["正面から", "上から"], str(vc.view_names(path)))
+    check("次の名前の候補が出る（ダイアログの初期値）",
+          vc.next_name(path) == "視点1", vc.next_name(path))
+
     # 別の条件で開き直したつもりで崩してから読み戻す
     plotter.camera.SetPosition(0.0, -1.0, 50.0)
     plotter.camera.SetFocalPoint(0.0, 0.0, 0.0)
     reflect["set"](1.0)
     opacity["set"](0.90)
     tabs = []
-    ok, message = vc.load(path, plotter, panel=panel, on_tab=tabs.append)
+    ok, message = vc.load(path, plotter, panel=panel, on_tab=tabs.append,
+                          name="正面から")
     position = tuple(round(v, 6) for v in plotter.camera.GetPosition())
     focal = tuple(round(v, 6) for v in plotter.camera.GetFocalPoint())
     check("★読み込むと画角が戻る", ok and position == (3.0, -8.0, 2.5)
@@ -3649,6 +3685,26 @@ def test_camera_save():
     check("タブも合わせる", tabs == ["音線"], str(tabs))
     check("★`camera_set` を立てる（立てないと show() が視点を戻す）",
           bool(plotter.camera_set))
+
+    ok, message = vc.load(path, plotter, panel=panel, name="無い名前")
+    check("無い名前を言われたら、そう知らせて落ちない", ok is False, message)
+    check("★名前を指定して消せる（何本も貯まるので）",
+          vc.remove(path, "上から") and vc.view_names(path) == ["正面から"],
+          str(vc.view_names(path)))
+
+    # 昔の形（1 ファイル 1 画角）も読める
+    old_path = os.path.join(os.path.dirname(path), "昔.json")
+    with io.open(old_path, "w", encoding="utf-8") as handle:
+        json.dump({"format": 1, "camera": vc.camera_state(plotter),
+                   "tab": None,
+                   "controls": [{"label": "反射回数", "value": 5.0}]},
+                  handle, ensure_ascii=False)
+    check("★昔の形（1 ファイル 1 画角）も読める",
+          vc.view_names(old_path) == [vc.DEFAULT_NAME],
+          str(vc.view_names(old_path)))
+    ok, message = vc.load(old_path, plotter, panel=panel)
+    check("昔の形を読むと数値も戻る",
+          ok and abs(reflect["value"] - 5.0) < 1e-9, message)
 
     ok, message = vc.load(os.path.join(os.path.dirname(path), "無い.json"),
                           plotter)

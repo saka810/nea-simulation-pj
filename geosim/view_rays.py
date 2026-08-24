@@ -1611,11 +1611,12 @@ def view(dxf_path, raylog_path, mode="both", absorption=None, unit=None,
 
         # 「音線の情報」は起動時にコンソールへ出しているのでパネルには載せない
         # （操作が増えて入りきらなくなったため。2026-08-19）
-        panel.heading("操作")
-        # ★全部は F1 の別ウィンドウで読める（パネルは狭いので要点だけ）
-        panel.text(chr(10).join(help_lines[:6]), color="#7f8794")
-        panel.help_window(help_lines + ["PageUp / PageDown  左の欄を送る"],
-                          title="音線・音粒子 — 操作の一覧")
+        # ★操作は**左の欄にそのまま置く**（2026-08-24 ユーザー要望。
+        #   ページ送りが入ったので入りきる）。要点だけの抜粋と F1 の一覧に
+        #   同じことを二度書いていたのをやめ、重複するキーの説明も落とす
+        help_lines = panel.help_list(
+            help_lines + ["Tab 音線 / 音粒子 / 虚音源を切り替え",
+                          "PageUp / PageDown  左の欄を送る"])
         panel.enable_value_input()
         # ★入りきらない分はページ送りで見る（2026-08-21 ユーザー指摘）
         panel.enable_scroll()

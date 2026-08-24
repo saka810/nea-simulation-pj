@@ -40,7 +40,7 @@
     `h` 室に寄る   `r` 全部が入るように引く（VTK のキー）
     **数値の枠を押すとその場で打ち込める**（Enter 確定 / Esc 取り消し）
     `o` 不透明度の対象を切り替え   `t` 数値の欄をまとめて入力
-    `g` いまの画面を画像で保存   `F1` 操作の一覧   `q` 閉じる
+    `g` いまの画面を画像で保存   `q` 閉じる（操作の一覧は左の欄に出る）
 
 ## 資料用に図だけ書き出す
 
@@ -504,7 +504,7 @@ def add_controls(plotter, display, sets, panel=None, font=None,
     |---|---|---|
     | `opacity_control` | False | 不透明度の欄は音線側が作っている |
     | `colour_key` | `"i"` | `m` は不透明度の表示 ON/OFF が使っている |
-    | `help_window` | False | F1 は音線側が持っている（一覧に混ぜてもらう） |
+    | `help_window` | False | 操作の一覧は音線側が出す（そちらに混ぜてもらう） |
     | `save_dir` | None | 画像保存の `g` も音線側が持っている |
     """
     if panel is not None:
@@ -538,10 +538,8 @@ def add_controls(plotter, display, sets, panel=None, font=None,
         if opacity_control:
             vg.add_opacity_control(plotter, font=font, panel=panel, target_key="o")
 
-        panel.heading("虚音源の操作")
-        panel.text(f"w 受音点を切り替え   {colour_key} 色を切り替え\n"
-                   "l 線の表示 ON/OFF\n"
-                   "h 室に寄る   r 全部が入る", size=8, color="#7f8794")
+        # ★短い抜粋は置かない（下の一覧と同じことを二度書くため。
+        #   2026-08-24 ユーザー指摘「重複しているものもあります」）
         keys = [
             "w  受音点を切り替え（濃い水色がいま選んでいる点）",
             f"{colour_key}  虚音源の色（反射回数 / エネルギー / 到来時刻）",
@@ -560,7 +558,8 @@ def add_controls(plotter, display, sets, panel=None, font=None,
                      f"▲▼ で 1 段ずつ   {vg.VALUE_INPUT_KEY} でまとめて入力",
                      "z / x / c / v  視点（上・正面・横・等角）",
                      "PageUp / PageDown  左の欄を送る", "q  閉じる"]
-            panel.help_window(keys, title="虚音源 — 操作の一覧", note=IMAGE_NOTE)
+            # ★左の欄にそのまま置く（2026-08-24 ユーザー要望）
+            panel.help_list(keys, title="虚音源の操作", note=IMAGE_NOTE)
         panel.enable_value_input()
         panel.enable_scroll()
 
