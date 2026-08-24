@@ -48,6 +48,24 @@ def _warn(title, error):
         pass        # 画面が出せない環境（CLI）では文字だけで十分
 
 
+def _absorption_for(project):
+    """可視化に渡す吸音率の表。**計算と同じ決め方**（条件表 → 吸音率表 → CSV）。
+
+    ★これが無いと、画面だけ「吸音率が未指定 → 0.1」になって
+    壁の色（吸音材モード）が計算と食い違う（2026-08-24 実行ログで気づいた）。
+    表が作れなければ `absorption_csv` のパスをそのまま渡す（従来の道）。
+    """
+    try:
+        import run_project
+
+        table = run_project._absorption_table_for(project, verbose=False)
+        if table:
+            return table
+    except Exception as error:
+        print(f"[app] 吸音率の表を作れませんでした（{type(error).__name__}: {error}）")
+    return project.absorption_path
+
+
 def _visualise(project, results=None):
     """計算結果の可視化ウィンドウを開く（音線 ↔ 音粒子を Tab で切替）。"""
     import project as pj
@@ -76,7 +94,11 @@ def _visualise(project, results=None):
             print(f"[app] 虚音源は開けません（{type(error).__name__}: {error}）")
 
         vr.view(project.dxf_path, raylog, mode="both", image_sets=image_sets,
-                absorption=project.absorption_path,
+                # ★吸音率は**計算と同じ決め方**で渡す（2026-08-24。実行ログに
+                #   「吸音率が未指定のレイヤ → 0.1 を使用」と出ていた）。
+                #   材料は条件表の「吸音率」シートで決まるので、
+                #   `absorption_csv` が空でも表は作れる（`run_project` と同じ道）
+                absorption=_absorption_for(project),
                 unit=project.unit, band_number=project.band_number,
                 orient_normals=project.orient_normals,
                 received_only=True, max_rays=60, max_reflection=4,

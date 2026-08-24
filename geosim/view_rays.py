@@ -51,7 +51,7 @@
     入力      **数値の枠を押すとその場で打ち込める**（Enter 確定 / Esc 取り消し）。
               まとめて入れたいときは **`t`**（`e` は VTK の終了キーなので使えない）
     保存      **`g` いまの画面をそのまま画像で保存**（角度も設定もそのまま）
-              **`b` いまの視点で音粒子の動画（GIF）を保存**
+              **`b` いまの視点で音粒子の動画（MP4）を保存**
               置き場はプロジェクトの `図/画面/`。撮るたびに連番が増える
               （`save_dir` を渡したときだけ。渡さなければキーも出ない）
 
@@ -1591,7 +1591,7 @@ def view(dxf_path, raylog_path, mode="both", absorption=None, unit=None,
             if animation is not None:
                 add_movie_key(plotter, animation, save_dir, key="b",
                               movie_setting=movie_setting)
-                help_lines.insert(1, "b いまの視点で動画（GIF）を保存")
+                help_lines.insert(1, "b いまの視点で動画（MP4）を保存")
 
         # 「音線の情報」は起動時にコンソールへ出しているのでパネルには載せない
         # （操作が増えて入りきらなくなったため。2026-08-19）

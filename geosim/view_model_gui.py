@@ -119,49 +119,23 @@ VTK_RESERVED_KEYS = {
 VALUE_INPUT_KEY = "t"
 
 
-_TEXTURE_CACHE = {}
+def _rgb(colour):
+    """`"#3a4150"` のような色を (r, g, b)（0〜1）にする。
 
-
-def _colour_texture(colour):
-    """1 色だけの小さな画像（ボタンの塗りに使う）。
-
-    VTK のボタンは「状態ごとの画像」で見た目を決めるので、
-    色を変えるには画像を差し替える（`SetButtonTexture`）。
-    同じ色を何度も作らないように覚えておく。
+    文字の背景・枠の色に使う（VTK は 0〜1 の実数で受ける）。
     """
-    if colour in _TEXTURE_CACHE:
-        return _TEXTURE_CACHE[colour]
-    import vtk
     from matplotlib.colors import to_rgb
 
-    red, green, blue = (int(round(255 * c)) for c in to_rgb(colour))
-    image = vtk.vtkImageData()
-    image.SetDimensions(2, 2, 1)
-    image.AllocateScalars(vtk.VTK_UNSIGNED_CHAR, 3)
-    for y in range(2):
-        for x in range(2):
-            image.SetScalarComponentFromFloat(x, y, 0, 0, red)
-            image.SetScalarComponentFromFloat(x, y, 0, 1, green)
-            image.SetScalarComponentFromFloat(x, y, 0, 2, blue)
-    _TEXTURE_CACHE[colour] = image
-    return image
+    return tuple(float(c) for c in to_rgb(colour))
 
 
-def _place_button(button, x0, x1, y0, y1, dx=-4, dy=1):
-    """ボタン（`_flat_button` の戻り値）をこの四角に置く。
-
-    ★`PlaceWidget` のあとに `Modified()` と `BuildRepresentation()` を呼ぶこと。
-    忘れると**文字だけ動いて四角が取り残される**（2026-08-21 に踏んだ）。
-    """
-    widget, glyph = button
-    representation = widget.GetRepresentation()
-    representation.SetPlaceFactor(1.0)
-    representation.PlaceWidget([x0, x1, y0, y1, 0.0, 0.0])
-    representation.Modified()
-    representation.BuildRepresentation()
-    if glyph is not None:
-        glyph.SetDisplayPosition(int((x0 + x1) * 0.5) + dx, int(y0) + dy)
-    return widget
+# ★かつてここに `_colour_texture` と `_place_button`（テクスチャ版ボタンの
+#   置き場を決めるもの）があったが、**2026-08-24 に消した**。
+#   `vtkTexturedButtonRepresentation2D` を並べるとテクスチャが GPU の上限を
+#   超え、実行ログに「Hardware does not support the number of textures
+#   defined」が 391 回出た（シェーダも組めなくなる）。
+#   いまは文字の背景と枠（`ControlPanel._label`）＋クリック座標の当たり判定
+#   （`_hit_area`）で作ってあり、テクスチャを 1 枚も使わない。
 
 
 def _default_step(fmt, low, high):
@@ -235,6 +209,7 @@ class ControlPanel:
     BUTTON_FACE = "#3a4150"
     FIELD_FACE = "#20252f"      # 数値の枠（押すと手入力）。入力欄らしく暗く
     FIELD_EDIT = "#3d4a63"      # 打ち込んでいる最中の枠（明るくして分かるように）
+    FRAME_COLOR = "#5a6270"     # 枠線
     TAB_HEIGHT = 20             # タブの見出しの高さ [px]
     TAB_ACTIVE = "#2f6f9f"      # 選んでいるタブ
     TAB_IDLE = "#2b303a"        # 選んでいないタブ
@@ -260,6 +235,9 @@ class ControlPanel:
         self._editing = None
         self._buffer = ""
         self._editor_tag = None
+        # 押せる四角（テクスチャを使わないボタン。2026-08-24）
+        self._hits = []
+        self._click_tag = None
         self.scroll = 0.0                  # ページ送りの量 [px]
         self._help_lines = []              # 重ねて出す操作の一覧
         self._help_title = "操作の一覧"
@@ -289,6 +267,65 @@ class ControlPanel:
             print(f"[view] 警告: キー {key!r} は VTK が使っています"
                   f"（{VTK_RESERVED_KEYS[key]}）。別のキーにしてください")
         self.plotter.add_key_event(key, self.open_value_input)
+
+    # ---- 押せる四角（テクスチャを使わないボタン。2026-08-24）-----------
+    #
+    # ★`vtkTexturedButtonRepresentation2D` を並べると**テクスチャが GPU の上限を
+    #   超える**（実行ログに「Hardware does not support the number of textures
+    #   defined」が 391 回出た）。文字の背景と枠で見た目を作り、
+    #   **クリックの座標を自分で見て**押されたことにする。
+
+    def _install_clicker(self):
+        """クリックの見張りを 1 回だけ仕込む。"""
+        if self._click_tag is not None:
+            return True
+        interactor = getattr(getattr(self.plotter, "iren", None), "interactor", None)
+        if interactor is None:
+            return False
+
+        def on_click(caller, _event):
+            x, y = caller.GetEventPosition()
+            if x > self.width:
+                return                  # 3D 側のクリックは触らない（回転など）
+            for hit in reversed(self._hits):
+                if not hit["visible"]:
+                    continue
+                x0, y0, x1, y1 = hit["rect"]
+                if x0 <= x <= x1 and y0 <= y <= y1:
+                    hit["on_click"]()
+                    command = caller.GetCommand(self._click_tag)
+                    if command is not None:
+                        command.AbortFlagOn()   # 回転させない
+                    return
+
+        self._click_tag = interactor.AddObserver("LeftButtonPressEvent",
+                                                 on_click, 10.0)
+        return True
+
+    def _hit_area(self, on_click):
+        """押せる四角を 1 つ登録する。戻り値で位置と表示を差し替える。"""
+        self._install_clicker()
+        hit = {"rect": (0, 0, -1, -1), "on_click": on_click, "visible": True}
+        self._hits.append(hit)
+        return hit
+
+    def _label(self, text="", size=None, background=None, frame=False,
+               colour=TEXT_COLOR):
+        """文字。`background` を渡すと**背景と枠**を付けてボタンらしくする。"""
+        self._panel()
+        actor = self.plotter.add_text(text or " ", position=(0, 0),
+                                     font_size=size or self.LABEL_FONT,
+                                     color=colour, font_file=self.font)
+        if background is not None:
+            prop = actor.GetTextProperty()
+            prop.SetBackgroundColor(_rgb(background))
+            prop.SetBackgroundOpacity(1.0)
+            if frame:
+                prop.SetFrame(True)
+                prop.SetFrameColor(_rgb(self.FRAME_COLOR))
+                prop.SetFrameWidth(1)
+        self._model()
+        return actor
 
     # ---- 枠の中で数字を打つ（2026-08-24）------------------------------
     #
@@ -846,21 +883,23 @@ class ControlPanel:
                             step=step)
 
     def spinbox(self, title, value_range, value, callback, fmt="%.2f", step=None):
-        """数値の欄。**Excel と同じ形**（枠の右に ▲▼、枠を押せば手入力）。
+        """数値の欄。**Excel と同じ形**（枠の右に ▲▼、枠を押せばその場で手入力）。
 
         ★スライダをやめた理由（ユーザー要望 2026-08-24）：つまみは
         「だいたいの値」を選ぶのは速いが、**狙った値にできない**
         （反射回数を 7 回にしたい、音線を 137 本にしたい、など）。
 
-        ★★見た目も直した（同日・画像つきの指摘）：
-        「数値とボタンが離れて良くわからない」「いちいち … を押さないと
-        任意入力できない」。**枠の右に ▲▼ をくっつけ、枠を押せば入力窓**にした。
+        ★見た目（同日・画像つきの指摘）：「数値とボタンが離れて良くわからない」
+        → **枠の右に ▲▼ をくっつけ、枠を押せばその場で打ち込める**。
 
             見出し            [   1.00 ][▲]
                                        [▼]
 
-        `step` を省いたときの 1 段は、表示の桁と範囲から決める
-        （`%.0f` なら 1、範囲が広ければ「範囲の 1/100」を 1/2/5×10^n に丸める）。
+        ★★中身は**テクスチャを使わない**（同日、実行ログで
+        「Hardware does not support the number of textures defined」が
+        391 回出た）。見た目は文字の背景と枠、押した判定はクリック座標。
+
+        `step` を省いたときの 1 段は、表示の桁と範囲から決める。
         """
         low, high = float(value_range[0]), float(value_range[1])
         if high < low:
@@ -871,7 +910,7 @@ class ControlPanel:
         def show_value(v=None):
             if v is not None:
                 state["value"] = float(v)
-            set_actor_text(shown_value, fmt % state["value"])
+            set_actor_text(field, f" {fmt % state['value']} ")
 
         def apply(v, notify=True):
             v = float(min(max(v, low), high))
@@ -885,40 +924,25 @@ class ControlPanel:
                 callback(v)
             self.plotter.render()
 
-        # ★★**四角を先に、文字をあとに作る**。VTK は**あとに作ったものが上**に
-        #   描かれるので、逆にすると**枠が数字を覆って読めない**（実際にそうなった）。
-        #   ★数値の枠そのものが「押すと**その場で**打ち込める」ボタン
-        #   （2026-08-24 ユーザー要望。別窓は開かない）
-        field = self._flat_button(lambda: self.start_edit(control),
-                                  colour=self.FIELD_FACE)
-        up = self._flat_button(lambda: apply(state["value"] + step), glyph="▲",
-                               font_size=self.ARROW_FONT)
-        down = self._flat_button(lambda: apply(state["value"] - step), glyph="▼",
-                                 font_size=self.ARROW_FONT)
-        self._panel()
-        name = self.plotter.add_text(" ", position=(0, 0),
-                                     font_size=self.LABEL_FONT, color=TEXT_COLOR,
-                                     font_file=self.font)
-        shown_value = self.plotter.add_text(" ", position=(0, 0),
-                                            font_size=self.LABEL_FONT,
-                                            color=TEXT_COLOR, font_file=self.font)
-        self._model()
+        name = self._label(size=self.LABEL_FONT)
+        field = self._label(background=self.FIELD_FACE, frame=True)
+        up = self._label("▲", size=self.ARROW_FONT, background=self.BUTTON_FACE)
+        down = self._label("▼", size=self.ARROW_FONT, background=self.BUTTON_FACE)
+
+        # 押せる四角（枠＝手入力、▲▼＝1 段ずつ）
+        field_hit = self._hit_area(lambda: self.start_edit(control))
+        up_hit = self._hit_area(lambda: apply(state["value"] + step))
+        down_hit = self._hit_area(lambda: apply(state["value"] - step))
 
         def draw_text(text):
             """打ち込んでいる途中の文字をそのまま枠に出す。"""
-            set_actor_text(shown_value, text)
+            set_actor_text(field, f" {text} ")
 
         def highlight(flag):
             """打ち込み中は枠を明るくする（どこに入るか分かるように）。"""
-            colour = self.FIELD_EDIT if flag else self.FIELD_FACE
-            representation = field[0].GetRepresentation()
-            texture = _colour_texture(colour)
-            for index in range(2):
-                try:
-                    representation.SetButtonTexture(index, texture)
-                except Exception:
-                    break
-            representation.Modified()
+            prop = field.GetTextProperty()
+            prop.SetBackgroundColor(_rgb(self.FIELD_EDIT if flag
+                                         else self.FIELD_FACE))
 
         control = {"label": title, "range": (low, high), "value": state["value"],
                    "format": fmt, "step": step,
@@ -932,28 +956,21 @@ class ControlPanel:
             right = self.width - self.margin
             arrow_x = right - self.ARROW
             field_x = max(self.margin + 40, arrow_x - self.FIELD)
-            half = self.SPIN / 2.0
-            # ▲（上半分）と ▼（下半分）を枠の右にくっつける（Excel と同じ形）
-            _place_button(up, arrow_x, right, y + half, y + self.SPIN,
-                          dy=2, dx=-3)
-            _place_button(down, arrow_x, right, y, y + half, dy=1, dx=-3)
-            _place_button(field, field_x, arrow_x - 1, y, y + self.SPIN)
-            # 値は枠の中、見出しは枠の左
-            shown_value.SetDisplayPosition(int(field_x) + 7, int(y) + 4)
-            name.SetDisplayPosition(self.margin, int(y) + 4)
+            half = int(self.SPIN / 2)
+            name.SetDisplayPosition(self.margin, int(y) + 5)
             name.SetInput(self.fit(title, field_x - self.margin - 6))
-
-        shown = {"on": True}
+            field.SetDisplayPosition(int(field_x), int(y) + 4)
+            up.SetDisplayPosition(int(arrow_x) + 3, int(y) + half + 1)
+            down.SetDisplayPosition(int(arrow_x) + 3, int(y) + 1)
+            field_hit["rect"] = (field_x, y, arrow_x - 1, y + self.SPIN)
+            up_hit["rect"] = (arrow_x, y + half, right, y + self.SPIN)
+            down_hit["rect"] = (arrow_x, y, right, y + half)
 
         def show(visible):
-            for actor in (name, shown_value, up[1], down[1]):
-                if actor is not None:
-                    actor.SetVisibility(bool(visible))
-            if bool(visible) == shown["on"]:
-                return
-            shown["on"] = bool(visible)
-            for widget, _ in (field, up, down):
-                widget.On() if visible else widget.Off()
+            for actor in (name, field, up, down):
+                actor.SetVisibility(bool(visible))
+            for hit in (field_hit, up_hit, down_hit):
+                hit["visible"] = bool(visible)
 
         self._add(self.SPIN + 6, place, show)
         return control
@@ -961,9 +978,9 @@ class ControlPanel:
     def tab_strip(self, labels, on_select, active=0):
         """★**タブの見出しを横に並べる**（2026-08-24 ユーザー要望）。
 
-        > 結果表示画面で、音線・音粒子・虚音源、すべて一画面で表示されていて、
-        > どれが何の設定かわからない。左の欄もタブで切り替える形式にしては
-        > どうでしょう？画面上側に切替える用のタブを用意して…
+        > 音線・音粒子・虚音源、すべて一画面で表示されていて、どれが何の設定か
+        > わからない。左の欄もタブで切り替える形式にしてはどうでしょう？
+        > 画面上側に切替える用のタブを用意して…
 
         押されたタブを濃く、それ以外を薄く塗る。`on_select(タブ名)` が呼ばれる。
         戻り値は `select(タブ名)`。**Tab キーから切り替えたときも見出しを合わせる**
@@ -971,32 +988,18 @@ class ControlPanel:
         """
         labels = list(labels)
         state = {"active": labels[active] if labels else None}
-        buttons = []
+        tabs = []
         for label in labels:
-            widget, glyph = self._flat_button(
-                lambda name=label: choose(name), glyph=label,
-                colour=(self.TAB_ACTIVE if label == state["active"]
-                        else self.TAB_IDLE))
-            buttons.append((label, widget, glyph))
+            actor = self._label(label, background=self.TAB_IDLE, frame=True)
+            tabs.append({"label": label, "actor": actor,
+                         "hit": self._hit_area(
+                             lambda name=label: choose(name))})
 
         def paint():
-            """選んでいるタブを濃く、それ以外を薄く塗る。
-
-            ★VTK のボタンは**状態ごとの画像**で見た目を決めるので、
-            色を変えるには画像を差し替える（`SetButtonTexture`）。
-            チェックボックス流用なので状態は 2 つと分かっている。
-            """
-            for label, widget, _ in buttons:
-                colour = (self.TAB_ACTIVE if label == state["active"]
+            for tab in tabs:
+                colour = (self.TAB_ACTIVE if tab["label"] == state["active"]
                           else self.TAB_IDLE)
-                representation = widget.GetRepresentation()
-                texture = _colour_texture(colour)
-                for index in range(2):
-                    try:
-                        representation.SetButtonTexture(index, texture)
-                    except Exception:
-                        break
-                representation.Modified()
+                tab["actor"].GetTextProperty().SetBackgroundColor(_rgb(colour))
 
         def choose(name):
             if name == state["active"]:
@@ -1006,26 +1009,19 @@ class ControlPanel:
             on_select(name)
 
         def place(y):
-            if not buttons:
+            if not tabs:
                 return
-            span = (self.width - 2 * self.margin) / len(buttons)
-            for index, (label, widget, glyph) in enumerate(buttons):
+            span = (self.width - 2 * self.margin) / len(tabs)
+            for index, tab in enumerate(tabs):
                 x0 = self.margin + index * span
-                _place_button((widget, glyph), x0, x0 + span - 2,
-                              y, y + self.TAB_HEIGHT)
-                glyph.SetInput(self.fit(label, span - 10))
-                glyph.SetDisplayPosition(int(x0) + 8, int(y) + 5)
-
-        shown = {"on": True}
+                tab["actor"].SetInput(f" {self.fit(tab['label'], span - 14)} ")
+                tab["actor"].SetDisplayPosition(int(x0), int(y) + 4)
+                tab["hit"]["rect"] = (x0, y, x0 + span - 3, y + self.TAB_HEIGHT)
 
         def show(visible):
-            for _, _, glyph in buttons:
-                glyph.SetVisibility(bool(visible))
-            if bool(visible) == shown["on"]:
-                return
-            shown["on"] = bool(visible)
-            for _, widget, _ in buttons:
-                widget.On() if visible else widget.Off()
+            for tab in tabs:
+                tab["actor"].SetVisibility(bool(visible))
+                tab["hit"]["visible"] = bool(visible)
 
         self._add(self.TAB_HEIGHT + 8, place, show)
         paint()
@@ -1045,55 +1041,23 @@ class ControlPanel:
         > 受音点の向きを一括で向けるボタンがチェックボックスで複数選択可に
         > なってます。チェックボックス・ラジオボタンでは無く、ボタンとして、
         > そのボタンを押せばその向きになる、というだけで良いです。
-
-        チェックボックスを流用しているが、`color_on` と `color_off` を同じ色に
-        してあるので **latch して見えない**（押した状態が残らない）。
         """
-        self._panel()
-        widget, glyph = self._flat_button(on_click, glyph=label,
-                                         colour=colour or self.BUTTON_FACE)
+        actor = self._label(label, background=colour or self.BUTTON_FACE,
+                            frame=True)
+        hit = self._hit_area(on_click)
 
         def place(y):
-            _place_button((widget, glyph), self.margin,
-                          self.width - self.margin, y, y + self.SPIN)
-            glyph.SetDisplayPosition(self.margin + 8, int(y) + 4)
-            glyph.SetInput(self.fit(label, self.width - 2 * self.margin - 16))
-
-        shown = {"on": True}
+            width = self.width - 2 * self.margin
+            actor.SetInput(f" {self.fit(label, width - 14)} ")
+            actor.SetDisplayPosition(self.margin, int(y) + 4)
+            hit["rect"] = (self.margin, y, self.margin + width, y + self.SPIN)
 
         def show(visible):
-            glyph.SetVisibility(bool(visible))
-            if bool(visible) == shown["on"]:
-                return
-            shown["on"] = bool(visible)
-            widget.On() if visible else widget.Off()
+            actor.SetVisibility(bool(visible))
+            hit["visible"] = bool(visible)
 
         self._add(self.SPIN + 6, place, show)
-        return widget
-
-    def _flat_button(self, on_click, glyph=None, colour=None, font_size=None):
-        """押しても見た目が変わらない小さなボタン。`(widget, 文字)` を返す。
-
-        ★VTK には「ボタン」が無いので**チェックボックスを流用する**。
-        押すと状態が入れ替わるが、`color_on` と `color_off` を同じにしてあるので
-        latch しているように見えない。状態そのものは使わず、
-        **変化したこと＝押されたこと**として扱う。
-        """
-        colour = colour or self.BUTTON_FACE
-        self._panel()               # ★パネル側に置く（`spinbox` と同じ理由）
-        widget = self.plotter.add_checkbox_button_widget(
-            lambda _state: on_click(), value=False, position=(self.margin, 0),
-            size=self.SPIN, border_size=1,
-            color_on=colour, color_off=colour, background_color=colour)
-        label = None
-        if glyph:
-            label = self.plotter.add_text(glyph, position=(0, 0),
-                                          font_size=font_size or self.LABEL_FONT,
-                                          color=TEXT_COLOR, font_file=self.font)
-        self._model()
-        self._pin(widget)
-        self._widgets.append(widget)
-        return (widget, label)
+        return actor
 
     def slider_widget(self, title, value_range, value, callback, fmt="%.2f"):
         """横向きのスライダ（**参照実装として残してある**。いまは使っていない）。

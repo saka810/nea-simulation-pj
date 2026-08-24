@@ -3347,6 +3347,57 @@ def test_ui_2026_08_24():
           hits == ["5"], str(hits))
     plotter.close()
 
+    # ---- ①c 押せる四角（テクスチャを使わないボタン。2026-08-24）----
+    #
+    # ★`vtkTexturedButtonRepresentation2D` を並べると**テクスチャが GPU の上限を
+    #   超える**（実行ログに「Hardware does not support the number of textures
+    #   defined」が 391 回出た）。文字の背景と枠＋クリック座標の当たり判定に変えた。
+    plotter = vg.build_plotter(room, off_screen=True, panel=True,
+                               show_normals=False)
+    panel = vg.control_panel(plotter)
+    moved = []
+    panel.slider("試し", [0.0, 100.0], 10.0, lambda v: moved.append(v), fmt="%.1f")
+    control = panel.controls[-1]
+    chosen, pressed = [], []
+    panel.tab_strip(["あ", "い", "う"], lambda name: chosen.append(name))
+    panel.button("押す", lambda: pressed.append(1))
+    plotter.show(auto_close=False)
+    panel.relayout()
+    raw = plotter.iren.interactor
+
+    def click(rect):
+        x0, y0, x1, y1 = rect
+        raw.SetEventPosition(int((x0 + x1) / 2), int((y0 + y1) / 2))
+        raw.InvokeEvent("LeftButtonPressEvent")
+
+    hits = panel._hits
+    check("押せる四角が登録される（枠・▲・▼・タブ 3・ボタン）",
+          len(hits) == 7, f"{len(hits)} 個")
+    click(hits[1]["rect"])
+    check("★▲ を押すと 1 段上がる", abs(control["value"] - 11.0) < 1e-9,
+          f"{control['value']}")
+    click(hits[2]["rect"])
+    check("★▼ を押すと 1 段下がる", abs(control["value"] - 10.0) < 1e-9,
+          f"{control['value']}")
+    click(hits[0]["rect"])
+    check("★枠を押すと編集が始まる", panel._editing is control)
+    panel.cancel_edit()
+    click(hits[5]["rect"])
+    check("★タブを押すと切り替わる", chosen == ["う"], str(chosen))
+    click(hits[6]["rect"])
+    check("★ボタンを押すと 1 回だけ効く", pressed == [1], str(pressed))
+    before = control["value"]
+    raw.SetEventPosition(900, 400)
+    raw.InvokeEvent("LeftButtonPressEvent")
+    check("3D 側のクリックは拾わない（回転などを邪魔しない）",
+          abs(control["value"] - before) < 1e-9)
+    for hit in hits:
+        hit["visible"] = False
+    click(hits[1]["rect"])
+    check("★隠れている欄は押せない（タブで隠したもの）",
+          abs(control["value"] - before) < 1e-9)
+    plotter.close()
+
     # ---- ② 受音点の向きを一括で決める（ユーザー要望）----
     model, src, rec = load_test_room()
     editor = fe.FaceEditor(model, head_azimuth=[0.0] * len(model.receiver_points))

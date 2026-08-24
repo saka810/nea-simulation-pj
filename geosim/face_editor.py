@@ -1105,11 +1105,21 @@ def _library_for(project):
 
 def load_model_for(project, verbose=True):
     """プロジェクトの設定で DXF を読む（法線・吸音材の手動指定も適用する）。"""
-    absorption = project.absorption_path
+    # ★吸音率は**計算と同じ決め方**で引く（2026-08-24。実行ログに
+    #   「吸音率が未指定のレイヤ → 0.1 を使用」と出ていた）。
+    #   材料は条件表の「吸音率」シートで決まるので、`absorption_csv` が
+    #   空でも表は作れる（`run_project._absorption_table_for` と同じ道）
     table = None
-    if absorption:
+    try:
+        import run_project
+
+        table = run_project._absorption_table_for(project, verbose=False)
+    except Exception as error:
+        print(f"[face_editor] 条件表から吸音率を引けませんでした"
+              f"（{type(error).__name__}: {error}）")
+    if not table and project.absorption_path:
         import absorption as ab
-        library = ab.MaterialLibrary.from_file(absorption,
+        library = ab.MaterialLibrary.from_file(project.absorption_path,
                                                kind=project.absorption_kind)
         table = library.absorption_table(project.assignment,
                                          band_number=project.band_number)
