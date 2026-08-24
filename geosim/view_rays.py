@@ -1080,6 +1080,19 @@ def add_focus(plotter, raylog, pool, rays=None, animation=None, panel=None,
             return
         focus.set_point(np.asarray(point, dtype=float)[:3])
 
+    # ★★**pyvista 側の不具合を先回りして避ける**（2026-08-24。実行ログで発覚）。
+    #   `p` で点を拾うと pyvista 0.48 系が
+    #     PyVistaAttributeError: Attribute 'pickpoint' does not exist
+    #   で落ちる。`Plotter.left_button_down` が `self.pickpoint = …` と
+    #   代入するのに、`Plotter` が**新しい属性の追加を禁じている**ため
+    #   （pyvista 側の取り合わせの問題で、こちらの使い方は正しい）。
+    #   先に属性を作っておけば代入が通る。
+    try:
+        if not hasattr(plotter, "pickpoint"):
+            pv.set_new_attribute(plotter, "pickpoint", None)
+    except Exception:
+        pass                # 用意できなくても、下の try で拾って知らせる
+
     try:
         plotter.enable_point_picking(callback=picked, show_message=False,
                                      show_point=False, tolerance=0.02,
@@ -1297,10 +1310,21 @@ def add_movie_key(plotter, animation, folder, stem="音粒子", key="b",
         print(f"[view_rays] 応答 {first:.0f}〜{last:.0f} ms を "
               f"{rate:.1f} コマ/秒（画面と同じ速さ）で {length:.1f} 秒ぶん録ります"
               f"／全 {total} コマ")
-        if len(steps) < total - steps[0]:
-            print(f"[view_rays] 先まで録るには「動画の長さ」を "
-                  f"{(total - steps[0]) / rate:.0f} 秒にするか、"
-                  f"「再生速度」を上げてください")
+        # ★**現実的な案を出す**（2026-08-24。「動画の長さを 11394 秒に」と
+        #   出ていて助けになっていなかった）。長さで足りるならそれを、
+        #   途方もない長さになるなら**再生速度**を勧める
+        remaining = total - steps[0]
+        if len(steps) < remaining:
+            need_seconds = remaining / rate
+            if need_seconds <= 60.0:
+                print(f"[view_rays] 先まで録るには「動画の長さ」を "
+                      f"{need_seconds:.0f} 秒にしてください")
+            else:
+                print(f"[view_rays] 先（応答 "
+                      f"{animation.times[total - 1] * 1000:.0f} ms）まで録るには、"
+                      f"いまの長さ {seconds:.0f} 秒なら「再生速度」を "
+                      f"{remaining / seconds:.0f} コマ/秒にしてください"
+                      f"（長さを伸ばす場合は {need_seconds:.0f} 秒）")
         # ★出したまま（`seconds=None`）にして、終わってから消す
         vg.notice(plotter, message, kind="busy", seconds=None)
 
