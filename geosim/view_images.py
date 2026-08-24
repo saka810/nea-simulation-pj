@@ -40,6 +40,13 @@
     `h` 室に寄る   `r` 全部が入るように引く（VTK のキー）
     `o` 不透明度の対象を切り替え   `t` スライダの値を数字で入れる
     `g` いまの画面を画像で保存   `F1` 操作の一覧   `q` 閉じる
+
+## 資料用に図だけ書き出す
+
+    python view_images.py <プロジェクト> --start 1 --end 1 --receiver 1                           --fit room --screenshot 1次反射.png
+
+`--receiver`（1 始まり）と `--fit`（`all` = 虚音源まで全部入る / `room` = 室に寄る）は
+画面の `w` と `h` に相当する。
 """
 
 import os
@@ -376,7 +383,8 @@ def _receivers(project):
 def view(dxf_path, sets, absorption=None, unit=None, band_number=None,
          orient_normals="cad", source_points=None, opacity=0.10,
          layer_opacity=None, start=DEFAULT_ORDER_START, end=DEFAULT_ORDER_END,
-         count=DEFAULT_COUNT, mode="reflection", screenshot=None, save_dir=None):
+         count=DEFAULT_COUNT, mode="reflection", screenshot=None, save_dir=None,
+         receiver=0, fit="all"):
     """虚音源をモデルの上に重ねて表示する。
 
     sets … `ImageSourceSet` のリスト（受音点ごと）
@@ -425,8 +433,8 @@ def view(dxf_path, sets, absorption=None, unit=None, band_number=None,
         panel.heading("いま描いているもの")
         label = panel.reserve_text(3, size=9)
 
-    display = ImageSourceDisplay(plotter, sets, start=start, end=end, count=count,
-                                 mode=mode, label=label)
+    display = ImageSourceDisplay(plotter, sets, index=receiver, start=start,
+                                 end=end, count=count, mode=mode, label=label)
 
     if panel is not None:
         limit = display.order_limit
@@ -488,12 +496,19 @@ def view(dxf_path, sets, absorption=None, unit=None, band_number=None,
         panel.enable_value_input()
         panel.enable_scroll()
 
-    # ★覚えておいた室の範囲でカメラと目盛りを引き直す（上記の理由）
-    _fit_to_room(plotter, room_bounds)
+    # ★目盛りは室の範囲で引き直す（虚音源に合わせると室の目盛りが読めない）。
+    #   カメラは `fit="room"` のときだけ室に寄せる（既定は全部が入る形）
+    _fit_to_room(plotter, room_bounds, camera=(fit == "room"))
 
     plotter.add_key_event("w", display.next_receiver)
     plotter.add_key_event("m", display.next_mode)
     plotter.add_key_event("l", display.toggle_lines)
+    # ★★`h`（室に寄る）の登録が抜けていた（2026-08-24 に気づいた）。
+    #   操作の一覧には書いてあったのに**キーが効かなかった**。
+    #   前の編集が失敗して保存されず、説明文だけ入っていたため。
+    #   `r`（全部が入る）は VTK が元から持っているキーなのでそのまま使う
+    plotter.add_key_event("h",
+                          lambda: _fit_to_room(plotter, room_bounds, camera=True))
     if save_dir:
         vg.add_screenshot_key(plotter, save_dir, "虚音源", key="g")
 
@@ -509,17 +524,28 @@ def view(dxf_path, sets, absorption=None, unit=None, band_number=None,
     return display
 
 
-def _fit_to_room(plotter, bounds):
+def _fit_to_room(plotter, bounds, camera=True):
     """カメラと目盛りを**室の範囲**に合わせ直す。
 
     虚音源は室の外へ遠く離れるので、VTK に任せると室が点になる（`view()` 参照）。
     目盛り（`show_bounds`）も描いてあるもの全部に合わせて伸びてしまうので、
     範囲を明示して引き直す。
+
+    `camera=False` なら目盛りだけ引き直す。起動時は「全部が入る」ほうが
+    虚音源と受音点を結ぶ線が見えるので、そちらを既定にしている。
     """
-    try:
-        plotter.reset_camera(bounds=bounds)
-    except TypeError:               # 古い pyvista は bounds を取らない
-        plotter.reset_camera()
+    if camera:
+        try:
+            plotter.reset_camera(bounds=bounds)
+        except TypeError:           # 古い pyvista は bounds を取らない
+            plotter.reset_camera()
+        # ★**`show()` は最初の描画でカメラを引き直す**（描いてあるもの全部が
+        #   入るように）。合わせたことを伝えておかないと、起動前にここで
+        #   室に寄せても効かない（実際に `--fit room` が効かなかった）
+        try:
+            plotter.camera_set = True
+        except Exception:
+            pass
     try:
         plotter.show_bounds(bounds=bounds, grid="back", location="outer",
                             ticks="outside", font_size=9, color="#7f8794",
@@ -557,6 +583,10 @@ def main():
     p.add_argument("--colour", default="reflection", choices=list(COLOUR_MODES),
                    help="色の付け方")
     p.add_argument("--opacity", type=float, default=0.10, help="壁の不透明度")
+    p.add_argument("--receiver", type=int, default=1,
+                   help="どの受音点を相手にするか（1 始まり。画面では w キー）")
+    p.add_argument("--fit", default="all", choices=("all", "room"),
+                   help="視野。all=虚音源まで全部入る / room=室に寄る（画面では h）")
     p.add_argument("--screenshot", default=None, help="画像に保存して閉じる")
     a = p.parse_args()
 
@@ -564,7 +594,8 @@ def main():
     if not project.dxf:
         raise SystemExit(f"{a.folder} に project.json がありません")
     open_for_project(project, start=a.start, end=a.end, count=a.count,
-                     mode=a.colour, opacity=a.opacity, screenshot=a.screenshot)
+                     mode=a.colour, opacity=a.opacity, screenshot=a.screenshot,
+                     receiver=max(0, a.receiver - 1), fit=a.fit)
     return 0
 
 

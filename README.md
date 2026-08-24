@@ -219,6 +219,8 @@ python view_model.py ..\test.dxf --absorption ..\absorption.csv
 # 虚音源（虚音源と受音点を結ぶ線。反射回数の開始・終了で絞る。計算はやり直さない）
 .\.venv\Scripts\python geosim\view_images.py <プロジェクトフォルダ>
 .\.venv\Scripts\python geosim\view_images.py <フォルダ> --start 2 --end 2   # 2 回目反射のみ
+# 資料用に図だけ書き出す（--receiver は 1 始まり、--fit は all / room）
+.\.venv\Scripts\python geosim\view_images.py <フォルダ> --start 1 --end 1 --fit room --screenshot 1次反射.png
 
 # 音線と音粒子（既定は両方。Tab で切り替え。閉じずに見比べられる）
 python view_rays.py ..\test.dxf ..\結果\test_raylog.npz --received-only --max-reflection 3 --color time
