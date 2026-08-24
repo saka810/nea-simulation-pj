@@ -22,7 +22,8 @@
   z / x / c / v   上 / 正面 / 横 / 等角 の視点
   n               法線矢印の表示切り替え
   g               いまの画面をそのまま画像で保存（`add_screenshot_key` を付けた画面のみ）
-  数値の枠を押す  ★**その場で打ち込める**（Enter 確定 / Esc 取り消し）。別窓は開かない
+  数値の枠を押す  ★**押した桁から打ち込める**（Enter 確定 / Esc 取消）。別窓は開かない
+                  ← → で桁を移動、BackSpace で前の 1 文字、Delete でその文字
   ▲▼             1 段ずつ増減（枠の右にくっついている。Excel と同じ形）
   t               数値の欄をまとめて入力（`enable_value_input` を付けた画面のみ）
   w / s           ワイヤフレーム / 面（VTK の既定キー）
@@ -117,6 +118,34 @@ VTK_RESERVED_KEYS = {
 
 # 数値入力を開くキー。**予約キーを避けること**（上記）
 VALUE_INPUT_KEY = "t"
+
+
+def _caret_from_x(actor, text, left, x, renderer):
+    """押した x が `text` の何文字目かを返す（文字の幅を測って決める）。
+
+    ★数値の枠のどこを押したかで入力位置を決めるために使う（2026-08-24）。
+    測れないときは末尾（`len(text)`）を返す——末尾なら必ず安全に編集できる。
+    """
+    try:
+        keep = actor.GetInput()
+        size = [0, 0]
+        # ★**いちばん近い「文字の境目」**に付ける（「その文字より前／後」で
+        #   決めると 1 桁ずれる。実際にずれた）
+        best, gap = len(text), None
+        for index in range(len(text) + 1):
+            if index:
+                actor.SetInput(text[:index])
+                actor.GetSize(renderer, size)
+                width = float(size[0])
+            else:
+                width = 0.0
+            distance = abs(left + width - x)
+            if gap is None or distance < gap:
+                best, gap = index, distance
+        actor.SetInput(keep)
+        return best
+    except Exception:
+        return len(text)
 
 
 def _rgb(colour):
@@ -216,6 +245,7 @@ class ControlPanel:
     FIELD_TEXT = "#eef2f8"      # 枠の中の数字（明るく）
     FRAME_COLOR = "#7f8794"     # 枠線（入力欄らしく、はっきり見える明るさ）
     ARROW_FACE = "#4a5261"      # ▲▼ の地（パネルより明るくして押すものに見せる）
+    FIELD_PAD = 7               # 枠の左の余白 [px]（数字の始まる位置）
     TAB_HEIGHT = 20             # タブの見出しの高さ [px]
     TAB_ACTIVE = "#2f6f9f"      # 選んでいるタブ
     TAB_IDLE = "#2b303a"        # 選んでいないタブ
@@ -240,7 +270,7 @@ class ControlPanel:
         #   `_editing` は編集中の欄（`controls` の 1 件）、`_buffer` は打った文字
         self._editing = None
         self._buffer = ""
-        self._fresh = False        # 最初の 1 文字で置き換えるか（`start_edit` 参照）
+        self._caret = 0            # 入力位置（`_buffer` の何文字目の前か）
         self._editor_tag = None
         # 押せる四角（テクスチャを使わないボタン。2026-08-24）
         self._hits = []
@@ -299,7 +329,8 @@ class ControlPanel:
                     continue
                 x0, y0, x1, y1 = hit["rect"]
                 if x0 <= x <= x1 and y0 <= y <= y1:
-                    hit["on_click"]()
+                    # 押した位置も渡す（数値の枠は**どの桁を押したか**で使う）
+                    hit["on_click"](x, y)
                     command = caller.GetCommand(self._click_tag)
                     if command is not None:
                         command.AbortFlagOn()   # 回転させない
@@ -379,25 +410,51 @@ class ControlPanel:
             self.cancel_edit()
             return True
         if keysym == "BackSpace":
-            # いまの値を直す使い方。ここから先は「置き換え」をやめる
-            self._fresh = False
-            self._buffer = self._buffer[:-1]
+            # キャレットの**前**の 1 文字を消す
+            if self._caret > 0:
+                self._buffer = (self._buffer[:self._caret - 1]
+                                + self._buffer[self._caret:])
+                self._caret -= 1
+            self._draw_buffer()
+            return True
+        if keysym == "Delete":
+            # キャレットの**位置**の 1 文字を消す
+            self._buffer = (self._buffer[:self._caret]
+                            + self._buffer[self._caret + 1:])
+            self._draw_buffer()
+            return True
+        if keysym == "Left":
+            self._caret = max(0, self._caret - 1)
+            self._draw_buffer()
+            return True
+        if keysym == "Right":
+            self._caret = min(len(self._buffer), self._caret + 1)
+            self._draw_buffer()
+            return True
+        if keysym == "Home":
+            self._caret = 0
+            self._draw_buffer()
+            return True
+        if keysym == "End":
+            self._caret = len(self._buffer)
             self._draw_buffer()
             return True
         if keycode and keycode in self.EDIT_CHARS:
-            if self._fresh:
-                # ★最初の 1 文字で置き換える（表計算と同じ感じ）
-                self._buffer = ""
-                self._fresh = False
-            self._buffer += keycode
+            # ★キャレットの位置に**挿し込む**（全部を置き換えたりしない）
+            self._buffer = (self._buffer[:self._caret] + keycode
+                            + self._buffer[self._caret:])
+            self._caret += 1
             self._draw_buffer()
             return True
         # 関係ないキー → 編集をやめて、そのキーは本来の役目に回す
         self.cancel_edit()
         return False
 
-    def start_edit(self, control):
-        """★枠を押したときに呼ばれる。**その枠の中で**打ち込みを始める。"""
+    def start_edit(self, control, caret=None):
+        """★枠を押したときに呼ばれる。**その枠の中で**打ち込みを始める。
+
+        `caret` は入力位置（文字数）。枠のどこを押したかから決めて渡す。
+        """
         if self._editing is not None and self._editing is not control:
             self.commit_edit()          # 別の欄へ移ったら、それまでの分を確定
         if not self._install_editor():
@@ -405,11 +462,12 @@ class ControlPanel:
             return self.open_value_input(only=control)
         self._editing = control
         # ★★**押した時点では、いまの値をそのまま残す**（2026-08-24 ユーザー指摘
-        #   「入力しようとしたら、数字が消えてしまいます」）。
-        #   Excel と同じ流儀で、**最初の 1 文字を打った時点で置き換わる**
-        #   （`_fresh`）。BackSpace から始めれば、いまの値を直す形にもなる
+        #   「入力しようとしたら、数字が消えてしまいます」）
         self._buffer = (control["format"] % control["value"]).strip()
-        self._fresh = True
+        # ★**押した桁にキャレットを立てる**（同日「0.45 の 4 の部分を消して
+        #   3 に書き換えたい」）。位置が分からなければ末尾に置く
+        self._caret = (len(self._buffer) if caret is None
+                       else max(0, min(len(self._buffer), int(caret))))
         control["highlight"](True)
         self._draw_buffer()
         return control
@@ -442,10 +500,11 @@ class ControlPanel:
         return control
 
     def _draw_buffer(self):
-        """打っている途中の文字を枠に出す（末尾に文字入力の印を付ける）。"""
+        """打っている途中の文字を枠に出す。**入力位置に `|` を挟む。**"""
         if self._editing is None:
             return
-        self._editing["draw"](self._buffer + "_")
+        caret = max(0, min(len(self._buffer), self._caret))
+        self._editing["draw"](self._buffer[:caret] + "|" + self._buffer[caret:])
         self.plotter.render()
 
     def open_value_input(self, only=None):
@@ -948,10 +1007,23 @@ class ControlPanel:
         up = self._label("▲", size=self.ARROW_FONT, background=self.ARROW_FACE)
         down = self._label("▼", size=self.ARROW_FONT, background=self.ARROW_FACE)
 
+        def begin_edit(x=None, y=None):
+            """★**押した桁**から編集を始める（2026-08-24 ユーザー要望
+            「0.45 の 4 の部分を消して 3 に書き換えたい」）。
+
+            文字の幅を測って、押した x がどの文字の上かを出す。
+            """
+            caret = None
+            if x is not None:
+                text = (fmt % state["value"]).strip()
+                left = field_hit["rect"][0] + self.FIELD_PAD
+                caret = _caret_from_x(field, text, left, x, self.plotter.renderer)
+            self.start_edit(control, caret=caret)
+
         # 押せる四角（枠＝手入力、▲▼＝1 段ずつ）
-        field_hit = self._hit_area(lambda: self.start_edit(control))
-        up_hit = self._hit_area(lambda: apply(state["value"] + step))
-        down_hit = self._hit_area(lambda: apply(state["value"] - step))
+        field_hit = self._hit_area(begin_edit)
+        up_hit = self._hit_area(lambda *_: apply(state["value"] + step))
+        down_hit = self._hit_area(lambda *_: apply(state["value"] - step))
 
         def draw_text(text):
             """打ち込んでいる途中の文字をそのまま枠に出す。"""
@@ -1012,7 +1084,7 @@ class ControlPanel:
             actor = self._label(label, background=self.TAB_IDLE, frame=True)
             tabs.append({"label": label, "actor": actor,
                          "hit": self._hit_area(
-                             lambda name=label: choose(name))})
+                             lambda *_, name=label: choose(name))})
 
         def paint():
             for tab in tabs:
@@ -1063,7 +1135,7 @@ class ControlPanel:
         """
         actor = self._label(label, background=colour or self.BUTTON_FACE,
                             frame=True)
-        hit = self._hit_area(on_click)
+        hit = self._hit_area(lambda *_: on_click())
 
         def place(y):
             width = self.width - 2 * self.margin

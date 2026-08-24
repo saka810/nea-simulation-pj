@@ -3301,12 +3301,22 @@ def test_ui_2026_08_24():
         raw.SetKeyCode(keycode if keycode is not None else chr(0))
         raw.InvokeEvent("KeyPressEvent")
 
+    def type_in(text):
+        for character in text:
+            press(character, character)
+
+    # ---- 打ち込みの基本 ----
     panel.start_edit(control)
     check("★枠を押すと編集が始まる（別窓は開かない）",
           panel._editing is control)
-    for character in "37.5":
-        press(character, character)
-    check("打った文字が溜まる", panel._buffer == "37.5", panel._buffer)
+    check("★押した時点で値が残っている（消えない）", panel._buffer == "12.5",
+          repr(panel._buffer))
+    check("入力位置は末尾（押した桁が分からないとき）",
+          panel._caret == len("12.5"), panel._caret)
+    for _ in range(4):
+        press("BackSpace")
+    type_in("37.5")
+    check("打った文字が溜まる", panel._buffer == "37.5", repr(panel._buffer))
     press("Return")
     check("★Enter で確定して値になる",
           abs(control["value"] - 37.5) < 1e-9 and applied
@@ -3315,38 +3325,50 @@ def test_ui_2026_08_24():
     check("確定したら編集は終わっている", panel._editing is None)
 
     panel.start_edit(control)
-    for character in "99":
-        press(character, character)
+    type_in("99")
     press("Escape")
     check("★Esc で取り消せる（値は変わらない）",
           abs(control["value"] - 37.5) < 1e-9, f"{control['value']}")
 
-    panel.start_edit(control)
-    for character in "500":
-        press(character, character)
+    panel.start_edit(control, caret=0)
+    type_in("500")
     press("Return")
     check("範囲の外は丸める", abs(control["value"] - 100.0) < 1e-9,
           f"{control['value']}")
 
-    # ★押した時点では**いまの値が残る**（2026-08-24 ユーザー指摘
-    #   「入力しようとしたら、数字が消えてしまいます」）。
-    #   最初の 1 文字で置き換わり、BackSpace から始めれば直す形になる
-    panel.start_edit(control)
-    check("★押した時点で値が残っている（消えない）", panel._buffer == "100.0",
-          repr(panel._buffer))
+    # ---- ★★桁を直す（2026-08-24「0.45 の 4 を消して 3 に書き換えたい」）----
+    control["set"](45.0)
+    panel.start_edit(control, caret=2)      # 「45.0」の 4 と 5 の間
     press("BackSpace")
-    check("BackSpace で 1 文字消せる（値を直す使い方）",
-          panel._buffer == "100.", repr(panel._buffer))
-    press("5", "5")
-    check("BackSpace のあとは置き換えず続けて打てる",
-          panel._buffer == "100.5", repr(panel._buffer))
-    press("Escape")
-    panel.start_edit(control)
-    press("7", "7")
-    check("★最初の 1 文字は置き換える（表計算と同じ）", panel._buffer == "7",
+    check("★BackSpace は入力位置の前の 1 文字", panel._buffer == "4.0",
+          repr(panel._buffer))
+    type_in("3")
+    check("★打った文字は入力位置に挿し込む", panel._buffer == "43.0",
+          repr(panel._buffer))
+    press("Return")
+    check("桁を直して確定できる", abs(control["value"] - 43.0) < 1e-9,
+          f"{control['value']}")
+
+    control["set"](45.0)
+    panel.start_edit(control, caret=1)      # 「4」の直後
+    press("Delete")
+    check("★Delete は入力位置の文字を消す", panel._buffer == "4.0",
           repr(panel._buffer))
     press("Escape")
 
+    panel.start_edit(control)
+    press("Left")
+    press("Left")
+    check("★← で桁を戻せる", panel._caret == len("45.0") - 2, panel._caret)
+    press("Right")
+    check("→ で進められる", panel._caret == len("45.0") - 1, panel._caret)
+    press("Home")
+    check("Home で先頭へ", panel._caret == 0)
+    press("End")
+    check("End で末尾へ", panel._caret == len("45.0"))
+    press("Escape")
+
+    # ---- 関係ないキー・編集していないとき ----
     fired = []
     plotter.add_key_event("j", lambda: fired.append("j"))
     panel.start_edit(control)

@@ -1570,8 +1570,8 @@ def view(dxf_path, raylog_path, mode="both", absorption=None, unit=None,
 
         # ---- いまの画面をそのまま保存する（G-12）----
         help_lines = list(image_keys) + [
-            "数値の枠を押すとその場で打ち込める（Enter 確定 / Esc 取り消し）",
-            "▲▼ で 1 段ずつ   t でまとめて入力",
+            "数値の枠を押すと**その桁から**打ち込める（Enter 確定 / Esc 取消）",
+            "← → で桁を移動   BackSpace/Delete で 1 文字   ▲▼ で 1 段ずつ",
             "k 絞り込みの種類   j 基準点",
                       "0 絞り込みを解除   p 点を拾う（任意）",
                       "z/x/c/v 視点   r リセット   q 終了"]

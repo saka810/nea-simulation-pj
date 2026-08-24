@@ -555,7 +555,8 @@ def add_controls(plotter, display, sets, panel=None, font=None,
             keys.append("g  いまの画面を画像で保存")
         if help_window:
             # 単独の画面のときだけ。同居するときは音線側の一覧に混ぜてもらう
-            keys += ["数値の枠を押すとその場で打ち込める（Enter 確定 / Esc 取り消し）",
+            keys += ["数値の枠を押すと**その桁から**打ち込める（Enter 確定 / Esc 取消）",
+                     "← → で桁を移動   BackSpace/Delete で 1 文字",
                      f"▲▼ で 1 段ずつ   {vg.VALUE_INPUT_KEY} でまとめて入力",
                      "z / x / c / v  視点（上・正面・横・等角）",
                      "PageUp / PageDown  左の欄を送る", "q  閉じる"]
