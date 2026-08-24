@@ -240,6 +240,11 @@ def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref
             enabled=source_on_surface)
         if source_placement.on_surface:
             print(f"[procedure] 音源の置かれ方: {source_placement.describe()}")
+    if source_placement is not None and source_placement.on_surface:
+        # ★**ここで置き直す**（経路の指紋を取る前に）。あとで置き直すと、
+        #   面とみなす距離や放射方向を変えても指紋が同じままになり、
+        #   古い経路を使い回してしまう
+        soundsource_point = source_placement.point
 
     # 統計残響式（Sabine / Eyring / Eyring-Knudsen）。音線を飛ばす前に出せる。
     # 面積と吸音率だけから決まるので、あとの計算結果と突き合わせる物差しになる
@@ -324,11 +329,6 @@ def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref
         report("音線追跡（済み・受音点間で共有）", 1.0)
         reflection_history = traced_history
 
-    if source_placement is not None and source_placement.on_surface:
-        # ★以降（バックトレース・距離減衰）も**置き直した位置**で通す。
-        #   ここを揃えないと、鏡像の距離が音線追跡と食い違う
-        soundsource_point = source_placement.point
-
     if reused is None:
         # 重複経路の削除
         # 元コード721行目に対応
@@ -346,6 +346,22 @@ def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref
         # ★経路の幾何を保存する。**吸音材だけ変えた次の計算はここから再開できる**（F-9）
         if paths_filename is not None and len(pulses):
             pc.save(paths_filename, pulses, mark)
+
+    # ★★**面の上に置いた音源は半球ぶんのパワーを出す**（2026-08-24）。
+    #   パルスの大きさは虚音源の理屈（1/(4πd²)）で解いているので、音線の本数や
+    #   立体角には依らない。つまり折り返しただけでは「W を 4π に出した音」のまま。
+    #   床置きの音源は **W を 2π に出す**ので、指向係数 Q = 4π/Ω = 2 を掛ける
+    #   （＝ +3 dB）。載っている面の 1 次反射を落としたぶんがこれで戻る
+    #   （床の上の音源は「直接音とその鏡像」が重なって 2 倍になる、という形）。
+    #   ★剛な取り付け面を仮定している（ISO 3744/3745 の半自由音場と同じ扱い）
+    if source_placement is not None and source_placement.on_surface and len(pulses):
+        factor = 4.0 * np.pi / source_placement.solid_angle
+        pulses.energy = pulses.energy * factor
+        print(f"[procedure] 面上の音源なので指向係数 Q = {factor:.1f}"
+              f"（{10.0 * np.log10(factor):+.1f} dB）を掛けました")
+        if pulse_filename is not None:
+            # 掛ける前の値で保存済みなので、**書き直す**（表と中身を合わせる）
+            pulses.save_csv(pulse_filename)
 
     # 後部残響が nref で切れていないかの確認。
     # 残響時間は「エネルギーが 35 dB 減衰するまで」を見るので、

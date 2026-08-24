@@ -259,7 +259,7 @@ def write_figure(project, result, bands=None, verbose=True):
     figure.suptitle(f"{project.room_label} / {project.condition_label}"
                     f"  逆二乗則からのずれ")
     figure.tight_layout()
-    path = project.figure_path("逆二乗")
+    path = project.figure_path("逆二乗.png")
     figure.savefig(path, dpi=140)
     plt.close(figure)
     if verbose:

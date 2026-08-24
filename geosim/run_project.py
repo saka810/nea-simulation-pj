@@ -136,6 +136,12 @@ def _paths_ready(project, receivers, verbose=True):
         if source is None:
             return False
         faces = mm.collision_arrays(model.mesh, two_sided=project.two_sided)
+        # ★**面の上に置いた音源は置き直した位置で指紋を取る**（2026-08-24）。
+        #   `procedure` 側は置き直してから指紋を取るので、ここで合わせないと
+        #   「経路が無い」と判断してしまい、条件を変えるたびに追跡し直しになる
+        placement = placement_for(project, model, source, verbose=False)
+        if placement.on_surface:
+            source = placement.point
         for index, point in enumerate(receivers):
             sub = _sub_project(project, index)
             mark = pc.fingerprint(model.mesh, faces, source, point, project.rays,
