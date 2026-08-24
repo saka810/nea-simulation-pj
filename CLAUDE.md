@@ -76,7 +76,7 @@
   書き残しておくと他端末で追いやすい。
 - `PROGRAM_STRUCTURE.md` … 各モジュールの役割・Fortran との変数対応・実装状況・既知のバグ一覧。
   **コードに手を入れたらこの文書も合わせて更新する。**
-- `tests\test_geosim.py` … 数値検証（632 項目）。pytest 不要、素の Python で走る。
+- `tests\test_geosim.py` … 数値検証（635 項目）。pytest 不要、素の Python で走る。
   **数式に関わるコードを変更したら必ず走らせる**：`.venv\Scripts\python tests\test_geosim.py`
 - `TODO.md` … 作業一覧（A〜G にグルーピング）。着手・完了したらチェックボックスを更新する。
 - `docs\pdf\` … **docs の Markdown を PDF にしたもの**（2026-08-23 ユーザー要望
@@ -334,6 +334,12 @@
   DXF の実際のレイヤ名は `DxfModel.face_layers` に別に持っている
 - **面は「同一平面パッチ」を 1 枚として見せる**（2026-08-21 ユーザー指摘
   「同一平面と認識されたものは 1 つの平面として表示して」）。
+  ★**結果・モデル・虚音源の画面（`build_plotter`）も同じにする**
+  （2026-08-24 ユーザー指摘「結果の表示の方で、面の構成が三角形要素の
+  ままになっています」。面の確認画面だけ直っていた）。
+  外周を引くのは `view_model_gui.patch_outline_actor()`、
+  レイヤの持ち物は `registry[name]["edge"]` に入れる（消すときに一緒に消える）。
+  虚音源の `_add_room_outline` は**二重に引くのでやめた**（参照実装として残す）
   三角形の辺は描かず（`show_edges=False`）、**パッチの外周だけ**を線で重ねる
   （`FaceEditor._patch_outline`）。picking は三角形単位のままなので、
   選択・材料の貼り付けには手を入れずに見た目だけ変えられる。

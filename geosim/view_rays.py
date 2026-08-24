@@ -1552,7 +1552,7 @@ def view(dxf_path, raylog_path, mode="both", absorption=None, unit=None,
             import view_images as vi
 
             room_bounds = tuple(plotter.bounds)
-            vi._add_room_outline(plotter, model)
+            # 室の形（パッチの外周）は `build_plotter` が引いている
             panel.begin_group(TAB_IMAGES)
             panel.heading("虚音源")
             image_label = panel.reserve_text(3, size=9)

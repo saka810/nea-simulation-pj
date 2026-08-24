@@ -1792,6 +1792,41 @@ def normal_arrows(poly, length):
                                        shaft_radius=0.03))
 
 
+PATCH_EDGE_COLOR = "#8b93a3"    # 同一平面パッチの外周（三角形の割れ目は描かない）
+
+
+def patch_outline_actor(plotter, triangles, colour=PATCH_EDGE_COLOR,
+                        width=1.0, opacity=0.75):
+    """**同一平面パッチの外周だけ**を線で重ねる。→ actor（引けなければ None）
+
+    ★面は「同一平面パッチ」を 1 枚として見せる（2026-08-21 ユーザー指摘
+    「同一平面と認識されたものは 1 つの平面として表示して」）。
+    三角形の辺を全部引くと網目になり、**分割が見た目に出てしまう**
+    （2026-08-24 に結果の画面でそうなっていると指摘を受けた）。
+
+    面そのものは三角形のまま描く（当たり判定や色分けはそのまま使える）。
+    """
+    if not len(triangles):
+        return None
+    try:
+        segments = rd.patch_outline_segments(
+            np.array([np.asarray(t.vertexes, dtype=float) for t in triangles]),
+            np.array([np.asarray(t.normal, dtype=float) for t in triangles]))
+    except Exception as error:
+        print(f"[view] パッチの外周を描けませんでした: "
+              f"{type(error).__name__}: {error}")
+        return None
+    if not len(segments):
+        return None
+    points = segments.reshape(-1, 3)
+    lines = np.column_stack([np.full(len(segments), 2),
+                             np.arange(0, 2 * len(segments), 2),
+                             np.arange(1, 2 * len(segments), 2)]).ravel()
+    return plotter.add_mesh(pv.PolyData(points, lines=lines), color=colour,
+                            line_width=width, lighting=False, opacity=opacity,
+                            pickable=False, reset_camera=False)
+
+
 def build_plotter(model, title="モデルビューア", off_screen=False,
                   show_normals=True, normal_ratio=0.06, window_size=(1280, 860),
                   opacity=1.0, show_bounds=True, show_summary=True,
@@ -1805,8 +1840,11 @@ def build_plotter(model, title="モデルビューア", off_screen=False,
     show_bounds … 目盛り付きの箱を描くか
     show_summary … 読み込み結果のサマリを左下に出すか（音線を重ねるときは邪魔）
 
+    面は**同一平面パッチを 1 枚として**見せる（三角形の辺は描かず、
+    パッチの外周だけを線で重ねる。`patch_outline_actor`）。
+
     戻り値の Plotter には `geosim_layers` を付けてある。
-    {レイヤ名: {'face', 'arrow', 'colour', 'opacity'}} で、
+    {レイヤ名: {'face', 'edge', 'arrow', 'colour', 'opacity'}} で、
     あとから不透明度や表示を変えるのに使う（`add_opacity_control` が利用する）。
     """
     layer_opacity = dict(layer_opacity or {})
@@ -1826,19 +1864,26 @@ def build_plotter(model, title="モデルビューア", off_screen=False,
 
     face_actors = {}
     arrow_actors = {}
+    edge_actors = {}
     for i, name in enumerate(layers):
         colour = LAYER_PALETTE[i % len(LAYER_PALETTE)]
-        poly = triangles_to_polydata([t for t in mesh if t.material == name])
+        faces = [t for t in mesh if t.material == name]
+        poly = triangles_to_polydata(faces)
         alpha = float(layer_opacity.get(name, opacity))
 
+        # ★三角形の辺は描かない（`show_edges=False`）。代わりに
+        #   **同一平面パッチの外周**を重ねる（2026-08-24 ユーザー指摘
+        #   「結果の表示の方で、面の構成が三角形要素のままになっています」）
         face_actors[name] = plotter.add_mesh(
-            poly, color=colour, show_edges=True, edge_color=BG_BOTTOM,
-            line_width=1, lighting=True, ambient=0.32, diffuse=0.70,
+            poly, color=colour, show_edges=False,
+            lighting=True, ambient=0.32, diffuse=0.70,
             specular=0.06, smooth_shading=False, opacity=alpha,
             backface_params={"color": BACK_COLOR, "ambient": 0.32,
                              "diffuse": 0.70,
                              "opacity": alpha * BACKFACE_OPACITY_RATIO},
         )
+        # 面が薄くても形が分かるよう、外周は面より濃いめに残す
+        edge_actors[name] = patch_outline_actor(plotter, faces)
         arrows = normal_arrows(poly, arrow_len)
         arrow_actors[name] = plotter.add_mesh(arrows, color="#f2f4f8",
                                               lighting=False)
@@ -1893,7 +1938,8 @@ def build_plotter(model, title="モデルビューア", off_screen=False,
             count = model.layer_counts.get(name, 0)
             panel.checkbox(f"{name} ({count})", True,
                            _visibility_callback(plotter, face_actors[name],
-                                                arrow_actors[name], state),
+                                                arrow_actors[name], state,
+                                                edge_actors.get(name)),
                            colour=LAYER_PALETTE[i % len(LAYER_PALETTE)])
 
     plotter.view_isometric()
@@ -1901,6 +1947,8 @@ def build_plotter(model, title="モデルビューア", off_screen=False,
     # pyvista は新しい公開属性の追加を禁じているので、専用の API を使う
     # （無い版のために private 名へのフォールバックも用意しておく）
     registry = {name: {"face": face_actors[name], "arrow": arrow_actors[name],
+                       # 外周は `edge`（面の確認画面と同じ名前。まとめて消せる）
+                       "edge": edge_actors.get(name),
                        "colour": LAYER_PALETTE[i % len(LAYER_PALETTE)],
                        "opacity": layer_opacity[name]}
                 for i, name in enumerate(layers)}
@@ -2046,11 +2094,19 @@ def add_opacity_control(plotter, font=None, panel=None, target_key="o"):
     return control
 
 
-def _visibility_callback(plotter, face_actor, arrow_actor, state):
-    """チェックボックス用のコールバックを作る（クロージャの取り違え防止）。"""
+def _visibility_callback(plotter, face_actor, arrow_actor, state,
+                         edge_actor=None):
+    """チェックボックス用のコールバックを作る（クロージャの取り違え防止）。
+
+    ★レイヤを消したら**面・外周・法線の矢印を全部**消す（2026-08-21 ユーザー指摘。
+    以前は矢印だけ残っていた）。
+    """
     def callback(flag):
         face_actor.SetVisibility(flag)
-        arrow_actor.SetVisibility(flag and state["normals"])
+        if edge_actor is not None:
+            edge_actor.SetVisibility(flag)
+        if arrow_actor is not None:
+            arrow_actor.SetVisibility(flag and state["normals"])
         plotter.render()
     return callback
 

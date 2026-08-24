@@ -3458,6 +3458,31 @@ def test_ui_2026_08_24():
     check("知らせは消せる", "geosim_notice" not in list(plotter.actors))
     plotter.close()
 
+    # ---- ①b' 面は同一平面パッチとして見せる（ユーザー指摘）----
+    #
+    # ★「結果の表示の方で、面の構成が三角形要素のままになっています」
+    #   （2026-08-24）。面の確認画面は 2026-08-21 に直してあったが、
+    #   結果・モデル・虚音源の画面（`build_plotter`）が三角形の辺を描いていた。
+    plotter = vg.build_plotter(room, off_screen=True, panel=True,
+                               show_normals=False)
+    registry = vg.layer_actors(plotter)
+    check("★三角形の辺は描かない（分割が見た目に出ない）",
+          not any(item["face"].prop.show_edges for item in registry.values()))
+    check("★代わりにパッチの外周を線で重ねる",
+          all(item.get("edge") is not None for item in registry.values())
+          and all(item["edge"].mapper.dataset.n_cells > 0
+                  for item in registry.values()),
+          str({name: item["edge"].mapper.dataset.n_cells
+               for name, item in registry.items()}))
+    one = registry[sorted(registry)[0]]
+    callback = vg._visibility_callback(plotter, one["face"], one["arrow"],
+                                       {"normals": False}, one["edge"])
+    callback(False)
+    check("★レイヤを消したら外周も消える（矢印だけ残らない）",
+          not one["face"].GetVisibility() and not one["edge"].GetVisibility())
+    callback(True)
+    plotter.close()
+
     # ---- ①c 押せる四角（テクスチャを使わないボタン。2026-08-24）----
     #
     # ★`vtkTexturedButtonRepresentation2D` を並べると**テクスチャが GPU の上限を

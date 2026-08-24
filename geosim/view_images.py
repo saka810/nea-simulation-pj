@@ -454,7 +454,7 @@ def view(dxf_path, sets, absorption=None, unit=None, band_number=None,
     # ★**室の形を線で重ねる**（2026-08-24 ユーザー指摘）。
     #   壁を薄く描くと形が読めなくなるので、同一平面パッチの外周を引く。
     #   これがあると不透明度を 0 まで下げても室の輪郭が残る
-    _add_room_outline(plotter, model)
+    # ★外周は `build_plotter` が引くようになった（2026-08-24）ので、ここでは引かない
 
     # 音源（虚音源と見比べるため。直接音の虚音源はここに一致する）
     points = source_points if source_points is not None else model.source_points
@@ -603,6 +603,10 @@ def _register_keys(plotter, display, room_bounds=None, fit="all",
 
 def _add_room_outline(plotter, model):
     """室の形（同一平面パッチの外周）を線で重ねる。
+
+    ★**いまは呼んでいない**（2026-08-24。`view_model_gui.build_plotter` が
+    レイヤごとに外周を引くようになったので、ここで引くと二重になる）。
+    モデルを持たない画面で形だけ足したくなったときのために残してある。
 
     ★壁を薄くしても形が分かるようにするためのもの（2026-08-24 ユーザー指摘
     「壁が見えなくなっている」）。三角形の辺を全部引くと網目になるので外周だけ。
