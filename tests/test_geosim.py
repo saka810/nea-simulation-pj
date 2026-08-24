@@ -3317,42 +3317,45 @@ def test_ui_2026_08_24():
             self.frames = frames
             self.times = np.arange(frames) / 1000.0
 
-    # 全部が長さに収まるとき：コマは全部使い、同じ絵を並べて速さを合わせる
-    steps, hold, fps, length = vr.movie_plan(FakeAnimation(10), seconds=10.0,
-                                             rate=1.0)
-    check("★再生速度 1 コマ/秒・長さ 10 秒 → 10 コマ・ちょうど 10 秒",
-          len(steps) == 10 and abs(length - 10.0) < 1e-9,
-          f"{len(steps)} コマ / {length:.1f} 秒 / hold={hold}")
-    check("★動画そのものは 30 fps でなめらか（1 fps の紙芝居にしない）",
-          fps == vr.VIDEO_FPS and hold == 30, f"fps={fps} hold={hold}")
-    check("同じ絵を並べて速さを合わせている（撮る枚数は増えない）",
-          abs(length - len(steps) * hold / fps) < 1e-9)
+    # ★**指定した長さの中に全コマを詰める**（実案件で 11,394 コマを 10 コマに
+    #   間引いて紙芝居になったので、こう決めた）
+    steps, hold, fps, length, speed = vr.movie_plan(FakeAnimation(11394),
+                                                    seconds=10.0, rate=1.0)
+    check("★全コマを指定の長さに詰める（紙芝居にしない）",
+          abs(length - 10.0) < 0.05 and len(steps) >= 250,
+          f"{len(steps)} コマ / {length:.1f} 秒 / {fps:.0f} fps")
+    check("★最後のコマまで入る（応答の終わりまで見える）",
+          steps[-1] == 11393, f"最後は {steps[-1]}")
+    check("何倍速かが分かる（画面の再生速度との比）",
+          abs(speed - 1139.4) < 1.0, f"{speed:.0f} 倍速")
 
-    # 収まらないときは等間隔に間引く（そのぶん早送り）
-    steps, hold, fps, length = vr.movie_plan(FakeAnimation(200), seconds=10.0,
-                                             rate=1.0)
-    check("★長さに収まらないぶんは間引く（先頭と末尾は残す）",
-          len(steps) == 10 and steps[0] == 0 and steps[-1] == 199,
-          f"{len(steps)} コマ / 最後は {steps[-1]}")
-    check("間引いても長さは指定どおり", abs(length - 10.0) < 1e-9,
-          f"{length:.1f} 秒")
+    # コマ数が少ないときは同じ絵を並べて長さを合わせる（1 fps にしない）
+    steps, hold, fps, length, speed = vr.movie_plan(FakeAnimation(10),
+                                                    seconds=10.0, rate=1.0)
+    check("★コマが少なくても 30 fps でなめらか",
+          len(steps) == 10 and hold == 30 and abs(fps - 30.0) < 1e-9,
+          f"{len(steps)} コマ / hold={hold} / {fps:.0f} fps")
+    check("画面の速さで見終わるならその長さ（1 倍速）",
+          abs(length - 10.0) < 1e-9 and abs(speed - 1.0) < 1e-9,
+          f"{length:.1f} 秒 / {speed:.2f} 倍速")
 
-    # 速度を上げれば、同じ長さでも細かく見られる
-    steps, hold, fps, length = vr.movie_plan(FakeAnimation(200), seconds=10.0,
-                                             rate=20.0)
-    check("★再生速度を上げると同じ長さで全コマ入る",
-          len(steps) == 200 and abs(length - 10.0) < 1e-9,
-          f"{len(steps)} コマ / {length:.1f} 秒 / hold={hold} / fps={fps:.0f}")
-    check("★fps は速さの整数倍（30 で割り切れなくても長さがずれない）",
-          abs(fps - 20.0 * hold) < 1e-9 and 20.0 <= fps <= 120.0,
-          f"fps={fps:.0f} hold={hold}")
+    # ★再生速度が速ければ、長さの指定より早く終わる（速度が効く）
+    steps, hold, fps, length, speed = vr.movie_plan(FakeAnimation(60),
+                                                    seconds=30.0, rate=20.0)
+    check("★再生速度どおりに見終わるなら、そこで終わる",
+          abs(length - 3.0) < 0.1 and abs(speed - 1.0) < 0.05,
+          f"{length:.1f} 秒 / {speed:.2f} 倍速")
 
-    # 長さを伸ばしても、速度が同じなら 1 秒あたりに進むコマ数は変わらない
-    steps, hold, fps, length = vr.movie_plan(FakeAnimation(200), seconds=20.0,
-                                             rate=1.0)
-    check("長さを 2 倍にすると入るコマも 2 倍",
-          len(steps) == 20 and abs(length - 20.0) < 1e-9,
-          f"{len(steps)} コマ / {length:.1f} 秒")
+    check("撮る枚数は動画のコマ数より多くならない",
+          len(vr.movie_plan(FakeAnimation(100000), 5.0, 1.0)[0]) <= 5 * 30 + 1,
+          f"{len(vr.movie_plan(FakeAnimation(100000), 5.0, 1.0)[0])} 枚")
+
+    # 16 の倍数に切って ffmpeg に渡す（警告を出さない）
+    frame = np.zeros((684, 1280, 3), dtype=np.uint8)
+    cropped = vr._crop_to_block(frame)
+    check("★縦横を 16 の倍数に切る（ffmpeg に伸ばさせない）",
+          cropped.shape[0] % 16 == 0 and cropped.shape[1] % 16 == 0,
+          f"{frame.shape[:2]} → {cropped.shape[:2]}")
 
     check("★動画は MP4（iPad などでそのまま再生できる形式）",
           vr.VIDEO_SUFFIX == ".mp4", vr.VIDEO_SUFFIX)

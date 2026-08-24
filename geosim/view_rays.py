@@ -1141,22 +1141,36 @@ def write_video(path, images, fps, hold=1, quality=VIDEO_QUALITY):
     try:
         # macro_block_size … H.264 は縦横が 16 の倍数だと素直に通る。
         #   端数は imageio が黒で埋めてくれる（切り落とさない）
-        writer = imageio.get_writer(path, fps=max(1.0, float(fps)), codec="libx264",
-                                    quality=quality, macro_block_size=16,
-                                    ffmpeg_params=["-pix_fmt", "yuv420p"])
+        # ★`pixelformat` で渡す（`ffmpeg_params` に `-pix_fmt` を足すと
+        #   imageio のぶんと二重になって警告が出る）。
+        #   `yuv420p` は iPad・ブラウザで再生できる組み合わせ
+        writer = imageio.get_writer(path, fps=max(1.0, float(fps)),
+                                    codec="libx264", quality=quality,
+                                    macro_block_size=16, pixelformat="yuv420p")
     except Exception as error:
         print(f"[view_rays] MP4 が作れないので GIF にします（{type(error).__name__}）")
         return _write_gif_fallback(path, images, fps, hold)
 
     try:
         for image in images:
-            frame = np.asarray(image)
+            # ★縦横を 16 の倍数に**切って**渡す。端数があると ffmpeg が
+            #   「伸ばした」と警告を出す（H.264 の都合）。数 px 切るだけで済む
+            frame = _crop_to_block(np.asarray(image))
             # ★同じ絵を `hold` 枚並べて「進む速さ」を合わせる（`movie_plan` 参照）
             for _ in range(max(1, int(hold))):
                 writer.append_data(frame)
     finally:
         writer.close()
     return path
+
+
+def _crop_to_block(frame, block=16):
+    """縦横を `block` の倍数に切り落とす（H.264 に素直に通す）。"""
+    height = (frame.shape[0] // block) * block
+    width = (frame.shape[1] // block) * block
+    if height < block or width < block:
+        return frame
+    return frame[:height, :width]
 
 
 def _write_gif_fallback(path, images, fps, hold=1):
@@ -1183,46 +1197,39 @@ def _write_gif_fallback(path, images, fps, hold=1):
 VIDEO_FPS = 30.0
 
 
-def movie_plan(animation, seconds, rate, max_shots=900):
-    """動画の作り方を決める。`(撮るコマ, 各コマを何枚並べるか, fps, 長さ)` を返す。
+def movie_plan(animation, seconds, rate):
+    """動画の作り方を決める。`(撮るコマ, 各コマを何枚並べるか, fps, 長さ, 倍速)` を返す。
 
-    ★ここが 2026-08-24 の指摘「動画の長さや再生速度が反映されていない」の要。
-    それまでは GIF の 1 コマの表示時間を長さから割り出すだけで、
-    **再生速度（コマ/秒）は画面の再生にしか効いていなかった**。
+    ★ここが 2026-08-24 の指摘「動画の長さや再生速度が反映されていない」の答え。
 
-    ★★**「進む速さ」と「動画のなめらかさ」を分ける**のが要点。
-    再生速度をそのまま動画の fps にすると、既定の 1 コマ/秒では
-    **1 fps の紙芝居**になってしまう（実際にそうなった）。
+    ★★**動画は「指定した長さの中に全コマを詰める」**（実際に保存してもらって直した）。
+    最初は再生速度をそのまま守る作りにしたが、離散化時間 1 ms・応答 11.4 秒だと
+    全 11,394 コマあり、1 コマ/秒を守ると**10 秒の動画に 10 コマしか入らない**
+    （紙芝居になった）。画面で全部見るには 3 時間かかる速さなので、
+    そのまま動画に持ち込むのが間違いだった。
 
     | 設定 | 動画での意味 |
     |---|---|
-    | **再生速度 [コマ/秒]** | 音粒子が 1 秒間に進むコマ数。**画面で見ているとおりの速さ** |
-    | **動画の長さ [s]** | 上限。収まらないぶんは**等間隔に間引く**（そのぶん早送り） |
-    | `VIDEO_FPS`（30） | 動画のコマ数。同じ絵を `hold` 枚並べて速さを合わせる |
+    | **動画の長さ [s]** | 動画の長さそのもの。**この中に全コマを詰める** |
+    | **再生速度 [コマ/秒]** | これで見終わるほうが早ければ、そこで終わる（＝速度が効く） |
+    | `VIDEO_FPS`（30） | 動画のなめらかさ。コマが少ないときは同じ絵を並べて間を持たせる |
 
-    つまり「画面で見ている速さのまま、指定した長さで収まる、なめらかな動画」。
-    撮る枚数は `len(steps)` だけなので、`hold` を増やしても撮る手間は増えない
-    （同じ絵を並べるだけ。H.264 なら容量もほとんど増えない）。
+    つまり長さ = `min(指定の長さ, 全コマ ÷ 再生速度)`。
+    戻り値の「倍速」は画面で見るのに対して何倍速か（1.0 なら画面と同じ速さ）。
     """
     total = min(int(animation.frames), len(animation.times))
     rate = max(0.1, float(rate))
-    want = max(1, int(round(float(seconds) * rate)))         # 長さに収まるコマ数
-    if total <= want:
-        steps = np.arange(total)
-    else:
-        steps = np.unique(np.linspace(0, total - 1, want).round().astype(int))
-    if len(steps) > max_shots:           # 保険（撮る枚数の頭打ち）
-        steps = np.unique(np.linspace(0, len(steps) - 1,
-                                      max_shots).round().astype(int))
-        rate = len(steps) / max(1e-9, float(seconds))
-    # ★**動画の fps は「進む速さ」の整数倍**にする。
-    #   同じ絵を `hold` 枚並べて速さを合わせる仕組みなので、`hold` は整数。
-    #   fps を 30 に固定すると `hold = 30/rate` が割り切れず**長さがずれる**
-    #   （速さ 20 コマ/秒・長さ 10 秒で 13.3 秒になった）。
-    #   fps = rate × hold にすれば長さは `コマ数 ÷ 速さ` で厳密に合う
-    hold = max(1, int(round(VIDEO_FPS / rate)))
-    fps = float(min(120.0, max(1.0, rate * hold)))
-    return steps, hold, fps, len(steps) * hold / fps
+    seconds = max(0.5, float(seconds))
+    # 画面の速さで見終わる時間。長さの指定より短ければそちらを採る
+    length = min(seconds, total / rate)
+    shots = min(total, max(1, int(round(VIDEO_FPS * length))))
+    steps = (np.arange(total) if shots >= total
+             else np.unique(np.linspace(0, total - 1, shots).round().astype(int)))
+    # コマが少ないときは同じ絵を並べて長さを合わせる（1 fps の紙芝居にしない）
+    hold = max(1, int(round(VIDEO_FPS * length / len(steps))))
+    fps = float(min(120.0, max(1.0, len(steps) * hold / length)))
+    speed = (total / length) / rate          # 画面で見るのに対して何倍速か
+    return steps, hold, fps, len(steps) * hold / fps, speed
 
 
 def add_movie_key(plotter, animation, folder, stem="音粒子", key="b",
@@ -1245,18 +1252,17 @@ def add_movie_key(plotter, animation, folder, stem="音粒子", key="b",
                                               getattr(animation,
                                                       "frames_per_second",
                                                       DEFAULT_PLAY_FPS)))
-        steps, hold, fps, length = movie_plan(animation, seconds, rate)
+        steps, hold, fps, length, speed = movie_plan(animation, seconds, rate)
         total = min(int(animation.frames), len(animation.times))
-        thinned = len(steps) < total
 
         playing, keep = animation.playing, animation.step
         animation.playing = False
-        message = (f"動画を作っています… {len(steps)} コマ / "
-                   f"{length:.1f} 秒 / {rate:.1f} コマ/秒")
+        message = (f"動画を作っています… {length:.1f} 秒 / "
+                   f"{len(steps)} コマ（全 {total}）")
         print(f"[view_rays] {message}")
-        if thinned:
-            print(f"[view_rays] 指定の長さに収めるため {total} → {len(steps)} コマに"
-                  f"間引きます（そのぶん早送りになります）")
+        print(f"[view_rays] 応答 {animation.times[steps[-1]] * 1000:.0f} ms までを "
+              f"{length:.1f} 秒に収めます"
+              f"（画面の再生速度 {rate:.1f} コマ/秒 の {speed:.0f} 倍速）")
         # ★出したまま（`seconds=None`）にして、終わってから消す
         vg.notice(plotter, message, kind="busy", seconds=None)
 
@@ -1285,8 +1291,8 @@ def add_movie_key(plotter, animation, folder, stem="音粒子", key="b",
 
         size = os.path.getsize(path) / 1e6
         print(f"[view_rays] 動画を保存しました: {path}"
-              f"（{len(images)} コマ / {length:.1f} 秒 / "
-              f"{rate:.1f} コマ/秒 / {size:.1f} MB）")
+              f"（{len(images)} コマ / {length:.1f} 秒 / {fps:.0f} fps / "
+              f"{size:.1f} MB）")
         vg.notice(plotter, f"動画を保存しました: {os.path.basename(path)}"
                            f"（{length:.1f} 秒 / {size:.1f} MB）")
         return path
@@ -1311,7 +1317,7 @@ def save_movie(raylog, model, filename, index=None, frames=240, band=None,
                                   band=band, point_size=point_size)
     plotter.view_isometric()
 
-    steps, hold, fps, length = movie_plan(animation, seconds, rate)
+    steps, hold, fps, length, speed = movie_plan(animation, seconds, rate)
     images = []
     for step in steps:
         animation.update(int(step))
@@ -1321,13 +1327,9 @@ def save_movie(raylog, model, filename, index=None, frames=240, band=None,
     if os.path.splitext(filename)[1].lower() not in (".mp4", ".gif"):
         filename = os.path.splitext(filename)[0] + VIDEO_SUFFIX
     path = write_video(filename, images, fps, hold=hold)
-    print(f"[view_rays] {len(images)} コマ / {length:.1f} 秒 / "
-          f"{rate:.1f} コマ/秒（動画は {fps:.0f} fps）")
-    if len(steps) < min(int(animation.frames), len(animation.times)):
-        print(f"[view_rays] 指定の長さに収めるため "
-              f"{min(int(animation.frames), len(animation.times))} → "
-              f"{len(steps)} コマに間引きました（そのぶん早送りになります）。"
-              f"細かく見たいときは再生速度か動画の長さを上げてください")
+    total = min(int(animation.frames), len(animation.times))
+    print(f"[view_rays] {len(images)} コマ（全 {total}）/ {length:.1f} 秒 / "
+          f"{fps:.0f} fps / 画面の {speed:.0f} 倍速")
     return path
 
 
