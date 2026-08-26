@@ -172,7 +172,93 @@ def free_field_levels(distances, source_power_db=None, atmosphere=None,
             + 10.0 * np.log10(impedance / 400.0))
 
 
-def evaluate(project, verbose=True):
+# バンドの中で何点の周波数を計算して平均するか（参考案件の「周波数平均」に相当）
+COHERENT_LINES = 129
+
+
+def coherent_band_levels(pulses, frequencies, atmosphere, band_width="1/3",
+                         lines=COHERENT_LINES, source_power_db=None):
+    """パルス列を**位相ごと**重ねてバンド別の音圧レベルを出す [dB]（B の中身）。
+
+        p(f) = Σ_n √(A_n · e^{-m d_n} / 4π) / d_n · e^{-j k d_n}
+        Lp   = Lw + 10log10( <|p(f)|²> ) + 10log10(ρc/400)
+
+    `< >` はバンドの中の周波数平均。A（エネルギー和）と**同じ量**を、
+    足すときに位相を持たせただけのもの——干渉の山谷がそのまま出る。
+
+    ★**反射の位相ずれは 0 と仮定**している（実測の吸音率からは大きさしか
+      決まらない）。山谷の**位置**は当てにならず、**振れ幅の目安**として見る。
+    """
+    import absorption as ab
+
+    distance = np.asarray(pulses.distance, dtype=float)
+    energy = np.asarray(pulses.energy, dtype=float)
+    frequencies = np.asarray(frequencies, dtype=float)
+    velocity = atmosphere.sound_velocity
+    m = atmosphere.absorption_coefficient(frequencies)
+    lower, upper = ab.band_edges(frequencies, band_width)
+
+    power = 0.0 if source_power_db is None else float(np.mean(
+        np.atleast_1d(np.asarray(source_power_db, dtype=float))))
+    impedance = 10.0 * np.log10(atmosphere.density * velocity / 400.0)
+
+    levels = np.empty(len(frequencies))
+    for band in range(len(frequencies)):
+        air = np.exp(-m[band] * distance)
+        amplitude = np.sqrt(np.maximum(energy[:, band], 0.0) * air
+                            / (4.0 * np.pi)) / distance
+        line = np.linspace(lower[band], upper[band], lines)
+        wave = 2.0 * np.pi * line / velocity
+        pressure = np.exp(-1j * wave[:, None] * distance[None, :]) @ amplitude
+        mean = float(np.mean(np.abs(pressure) ** 2))
+        levels[band] = (power + 10.0 * np.log10(mean + 1.0e-300) + impedance)
+    return levels
+
+
+def read_coherent_levels(project, verbose=True):
+    """受音点ごとのパルス列から B の音圧レベルを出す。→ {受音点名: Lp[バンド]}
+
+    パルス列（`結果/recN/…_pulses.csv`）を読むだけで、**計算はやり直さない**。
+    """
+    import absorption as ab
+    import atmosphere as at
+    import loop_noredundancy as ln
+
+    frequencies = ab.frequency_bands(project.band_number,
+                                     getattr(project, "band_width", "1/1"),
+                                     getattr(project, "band_start", None))
+    air = at.Atmosphere(temperature=project.temperature,
+                        humidity=project.humidity, pressure=project.pressure)
+    levels, missing = {}, 0
+    for index in range(1, 1000):
+        sub = pj.Project(project.folder,
+                         **{k: getattr(project, k) for k in pj.DEFAULTS})
+        sub.receiver_index = index
+        path = sub.existing_result_path("pulses")
+        if path is None or not os.path.exists(path):
+            missing += 1
+            if missing > 3 and levels:
+                break
+            continue
+        missing = 0
+        try:
+            pulses = ln.PulseList.from_csv(path)
+        except Exception as error:
+            if verbose:
+                print(f"[逆二乗] rec{index} のパルス列が読めません: "
+                      f"{type(error).__name__}: {error}")
+            continue
+        levels[f"rec{index}"] = coherent_band_levels(
+            pulses, frequencies, air,
+            band_width=getattr(project, "band_width", "1/1"),
+            source_power_db=project.source_power_db)
+    if verbose and levels:
+        print(f"[逆二乗] 複素和（参考）を {len(levels)} 点ぶん計算しました"
+              f"（反射の位相ずれは 0 と仮定）")
+    return levels
+
+
+def evaluate(project, verbose=True, coherent=True):
     """測線ごとに逆二乗からのずれを出す。→ 結果の辞書（無ければ None）"""
     frequencies, levels = read_levels(project)
     if frequencies is None or not levels:
@@ -185,29 +271,48 @@ def evaluate(project, verbose=True):
             print("[逆二乗] 測定点の一覧が見つかりません")
         return None
 
+    # ★B（位相を含む複素和）。**参考値**として一緒に持つ（2026-08-26）
+    coherent_levels = read_coherent_levels(project, verbose=verbose) \
+        if coherent else {}
+
     traces = {}
     for name, level in levels.items():
         info = points.get(name)
         if info is None or not np.isfinite(info["距離"]):
             continue
         traces.setdefault(trace_label(info["レイヤ"] or "測線"), []).append(
-            (info["距離"], name, np.asarray(level, dtype=float)))
+            (info["距離"], name, np.asarray(level, dtype=float),
+             coherent_levels.get(name)))
 
     result = {"frequencies": np.asarray(frequencies, dtype=float), "traces": {}}
     for trace, entries in traces.items():
         entries.sort(key=lambda item: item[0])
-        distances = np.array([d for d, _, _ in entries], dtype=float)
-        names = [n for _, n, _ in entries]
-        block = np.array([values for _, _, values in entries], dtype=float)
+        distances = np.array([d for d, _, _, _ in entries], dtype=float)
+        names = [n for _, n, _, _ in entries]
+        block = np.array([values for _, _, values, _ in entries], dtype=float)
         delta = np.empty_like(block)
         reference = np.empty(block.shape[1], dtype=float)
         for band in range(block.shape[1]):
             delta[:, band], reference[band] = deviations(distances, block[:, band])
-        result["traces"][trace] = {
+        entry = {
             "names": names, "distances": distances, "levels": block,
             "deviation": delta, "reference": reference,
             "worst": np.nanmax(np.abs(delta), axis=0),
         }
+        # B（複素和）も同じ形で持つ。全点そろっているときだけ
+        pack = [values for _, _, _, values in entries]
+        if all(values is not None for values in pack) and pack:
+            block_c = np.array(pack, dtype=float)
+            delta_c = np.empty_like(block_c)
+            reference_c = np.empty(block_c.shape[1], dtype=float)
+            for band in range(block_c.shape[1]):
+                delta_c[:, band], reference_c[band] = deviations(
+                    distances, block_c[:, band])
+            entry["coherent"] = {
+                "levels": block_c, "deviation": delta_c,
+                "reference": reference_c,
+                "worst": np.nanmax(np.abs(delta_c), axis=0)}
+        result["traces"][trace] = entry
     if verbose:
         _report(result)
     return result
@@ -221,6 +326,10 @@ def _report(result):
     for trace, data in result["traces"].items():
         print("[逆二乗]   " + str(trace).ljust(10)
               + "".join(f"{v:>11.2f}" for v in data["worst"]))
+        if "coherent" in data:
+            print("[逆二乗]   " + (str(trace) + "(参考:複素和)").ljust(10)
+                  + "".join(f"{v:>11.2f}"
+                            for v in data["coherent"]["worst"]))
     print("[逆二乗]   " + "許容(参考)".ljust(10)
           + "".join(f"{tolerance_of(v):>11.1f}" for v in frequencies))
 
@@ -240,6 +349,18 @@ def write_csv(project, result, verbose=True):
             rows.append((f"{trace} 逆二乗からのずれ", name, distance, delta))
         rows.append((f"{trace} まとめ", "最大のずれ_dB", None, data["worst"]))
         rows.append((f"{trace} まとめ", "当てはめた高さ_dB", None, data["reference"]))
+        coherent = data.get("coherent")
+        if coherent is not None:
+            # ★B（参考）。**位相ずれ 0 と仮定した複素和**
+            for name, distance, level in zip(data["names"], data["distances"],
+                                             coherent["levels"]):
+                rows.append((f"{trace} 参考:複素和 音圧レベル", name, distance,
+                             level))
+            for name, distance, delta in zip(data["names"], data["distances"],
+                                             coherent["deviation"]):
+                rows.append((f"{trace} 参考:複素和 ずれ", name, distance, delta))
+            rows.append((f"{trace} 参考:複素和 まとめ", "最大のずれ_dB", None,
+                         coherent["worst"]))
     rows.append(("参考", "許容偏差_dB(ISO 3745)", None,
                  [tolerance_of(v) for v in frequencies]))
 
@@ -261,12 +382,14 @@ def bands_in_range(frequencies, low=None, high=None):
 
 
 def write_figures(project, result, bands=None, low=None, high=500.0,
-                  verbose=True):
+                  show_coherent=True, verbose=True):
     """★**測線ごとに 1 枚**の図（2026-08-26 ユーザー要望）。
 
     1 枚に 2 段:
       上段 … 音圧レベルの偏移。**半自由音場の理論上の距離減衰**も重ねる
       下段 … 逆二乗からのずれ。**JIS Z 8732 の許容偏差**（上限・下限）を引く
+
+    実線が **A（エネルギー和）**、細い破線が **B（位相を含む複素和・参考）**。
 
     → 書き出したファイルの一覧
     """
@@ -288,6 +411,7 @@ def write_figures(project, result, bands=None, low=None, high=500.0,
         figure, (top, bottom) = plt.subplots(2, 1, figsize=(7.2, 8.4),
                                              sharex=True)
         distances = data["distances"]
+        coherent = data.get("coherent") if show_coherent else None
         for order, band in enumerate(bands):
             colour = BAND_COLORS[order % len(BAND_COLORS)]
             label = f"{frequencies[band]:.0f} Hz"
@@ -295,6 +419,12 @@ def write_figures(project, result, bands=None, low=None, high=500.0,
                      markersize=3.5, linewidth=1.2, label=label)
             bottom.plot(distances, data["deviation"][:, band], "o-",
                         color=colour, markersize=3.5, linewidth=1.2, label=label)
+            if coherent is not None:
+                # ★B（参考）は**細い破線**。同じ色で「同じ帯域の別の足し方」と分かる
+                top.plot(distances, coherent["levels"][:, band], "--",
+                         color=colour, linewidth=0.9, alpha=0.75)
+                bottom.plot(distances, coherent["deviation"][:, band], "--",
+                            color=colour, linewidth=0.9, alpha=0.75)
 
         # ★半自由音場（Q = 2）の理論線。計算側と同じ「Lw 未入力なら相対値」
         theory = free_field_levels(distances,
@@ -326,9 +456,17 @@ def write_figures(project, result, bands=None, low=None, high=500.0,
         bottom.set_title(f"{trace}　逆二乗測からの偏差", fontsize=11)
         bottom.set_ylabel("逆二乗測からの偏差 [dB]")
         bottom.set_xlabel("音源からの距離 [m]")
-        bottom.set_ylim(-max(4.0, allowed[-1] * 1.6), max(4.0, allowed[-1] * 1.6))
+        # 参考（複素和）が入るときは、その振れ幅も収まるように広げる
+        span = max(4.0, allowed[-1] * 1.6)
+        if coherent is not None:
+            span = max(span, float(np.nanmax(np.abs(
+                coherent["deviation"][:, bands]))) * 1.1)
+        bottom.set_ylim(-span, span)
         for axis in (top, bottom):
             axis.grid(True, which="both", alpha=0.25)
+        if coherent is not None:
+            top.plot([], [], "k--", linewidth=0.9,
+                     label="参考：位相を含む複素和")
         top.legend(fontsize=7, ncol=2)
         figure.tight_layout()
         path = project.figure_path(f"逆二乗_{trace}.png")

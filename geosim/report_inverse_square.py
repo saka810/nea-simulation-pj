@@ -182,6 +182,30 @@ def build_markdown(project, result, figures, bands=None, verbose=True):
                   + " | ".join(f"±{iq.tolerance_of(frequencies[b]):.1f}"
                                for b in bands) + " |", ""]
 
+    # ★B（参考）：位相を含む複素和。実測の吸音率には位相情報が無いので
+    #   **反射の位相ずれを 0 と仮定**した参考値として並べる（2026-08-26）
+    if any("coherent" in data for data in result["traces"].values()):
+        lines += ["## 参考：位相を含む複素和による偏差", "",
+                  "上の値（A）は虚音源のエネルギーを足し合わせたもので、"
+                  "干渉による細かい山谷は現れない。"
+                  "ここでは同じ虚音源を**位相ごと重ねた**場合（B）を参考に示す"
+                  "（バンド内の複数周波数で計算し、|p|² を平均）。", "",
+                  "★**反射時の位相ずれは 0 と仮定**している。"
+                  "実測の吸音率から決まるのは反射率の**大きさ** `|R| = √(1−α)` "
+                  "だけで、位相は材料のインピーダンスが分からないと決まらないため。"
+                  "したがって**山谷の位置は当てにならず、振れ幅の目安**として見ること。",
+                  "",
+                  "| 方向 | " + " | ".join(f"{v:.0f} Hz" for v in used) + " |",
+                  "|---|" + "---|" * len(used)]
+        for trace, data in result["traces"].items():
+            coherent = data.get("coherent")
+            if coherent is None:
+                continue
+            lines.append(f"| {trace} | "
+                         + " | ".join(_fmt(coherent["worst"][b]) for b in bands)
+                         + " |")
+        lines += ["", "（図の細い破線が B。実線が A）", ""]
+
     verdict = _judgement(result, bands, frequencies)
     lines += ["## まとめ", "", "| 方向 | 最大の偏差 [dB] | 判定 |", "|---|---|---|"]
     for trace, inside, worst, band in verdict:

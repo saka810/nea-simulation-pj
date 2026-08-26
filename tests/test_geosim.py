@@ -3951,6 +3951,50 @@ def test_hemi_anechoic():
           abs((theory[0] - iq.free_field_levels(np.array([1.0]),
                                                 hemisphere=False)[0]) - 3.0103)
           < 1e-3)
+    # ---- ⑦b A（エネルギー和）と B（位相を含む複素和）----
+    #
+    # ★2026-08-26 ユーザー要望「とりあえず、A と B（参考）で算出頂けますか？」。
+    #   参考案件（無響室の逆二乗計算）は虚音源の音圧を**位相ごと**重ねている。
+    #   実測の吸音率には位相情報が無いので、B は**位相ずれ 0 と仮定**した参考値。
+    import atmosphere as at_
+    import loop_noredundancy as ln_
+    import sound_level as sl_
+
+    air = at_.Atmosphere()
+    bands = np.array([250.0, 500.0])
+
+    single = ln_.PulseList(band_number=2)
+    single.distance = np.array([2.0])
+    single.time = single.distance / air.sound_velocity
+    single.energy = np.ones((1, 2))
+    energy_only = sl_.received_energy(single.time, single.energy,
+                                      single.distance, air, bands)
+    level_a = (10.0 * np.log10(energy_only.sum(axis=0))
+               + 10.0 * np.log10(air.density * air.sound_velocity / 400.0))
+    level_b = iq.coherent_band_levels(single, bands, air, band_width="1/3")
+    check("★経路が 1 本なら A と B は一致する（干渉のしようがない）",
+          np.allclose(level_a, level_b, atol=1e-9),
+          f"A {np.round(level_a, 4)} / B {np.round(level_b, 4)}")
+
+    # 2 本の経路：位相を含めると干渉するので A とは違う値になる
+    pair = ln_.PulseList(band_number=2)
+    pair.distance = np.array([2.0, 2.4])
+    pair.time = pair.distance / air.sound_velocity
+    pair.energy = np.ones((2, 2))
+    energy_pair = sl_.received_energy(pair.time, pair.energy, pair.distance,
+                                      air, bands)
+    level_a2 = (10.0 * np.log10(energy_pair.sum(axis=0))
+                + 10.0 * np.log10(air.density * air.sound_velocity / 400.0))
+    level_b2 = iq.coherent_band_levels(pair, bands, air, band_width="1/3")
+    check("★経路が 2 本なら干渉して A と B がずれる",
+          not np.allclose(level_a2, level_b2, atol=0.05),
+          f"A {np.round(level_a2, 3)} / B {np.round(level_b2, 3)}")
+    # 同じ大きさの 2 本なら、複素和は最大でもエネルギー和の 2 倍（+3.01 dB）。
+    # 谷側は打ち消し合って**いくらでも深くなる**（帯域が狭いと平均で埋まらない）
+    check("★複素和はエネルギー和 +3.01 dB を超えない（同じ大きさ 2 本の上限）",
+          np.all(level_b2 <= level_a2 + 3.011),
+          str(np.round(level_b2 - level_a2, 3)))
+
     check("使う帯域を範囲で選べる（100〜500 Hz）",
           iq.bands_in_range(np.array([63., 100., 250., 500., 1000.]),
                             100.0, 500.0) == [1, 2, 3])
