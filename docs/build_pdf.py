@@ -168,6 +168,30 @@ INLINE_PATTERNS = [
 ]
 
 
+# 画像の base（`![図](…)` の相対パスをここから解決する）。
+# `markdown_to_html(base_dir=…)` が入れ替える
+IMAGE_BASE = [None]
+
+# 画像の横幅（PDF の紙幅に収める）
+IMAGE_STYLE = "max-width:100%;height:auto;display:block;margin:0.6em auto;"
+
+
+def _image_tag(alt, source):
+    """`![alt](path)` を **中身を埋め込んだ** <img> にする（1 枚の HTML にするため）。"""
+    path = source.strip()
+    if not os.path.isabs(path) and IMAGE_BASE[0]:
+        path = os.path.join(IMAGE_BASE[0], path)
+    try:
+        with io.open(path, "rb") as handle:
+            data = base64.b64encode(handle.read()).decode("ascii")
+    except OSError:
+        return (f'<span class="warn">画像が読めません: '
+                f'{html_module.escape(source)}</span>')
+    kind = "png" if path.lower().endswith(".png") else "jpeg"
+    return (f'<img alt="{html_module.escape(alt)}" style="{IMAGE_STYLE}" '
+            f'src="data:image/{kind};base64,{data}"/>')
+
+
 def _inline(text):
     """段落の中の記法を HTML にする。**コードと数式は先に取り分ける。**"""
     kept = []
@@ -180,6 +204,11 @@ def _inline(text):
     text = re.sub(r"`([^`]+)`",
                   lambda m: keep(f"<code>{html_module.escape(m.group(1))}</code>"),
                   text)
+    # ★画像 `![alt](path)` を先に取り分ける（中身を埋め込む）
+    # ★丸括弧を含むファイル名（`…(GW10K+32K+48K)_逆二乗_真上方向.png`）も拾えるように、
+    #   **かっこの入れ子を 1 段だけ許す**（`[^)]+` だと最初の `)` で切れる）
+    text = re.sub(r"!\[([^\]]*)\]\(((?:[^()]|\([^()]*\))+)\)",
+                  lambda m: keep(_image_tag(m.group(1), m.group(2))), text)
     # ② $…$ の数式を守る（$ が 1 つだけの行は数式ではないので触らない）
     text = re.sub(r"(?<!\$)\$([^$\n]+?)\$(?!\$)",
                   lambda m: keep(_math_tag(m.group(1), display=False)), text)
@@ -231,8 +260,12 @@ def _list_block(lines):
     return "".join(out)
 
 
-def markdown_to_html(text):
-    """docs の Markdown を HTML の本文にする。"""
+def markdown_to_html(text, base_dir=None):
+    """docs の Markdown を HTML の本文にする。
+
+    `base_dir` を渡すと `![図](相対パス)` をそこから解決する（報告書で使う）。
+    """
+    IMAGE_BASE[0] = base_dir
     lines = text.replace("\r\n", "\n").split("\n")
     out, index = [], 0
     while index < len(lines):
@@ -346,7 +379,8 @@ def build_html(md_path):
     with io.open(md_path, encoding="utf-8") as f:
         text = f.read()
     title = os.path.splitext(os.path.basename(md_path))[0]
-    body = markdown_to_html(text)
+    body = markdown_to_html(
+        text, base_dir=os.path.dirname(os.path.abspath(md_path)))
     return (f"<!doctype html><html lang=\"ja\"><head><meta charset=\"utf-8\">"
             f"<title>{html_module.escape(title)}</title>"
             f"<style>{STYLE}</style></head><body>{body}</body></html>")

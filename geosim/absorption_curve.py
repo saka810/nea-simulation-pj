@@ -39,14 +39,15 @@ def interpolate(frequencies, values, target):
                            left=values[0], right=values[-1]))
 
 
-def band_average(frequencies, values, centre, samples=SAMPLES):
-    """1/1 オクターブバンド（`centre`）の平均吸音率。"""
-    low, high = centre / math.sqrt(2.0), centre * math.sqrt(2.0)
+def band_average(frequencies, values, centre, samples=SAMPLES, width=1.0):
+    """バンド（`centre`）の平均吸音率。`width` はオクターブ数（1/3 なら 1/3）。"""
+    half = float(width) / 2.0
+    low, high = centre * 2.0 ** (-half), centre * 2.0 ** half
     points = np.logspace(math.log10(low), math.log10(high), samples)
     return float(np.mean([interpolate(frequencies, values, f) for f in points]))
 
 
-def to_bands(frequencies, values, centres, samples=SAMPLES):
+def to_bands(frequencies, values, centres, samples=SAMPLES, width=1.0):
     """オクターブバンドの値と、外挿になったバンドの一覧を返す。
 
     → (バンドごとの吸音率, 外挿したバンドの中心周波数)
@@ -55,8 +56,10 @@ def to_bands(frequencies, values, centres, samples=SAMPLES):
     lowest, highest = float(np.min(frequencies)), float(np.max(frequencies))
     bands, extrapolated = [], []
     for centre in centres:
-        bands.append(band_average(frequencies, values, centre, samples))
-        if centre / math.sqrt(2.0) < lowest or centre * math.sqrt(2.0) > highest:
+        bands.append(band_average(frequencies, values, centre, samples, width))
+        half = float(width) / 2.0
+        if (centre * 2.0 ** (-half) < lowest
+                or centre * 2.0 ** half > highest):
             extrapolated.append(float(centre))
     return np.array(bands, dtype=float), extrapolated
 

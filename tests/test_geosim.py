@@ -3856,6 +3856,7 @@ def test_hemi_anechoic():
           and not rd_._layer_matches("recess", ("rec",)))
 
     # ---- ⑥ 吸音率の補間（細かい周波数 → オクターブ）----
+    import absorption as ab
     import absorption_curve as ac
 
     frequencies = np.array([63.0, 125.0, 250.0, 500.0])
@@ -3871,6 +3872,49 @@ def test_hemi_anechoic():
     check("データの外は端の値を保つ",
           abs(ac.interpolate(frequencies, slope, 20.0) - 0.2) < 1e-9
           and abs(ac.interpolate(frequencies, slope, 8000.0) - 0.8) < 1e-9)
+
+    # ---- ⑥b 1/3 オクターブ（2026-08-26 ユーザー要望「1/3 の検討も出来るように」）----
+    check("★1/3 オクターブの帯域を作れる（100〜500 Hz で 8 バンド）",
+          [f"{v:.0f}" for v in ab.frequency_bands(8, "1/3", 100.0)]
+          == ["100", "125", "160", "200", "250", "315", "400", "500"],
+          str([f"{v:.0f}" for v in ab.frequency_bands(8, "1/3", 100.0)]))
+    check("オクターブは従来どおり（8 → 63〜8k）",
+          np.allclose(ab.frequency_bands(8), ab.octave_bands(8)))
+    check("★帯域の幅で端が変わる（1/1 は f/√2〜f√2、1/3 は f·2^(∓1/6)）",
+          np.allclose(ab.band_edges([1000.0], "1/1"),
+                      ([1000.0 / np.sqrt(2)], [1000.0 * np.sqrt(2)]))
+          and np.allclose(ab.band_edges([1000.0], "1/3"),
+                          ([1000.0 * 2 ** (-1 / 6)], [1000.0 * 2 ** (1 / 6)])))
+    check("幅の呼び方を取り違えない", ab.is_third_octave("1/3")
+          and not ab.is_third_octave("1/1") and abs(ab.band_ratio("1/3") - 1 / 3) < 1e-9)
+    check("1/3 の中心周波数は**呼び値**（表と数字がそろう）",
+          160.0 in ab.THIRD_OCTAVE_NOMINAL and 315.0 in ab.THIRD_OCTAVE_NOMINAL
+          and 630.0 in ab.THIRD_OCTAVE_NOMINAL)
+
+    # ★1/3 で計算するときは、インパルス応答の合成で**展開しない**
+    import impulse as ir_
+
+    centres = ab.frequency_bands(8, "1/3", 100.0)
+    times = np.array([0.01, 0.02])
+    energy = np.ones((2, 8))
+    t_third, ir_third = ir_.impulse_response(times, energy, centres,
+                                             band_width="1/3", max_time=0.2,
+                                             verbose=False)
+    spectrum = np.abs(np.fft.rfft(ir_third))
+    freq = np.fft.rfftfreq(len(ir_third), t_third[1] - t_third[0])
+    inside = spectrum[(freq > 90) & (freq < 560)].max()
+    outside = spectrum[(freq > 2000)].max()
+    check("★1/3 で回すと、その帯域の外に中身を作らない",
+          outside < inside * 0.05, f"帯域内 {inside:.3g} / 2 kHz 超 {outside:.3g}")
+
+    # 吸音率の補間も 1/3 の幅で平均できる
+    frequencies = np.array([63.0, 125.0, 250.0, 500.0])
+    slope = np.array([0.2, 0.4, 0.6, 0.8])
+    wide = ac.band_average(frequencies, slope, 250.0, width=1.0)
+    narrow = ac.band_average(frequencies, slope, 250.0, width=1.0 / 3.0)
+    check("★1/3 の帯域平均はオクターブより狭い範囲で均す",
+          abs(narrow - 0.6) < abs(wide - 0.6) + 1e-9,
+          f"1/1 {wide:.4f} / 1/3 {narrow:.4f}")
 
     # ---- ⑦ 逆二乗からのずれ ----
     import inverse_square as iq
@@ -3888,9 +3932,28 @@ def test_hemi_anechoic():
           and abs(delta[2] - 1.6) < 1e-9, str(np.round(delta, 2)))
     check("当てはめは最小二乗（平均のずれが 0）",
           abs(float(np.mean(delta))) < 1e-9)
-    check("許容値は ISO 3745（参考）",
-          iq.tolerance_of(63) == 1.5 and iq.tolerance_of(1000) == 1.0
-          and iq.tolerance_of(8000) == 1.5)
+    check("★許容偏差は JIS Z 8732（2026-08-26 ユーザー指定）",
+          iq.tolerance_of(63) == 2.5 and iq.tolerance_of(630) == 2.5
+          and iq.tolerance_of(1000) == 2.0 and iq.tolerance_of(8000) == 3.0,
+          iq.TOLERANCE_STANDARD)
+    check("★受音点のレイヤを測線の呼び名にする",
+          iq.trace_label("rec1") == "真上方向"
+          and iq.trace_label("rec2") == "短辺稜線方向"
+          and iq.trace_label("rec3") == "長辺稜線方向"
+          and iq.trace_label("rec9") == "rec9")
+    # ★半自由音場（Q=2）の理論線：逆二乗どおりに 6 dB/倍距離で落ちる
+    theory = iq.free_field_levels(np.array([1.0, 2.0, 4.0]))
+    check("★半自由音場の理論線は 6 dB/倍距離",
+          abs((theory[0] - theory[1]) - 6.0206) < 1e-3
+          and abs((theory[1] - theory[2]) - 6.0206) < 1e-3,
+          str(np.round(theory, 2)))
+    check("半空間は自由音場より +3 dB",
+          abs((theory[0] - iq.free_field_levels(np.array([1.0]),
+                                                hemisphere=False)[0]) - 3.0103)
+          < 1e-3)
+    check("使う帯域を範囲で選べる（100〜500 Hz）",
+          iq.bands_in_range(np.array([63., 100., 250., 500., 1000.]),
+                            100.0, 500.0) == [1, 2, 3])
 
 
 def main():

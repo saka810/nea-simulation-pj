@@ -143,6 +143,12 @@ DEFAULTS = {
     "condition_sheet": "",
     "assignment": None,            # レイヤ → 材料の対応（辞書。条件表が優先）
     "band_number": 6,
+    # ★**帯域の幅**（`1/1` = オクターブ／`1/3` = 1/3 オクターブ。2026-08-26 ユーザー要望
+    #   「1/3 の検討も出来るようにしてもらえますか？」）。
+    #   `band_start` はいちばん低いバンドの中心周波数 [Hz]（None なら既定：
+    #   オクターブは 8→63 / 6→125、1/3 は 100 から）
+    "band_width": "1/1",
+    "band_start": None,
     "unit": None,                  # None なら DXF の $INSUNITS
     "orient_normals": "auto",
     "two_sided": False,

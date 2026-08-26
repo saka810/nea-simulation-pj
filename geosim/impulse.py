@@ -265,6 +265,7 @@ def _fir1_bandpass_fortran(numtaps, wmin, wmax):
 
 
 def impulse_response(time, energy, octave_frequencies=None, atmosphere=None,
+                     band_width="1/1",
                      sampling_frequency=SAMPLING_FREQUENCY, max_time=MAX_TIME,
                      numtaps=NUMTAPS, verbose=True, method="fast",
                      taps=FRACTIONAL_TAPS):
@@ -312,7 +313,14 @@ def impulse_response(time, energy, octave_frequencies=None, atmosphere=None,
     df = sampling_frequency / nfft
     fmax = sampling_frequency / 2.0
 
-    mf = third_octave_bands()
+    # ★**もともと 1/3 オクターブで計算しているなら展開しない**（2026-08-26）。
+    #   この関数は「オクターブのエネルギーを 1/3 に展開してから帯域合成する」
+    #   作りなので、入力が最初から 1/3 ならそのまま使えばよい。
+    #   展開すると 100〜500 Hz の値が表の外（20 Hz や 10 kHz）まで塗り広げられる
+    import absorption as _ab
+    third_input = _ab.is_third_octave(band_width)
+    mf = (np.asarray(octave_frequencies, dtype=float) if third_input
+          else third_octave_bands())
 
     if verbose:
         print(f"[impulse] {atmosphere.summary()}")
@@ -324,7 +332,8 @@ def impulse_response(time, energy, octave_frequencies=None, atmosphere=None,
               f"{octave_frequencies[-1]:.0f} Hz）")
 
     # ---- 1/3 オクターブへの展開と空気吸収 ----
-    energy32 = expand_to_third_octave(energy, octave_frequencies, mf)
+    energy32 = (np.asarray(energy, dtype=float).T if third_input
+                else expand_to_third_octave(energy, octave_frequencies, mf))
     energy32 = apply_air_absorption(energy32, time, atmosphere, mf)
 
     # ---- バンドごとの成分を周波数領域で作る ----
@@ -363,7 +372,8 @@ def write_impulse_response(filename, t, ir):
     return filename
 
 
-def impulse_response_from_pulses(filename, pulses, octave_frequencies=None, atmosphere=None,
+def impulse_response_from_pulses(filename, pulses, octave_frequencies=None,
+                                 atmosphere=None, band_width="1/1",
                      sampling_frequency=SAMPLING_FREQUENCY, max_time=MAX_TIME,
                      numtaps=NUMTAPS, verbose=True, method="fast",
                      taps=FRACTIONAL_TAPS):

@@ -55,6 +55,73 @@ KIND_RANDOM = "random"      # 残響室法吸音率（乱入射）
 KINDS = (KIND_NORMAL, KIND_RANDOM)
 
 
+# 帯域の幅。`1/1` = オクターブ、`1/3` = 1/3 オクターブ（2026-08-26）
+BAND_WIDTH_OCTAVE = "1/1"
+BAND_WIDTH_THIRD = "1/3"
+BAND_WIDTHS = (BAND_WIDTH_OCTAVE, BAND_WIDTH_THIRD)
+
+# 1/3 オクターブの呼び中心周波数（IEC 61260 / JIS C 1513）。
+# 計算には 10^(n/10) の厳密値ではなく、**表に載る呼び値**を使う
+# （報告書や吸音率の表と突き合わせるときに数字がそろうため）
+THIRD_OCTAVE_NOMINAL = (
+    12.5, 16.0, 20.0, 25.0, 31.5, 40.0, 50.0, 63.0, 80.0, 100.0, 125.0,
+    160.0, 200.0, 250.0, 315.0, 400.0, 500.0, 630.0, 800.0, 1000.0,
+    1250.0, 1600.0, 2000.0, 2500.0, 3150.0, 4000.0, 5000.0, 6300.0,
+    8000.0, 10000.0, 12500.0, 16000.0, 20000.0)
+
+
+def band_ratio(band_width=BAND_WIDTH_OCTAVE):
+    """帯域幅をオクターブ数で返す（`1/1` → 1.0、`1/3` → 1/3）。"""
+    text = str(band_width or BAND_WIDTH_OCTAVE).strip()
+    if text in ("1/3", "1/3oct", "1/3 oct", "third", "3"):
+        return 1.0 / 3.0
+    return 1.0
+
+
+def is_third_octave(band_width):
+    return abs(band_ratio(band_width) - 1.0 / 3.0) < 1.0e-9
+
+
+def band_edges(centres, band_width=BAND_WIDTH_OCTAVE):
+    """各バンドの下端・上端 [Hz]。フィルタの遮断周波数に使う。
+
+    幅 1 オクターブなら f/√2 〜 f√2、1/3 なら f·2^(-1/6) 〜 f·2^(1/6)。
+    """
+    centres = np.asarray(centres, dtype=float)
+    half = band_ratio(band_width) / 2.0
+    return centres * 2.0 ** (-half), centres * 2.0 ** half
+
+
+def frequency_bands(band_number, band_width=BAND_WIDTH_OCTAVE, start=None):
+    """計算に使う帯域の中心周波数。
+
+    引数:
+        band_number  バンド数
+        band_width   `1/1`（オクターブ。既定）か `1/3`
+        start        いちばん低いバンドの中心周波数 [Hz]。
+                     None ならオクターブは従来どおり（8→63、6→125）、
+                     1/3 は 100 Hz から
+
+    ★1/3 のときは**呼び値の表**（`THIRD_OCTAVE_NOMINAL`）から連続して取る。
+    """
+    band_number = int(band_number)
+    if not is_third_octave(band_width):
+        if start is None:
+            return octave_bands(band_number)
+        return float(start) * 2.0 ** np.arange(band_number, dtype=float)
+
+    table = np.array(THIRD_OCTAVE_NOMINAL, dtype=float)
+    first = 100.0 if start is None else float(start)
+    index = int(np.argmin(np.abs(np.log2(table / first))))
+    chosen = table[index:index + band_number]
+    if len(chosen) < band_number:
+        # 表の外まで欲しいときは 2^(1/3) ずつ伸ばす（20 kHz より上など）
+        extra = chosen[-1] * 2.0 ** (np.arange(1, band_number - len(chosen) + 1)
+                                     / 3.0)
+        chosen = np.concatenate([chosen, extra])
+    return chosen
+
+
 def octave_bands(band_number):
     """バンド数から中心周波数の並びを返す。
 

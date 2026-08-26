@@ -313,16 +313,22 @@ def schroeder_integral(x):
 
 
 def octave_bandpass(signal, centre_frequency, sampling_frequency,
-                    method="butter", order=FILTER_ORDER, numtaps=FIR_NUMTAPS):
-    """オクターブバンド（中心周波数の 1/√2 〜 √2 倍）を切り出す。
+                    method="butter", order=FILTER_ORDER, numtaps=FIR_NUMTAPS,
+                    band_width=ab.BAND_WIDTH_OCTAVE):
+    """1 バンドぶんを切り出す（既定はオクターブ＝中心の 1/√2 〜 √2 倍）。
+
+    band_width … `1/1`（オクターブ）か `1/3`。★2026-08-26 に 1/3 対応で追加。
 
     method='butter' … `scipy.signal.butter` の SOS を `sosfilt` で適用（既定）。
                       IEC 61260 のオクターブフィルタは Butterworth 系なので実務に沿う。
     method='fir'    … `scipy.signal.firwin` + 線形畳み込み。遅れを切り落として返す。
     """
     nyquist = sampling_frequency / 2.0
-    lower = centre_frequency / np.sqrt(2.0)
-    upper = min(centre_frequency * np.sqrt(2.0), nyquist * 0.999)
+    # ★帯域幅は `band_width` で決める（`1/1` なら f/√2〜f√2、`1/3` なら
+    #   f·2^(∓1/6)）。2026-08-26 に 1/3 オクターブ対応で追加
+    half = ab.band_ratio(band_width) / 2.0
+    lower = centre_frequency * 2.0 ** (-half)
+    upper = min(centre_frequency * 2.0 ** half, nyquist * 0.999)
     if lower >= upper:
         raise ValueError(f"{centre_frequency:.0f} Hz バンドがナイキスト周波数 "
                          f"{nyquist:.0f} Hz に収まりません")
@@ -356,6 +362,7 @@ def _decay_time(decay_db, dt, db_start, db_end):
 
 
 def decay_curves(time, ir, frequencies=None, db_max=DB_MAX, db_min=DB_MIN,
+                 band_width=ab.BAND_WIDTH_OCTAVE,
                  method="butter", order=FILTER_ORDER, numtaps=FIR_NUMTAPS,
                  verbose=True):
     """オクターブバンドごとの減衰曲線と残響時間を求める。元コード 99〜135 行。
@@ -390,6 +397,7 @@ def decay_curves(time, ir, frequencies=None, db_max=DB_MAX, db_min=DB_MIN,
 
     for i, fc in enumerate(frequencies):
         band = octave_bandpass(ir, fc, sampling_frequency, method=method,
+                               band_width=band_width,
                                order=order, numtaps=numtaps)
         dc = schroeder_integral(band)
         if dc[0] <= 0.0:
@@ -435,6 +443,7 @@ def decay_curves(time, ir, frequencies=None, db_max=DB_MAX, db_min=DB_MIN,
 
 
 def decay_measures(time, ir, frequencies=None, measures=None, method="butter",
+                   band_width=ab.BAND_WIDTH_OCTAVE,
                    order=FILTER_ORDER, numtaps=FIR_NUMTAPS, verbose=True):
     """**EDT / T20 / T30 をまとめて求める。**
 
@@ -453,7 +462,7 @@ def decay_measures(time, ir, frequencies=None, measures=None, method="butter",
     if measures is None:
         measures = DECAY_MEASURES
     base = decay_curves(time, ir, frequencies=frequencies, method=method,
-                        order=order, numtaps=numtaps, verbose=False)
+                        order=order, numtaps=numtaps, verbose=False, band_width=band_width)
     dt = float(base["time"][1] - base["time"][0])
 
     values = {}
@@ -486,6 +495,7 @@ def decay_measures(time, ir, frequencies=None, measures=None, method="butter",
 
 
 def clarity_measures(time, ir, frequencies=None, method="butter",
+                     band_width=ab.BAND_WIDTH_OCTAVE,
                      order=FILTER_ORDER, numtaps=FIR_NUMTAPS, verbose=True):
     """**明瞭度系の指標**（C50 / C80 / D50 / Ts）をバンド別に求める（TODO G-4）。
 
@@ -523,7 +533,8 @@ def clarity_measures(time, ir, frequencies=None, method="butter",
     result = {name: np.full(len(frequencies), np.nan)
               for name in ("C50", "C80", "D50", "Ts")}
     for i, fc in enumerate(frequencies):
-        band = octave_bandpass(ir, fc, fs, method=method, order=order, numtaps=numtaps)
+        band = octave_bandpass(ir, fc, fs, method=method, order=order,
+                               numtaps=numtaps, band_width=band_width)
         energy = band ** 2
         total = energy.sum()
         if total <= 0.0:
@@ -617,13 +628,13 @@ def write_decay_curve(filename, result, interval=DECAY_CSV_INTERVAL):
 
 def reverberation_time(time, ir, rt_filename=None, decay_filename=None,
                        frequencies=None, measures=None, method="butter",
-                       verbose=True):
+                       band_width=ab.BAND_WIDTH_OCTAVE, verbose=True):
     """残響指標（EDT / T20 / T30）の算出と保存をまとめて行う。
 
     measures を渡せば評価区間を変えられる（既定は `DECAY_MEASURES`）。
     """
     result = decay_measures(time, ir, frequencies=frequencies, measures=measures,
-                            method=method, verbose=verbose)
+                            method=method, verbose=verbose, band_width=band_width)
     if rt_filename is not None:
         write_reverberation_time(rt_filename, result)
         if verbose:

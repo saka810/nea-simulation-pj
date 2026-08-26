@@ -614,6 +614,9 @@ def _run_one(project, receiver, verbose=True, make_figures=True,
         material_library=_library_for(project),
         layer_assignment=_assignment_for(project),
         band_number=project.band_number,
+        # ★帯域の幅（1/1 か 1/3）と下端（2026-08-26）
+        band_width=getattr(project, "band_width", "1/1"),
+        band_start=getattr(project, "band_start", None),
         unit=project.unit,
         orient_normals=project.orient_normals,
         two_sided=project.two_sided,
@@ -720,7 +723,9 @@ def redraw(project, verbose=True):
     atmosphere = Atmosphere(temperature=project.temperature,
                             humidity=project.humidity,
                             pressure=project.pressure)
-    frequencies = ab.octave_bands(project.band_number)
+    frequencies = ab.frequency_bands(project.band_number,
+                                     getattr(project, "band_width", "1/1"),
+                                     getattr(project, "band_start", None))
 
     # ---- パルス列を PulseList に戻す ----
     rows = np.atleast_1d(saved["pulses"])

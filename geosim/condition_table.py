@@ -624,7 +624,9 @@ def _build_absorption_sheet(book, project, library):
     from openpyxl.utils import get_column_letter
     from openpyxl.worksheet.datavalidation import DataValidation
 
-    frequencies = ab.octave_bands(project.band_number)
+    frequencies = ab.frequency_bands(project.band_number,
+                                     getattr(project, "band_width", "1/1"),
+                                     getattr(project, "band_start", None))
     sheet = book.create_sheet(ABSORPTION_SHEET)
     sheet.append(ABSORPTION_HEADER_HEAD + [f"{v:.0f}" for v in frequencies]
                  + ABSORPTION_HEADER_TAIL)

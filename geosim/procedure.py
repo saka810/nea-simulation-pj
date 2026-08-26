@@ -41,7 +41,8 @@ from ray_recorder import RayRecorder
 ### パルス列、または、インパルス応答（wavファイル）を保存する
 def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref, soundray_number,
             absorption_csv=None, absorption_kind=None, layer_assignment=None,
-            band_number=rd.DEFAULT_BAND_NUMBER, material_library=None,
+            band_number=rd.DEFAULT_BAND_NUMBER, band_width="1/1",
+            band_start=None, material_library=None,
             unit=None, orient_normals="cad", two_sided=False, volume=None,
             atmosphere=None, raylog_filename=None, raylog_max_rays=2000,
             pulse_filename=None, impulse_filename=None,
@@ -189,7 +190,8 @@ def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref
             progress(stage, fraction)
 
     # オクターブバンドの中心周波数。既定は 8 バンド（63〜8k Hz）。
-    frequencies = ab.octave_bands(band_number)
+    # ★帯域の**幅**（オクターブ / 1/3 オクターブ）と**下端**で決める（2026-08-26）
+    frequencies = ab.frequency_bands(band_number, band_width, band_start)
 
     if atmosphere is None:
         atmosphere = Atmosphere()
@@ -396,7 +398,8 @@ def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref
             report("インパルス応答の合成")
             impulse = ir.impulse_response_from_pulses(
                 impulse_filename, pulses, octave_frequencies=frequencies,
-                atmosphere=atmosphere, sampling_frequency=sampling_frequency,
+                atmosphere=atmosphere, band_width=band_width,
+                sampling_frequency=sampling_frequency,
                 max_time=max_time, method=impulse_method)
 
     # 残響時間の算出。元コード ipls2rt_fortran.f90 に対応
@@ -409,7 +412,8 @@ def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref
             report("残響時間の算出")
             reverberation = rv.reverberation_time(
                 impulse[0], impulse[1], rt_filename=reverberation_filename,
-                decay_filename=decay_filename, frequencies=frequencies)
+                decay_filename=decay_filename, frequencies=frequencies,
+                band_width=band_width)
 
     # 明瞭度系の指標（C50 / C80 / D50 / Ts）。残響時間とは見ている中身が違う。
     # 「どれだけ長く響くか」ではなく「初期の音が後から来る音に対してどれだけ強いか」
@@ -417,7 +421,8 @@ def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref
     if clarity and impulse is not None:
         report("明瞭度の指標")
         clarity_result = rv.clarity_measures(impulse[0], impulse[1],
-                                            frequencies=frequencies)
+                                            frequencies=frequencies,
+                                            band_width=band_width)
         if clarity_filename is not None:
             rv.write_clarity_measures(clarity_filename, clarity_result)
             print(f"[procedure] 明瞭度の指標を書き出しました: {clarity_filename}")
@@ -438,10 +443,19 @@ def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref
         if level_filename is not None:
             sl.write_levels(level_filename, level_result)
             print(f"[procedure] 音圧レベルを書き出しました: {level_filename}")
-        sti_result = sl.speech_transmission_index(
-            pulses.time, pulses.energy, pulses.distance, atmosphere, frequencies,
-            source_power_db=source_power_db, noise_level_db=noise_level_db)
-        if sti_filename is not None:
+        # ★STI は**オクターブバンド（125〜8k Hz）が前提**の指標（IEC 60268-16）。
+        #   1/3 オクターブで回しているときは出さずに知らせる（2026-08-26）
+        if ab.is_third_octave(band_width):
+            print("[procedure] STI は 1/3 オクターブでは出しません"
+                  "（IEC 60268-16 はオクターブ 125〜8k Hz が前提）。"
+                  "STI が要るときは帯域幅を 1/1 にしてください")
+            sti_filename = None
+        if not ab.is_third_octave(band_width):
+            sti_result = sl.speech_transmission_index(
+                pulses.time, pulses.energy, pulses.distance, atmosphere,
+                frequencies, source_power_db=source_power_db,
+                noise_level_db=noise_level_db)
+        if sti_filename is not None and sti_result is not None:
             sl.write_sti(sti_filename, sti_result)
             print(f"[procedure] STI を書き出しました: {sti_filename}")
 

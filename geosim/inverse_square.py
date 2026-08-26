@@ -35,15 +35,35 @@ import table as tb
 
 FILE_NAME = "逆二乗.csv"
 
-# ISO 3745 の許容値（参考。バンド中心周波数 [Hz] → 許容偏差 [dB]）
-TOLERANCE = ((630.0, 1.5), (5000.0, 1.0), (float("inf"), 1.5))
+# ★**許容偏差は JIS Z 8732**（2026-08-26 ユーザー指定。1/3 オクターブバンド）
+#
+#     1/3 オクターブバンド中心周波数 [Hz]   許容偏差 [dB]
+#     ≦ 630                                ±2.5
+#     800 〜 5000                           ±2.0
+#     ≧ 6300                                ±3.0
+#
+# 以前は ISO 3745 の値（±1.5 / ±1.0）を参考として添えていた。
+# **報告書に載せるのは JIS Z 8732 の値**なのでこちらに合わせる
+TOLERANCE_STANDARD = "JIS Z 8732"
+TOLERANCE = ((630.0, 2.5), (5000.0, 2.0), (float("inf"), 3.0))
 
-# 測線の色（図。3 本まではこの順）
-TRACE_COLORS = ("#4c78a8", "#f58518", "#54a24b", "#e45756", "#72b7b2")
+# 受音点のレイヤ名 → 測線の呼び名（★2026-08-26 ユーザー指定）。
+# 報告書とグラフの見出しに使う
+TRACE_LABELS = {"rec1": "真上方向", "rec2": "短辺稜線方向", "rec3": "長辺稜線方向"}
+
+
+def trace_label(layer):
+    """レイヤ名を測線の呼び名にする（決めていないものはそのまま）。"""
+    return TRACE_LABELS.get(str(layer), str(layer))
+
+# バンドの色（図。8 バンドまではこの順で回す）
+BAND_COLORS = ("#4c78a8", "#f58518", "#54a24b", "#e45756", "#72b7b2",
+               "#b279a2", "#9d755d", "#eeca3b")
+TRACE_COLORS = BAND_COLORS      # 昔の名前（参照しているところがあれば拾えるように）
 
 
 def tolerance_of(frequency):
-    """その帯域の許容偏差 [dB]（ISO 3745。参考値）。"""
+    """その帯域の許容偏差 [dB]（JIS Z 8732）。"""
     for limit, value in TOLERANCE:
         if float(frequency) <= limit:
             return value
@@ -128,6 +148,30 @@ def deviations(distances, levels):
     return np.asarray(levels, dtype=float) - ideal, reference
 
 
+def free_field_levels(distances, source_power_db=None, atmosphere=None,
+                      hemisphere=True):
+    """**半自由音場の理論上の距離減衰** Lp(r) [dB]。
+
+        Lp = Lw + 10log10(Q / (4π r²)) + 10log10(ρc/400)
+
+    半空間（床の上に置いた音源）は指向係数 Q = 2。
+    `source_power_db` が無ければ Lw = 0 dB として**相対値**を返す
+    （計算側も PWL 未入力なら相対値なので、そのまま重ねられる）。
+    """
+    import atmosphere as at
+
+    distances = np.asarray(distances, dtype=float)
+    if atmosphere is None:
+        atmosphere = at.Atmosphere()
+    power = 0.0 if source_power_db is None else float(np.mean(
+        np.atleast_1d(np.asarray(source_power_db, dtype=float))))
+    directivity = 2.0 if hemisphere else 1.0
+    impedance = atmosphere.density * atmosphere.sound_velocity
+    return (power + 10.0 * np.log10(directivity
+                                    / (4.0 * np.pi * distances ** 2))
+            + 10.0 * np.log10(impedance / 400.0))
+
+
 def evaluate(project, verbose=True):
     """測線ごとに逆二乗からのずれを出す。→ 結果の辞書（無ければ None）"""
     frequencies, levels = read_levels(project)
@@ -146,7 +190,7 @@ def evaluate(project, verbose=True):
         info = points.get(name)
         if info is None or not np.isfinite(info["距離"]):
             continue
-        traces.setdefault(info["レイヤ"] or "測線", []).append(
+        traces.setdefault(trace_label(info["レイヤ"] or "測線"), []).append(
             (info["距離"], name, np.asarray(level, dtype=float)))
 
     result = {"frequencies": np.asarray(frequencies, dtype=float), "traces": {}}
@@ -208,65 +252,97 @@ def write_csv(project, result, verbose=True):
     return path
 
 
-def write_figure(project, result, bands=None, verbose=True):
-    """測線ごとの図（上：音圧レベルと理想の線／下：ずれ）。"""
+def bands_in_range(frequencies, low=None, high=None):
+    """使うバンドの番号（`low` 〜 `high` [Hz]）。指定が無ければ全部。"""
+    numbers = [k for k, v in enumerate(frequencies)
+               if (low is None or v >= low - 1e-6)
+               and (high is None or v <= high + 1e-6)]
+    return numbers or list(range(len(frequencies)))
+
+
+def write_figures(project, result, bands=None, low=None, high=500.0,
+                  verbose=True):
+    """★**測線ごとに 1 枚**の図（2026-08-26 ユーザー要望）。
+
+    1 枚に 2 段:
+      上段 … 音圧レベルの偏移。**半自由音場の理論上の距離減衰**も重ねる
+      下段 … 逆二乗からのずれ。**JIS Z 8732 の許容偏差**（上限・下限）を引く
+
+    → 書き出したファイルの一覧
+    """
     try:
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
     except ImportError:
-        return None
+        return []
     import plots as pl
 
     pl.use_japanese_font()
     frequencies = result["frequencies"]
     if bands is None:
-        # ★要望は「63〜500 Hz」。データがそれより広ければ 500 Hz までに絞る
-        bands = [k for k, v in enumerate(frequencies) if v <= 500.0] or \
-            list(range(len(frequencies)))
+        bands = bands_in_range(frequencies, low, high)
 
-    traces = list(result["traces"])
-    if not traces:
-        return None
-    figure, axes = plt.subplots(2, len(traces), figsize=(5.2 * len(traces), 7.4),
-                                squeeze=False)
-    for column, trace in enumerate(traces):
-        data = result["traces"][trace]
-        top, bottom = axes[0][column], axes[1][column]
+    written = []
+    for trace, data in result["traces"].items():
+        figure, (top, bottom) = plt.subplots(2, 1, figsize=(7.2, 8.4),
+                                             sharex=True)
+        distances = data["distances"]
         for order, band in enumerate(bands):
-            colour = TRACE_COLORS[order % len(TRACE_COLORS)]
+            colour = BAND_COLORS[order % len(BAND_COLORS)]
             label = f"{frequencies[band]:.0f} Hz"
-            top.plot(data["distances"], data["levels"][:, band], "o-",
-                     color=colour, markersize=3, linewidth=1.2, label=label)
-            bottom.plot(data["distances"], data["deviation"][:, band], "o-",
-                        color=colour, markersize=3, linewidth=1.2, label=label)
-        # ★理想の線は**どのバンドに合わせたか**を書く（当てはめた高さは
-        #   バンドごとに違うので、1 本だけ引くと他のバンドがずれて見える）
-        ideal = data["reference"][bands[0]] - 20.0 * np.log10(data["distances"])
-        top.plot(data["distances"], ideal, "--", color="#888888", linewidth=1.0,
-                 label=f"理想（1/r²・{frequencies[bands[0]]:.0f} Hz に合わせた線）")
-        allowed = tolerance_of(frequencies[bands[-1]])
-        bottom.axhspan(-allowed, allowed, color="#4c78a8", alpha=0.10)
+            top.plot(distances, data["levels"][:, band], "o-", color=colour,
+                     markersize=3.5, linewidth=1.2, label=label)
+            bottom.plot(distances, data["deviation"][:, band], "o-",
+                        color=colour, markersize=3.5, linewidth=1.2, label=label)
+
+        # ★半自由音場（Q = 2）の理論線。計算側と同じ「Lw 未入力なら相対値」
+        theory = free_field_levels(distances,
+                                   source_power_db=getattr(project,
+                                                           "source_power_db", None))
+        top.plot(distances, theory, "--", color="#333333", linewidth=1.4,
+                 label="半自由音場の理論（Q=2）")
+
+        # ★許容偏差（JIS Z 8732）。バンドで値が変わるので、使ったバンドの分だけ引く
+        allowed = sorted({tolerance_of(frequencies[b]) for b in bands})
+        for value in allowed:
+            bottom.axhline(+value, color="#c0392b", linewidth=1.2,
+                           linestyle="--")
+            bottom.axhline(-value, color="#c0392b", linewidth=1.2,
+                           linestyle="--")
+        # 線の少し上に置く（線に重ねると読めない）
+        bottom.text(distances[0], allowed[-1] + 0.12,
+                    f"許容偏差の上限値 ±{allowed[-1]:.1f} dB"
+                    f"（{TOLERANCE_STANDARD}）", color="#c0392b", fontsize=8,
+                    va="bottom")
+        bottom.text(distances[0], -allowed[-1] - 0.12,
+                    f"許容偏差の下限値 −{allowed[-1]:.1f} dB",
+                    color="#c0392b", fontsize=8, va="top")
         bottom.axhline(0.0, color="#888888", linewidth=0.8)
-        top.set_xscale("log")
-        bottom.set_xscale("log")
-        top.set_title(f"{trace}")
+
         top.set_ylabel("音圧レベル [dB]")
-        bottom.set_ylabel("逆二乗からのずれ [dB]")
+        top.set_title(f"{project.room_label}／{project.condition_label}\n"
+                      f"{trace}　音圧レベルの偏移", fontsize=11)
+        bottom.set_title(f"{trace}　逆二乗測からの偏差", fontsize=11)
+        bottom.set_ylabel("逆二乗測からの偏差 [dB]")
         bottom.set_xlabel("音源からの距離 [m]")
-        top.grid(True, which="both", alpha=0.25)
-        bottom.grid(True, which="both", alpha=0.25)
-        if column == 0:
-            top.legend(fontsize=7)
-    figure.suptitle(f"{project.room_label} / {project.condition_label}"
-                    f"  逆二乗則からのずれ")
-    figure.tight_layout()
-    path = project.figure_path("逆二乗.png")
-    figure.savefig(path, dpi=140)
-    plt.close(figure)
-    if verbose:
-        print(f"[逆二乗] 図を書き出しました: {path}")
-    return path
+        bottom.set_ylim(-max(4.0, allowed[-1] * 1.6), max(4.0, allowed[-1] * 1.6))
+        for axis in (top, bottom):
+            axis.grid(True, which="both", alpha=0.25)
+        top.legend(fontsize=7, ncol=2)
+        figure.tight_layout()
+        path = project.figure_path(f"逆二乗_{trace}.png")
+        figure.savefig(path, dpi=140)
+        plt.close(figure)
+        written.append(path)
+        if verbose:
+            print(f"[逆二乗] 図（{trace}）: {path}")
+    return written
+
+
+def write_figure(project, result, bands=None, verbose=True):
+    """**参照実装**：測線を横に並べた 1 枚もの（2026-08-26 に測線ごとへ移行）。"""
+    return write_figures(project, result, bands=bands, verbose=verbose)
 
 
 def run(project, verbose=True):
@@ -275,7 +351,7 @@ def run(project, verbose=True):
     if result is None:
         return None, None
     return (write_csv(project, result, verbose=verbose),
-            write_figure(project, result, verbose=verbose))
+            write_figures(project, result, verbose=verbose))
 
 
 def main(argv=None):
