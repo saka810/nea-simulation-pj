@@ -147,6 +147,10 @@ DEFAULTS = {
     #   「1/3 の検討も出来るようにしてもらえますか？」）。
     #   `band_start` はいちばん低いバンドの中心周波数 [Hz]（None なら既定：
     #   オクターブは 8→63 / 6→125、1/3 は 100 から）
+    # ★音圧レベルの**足し方**（2026-08-26 ユーザー要望
+    #   「エネルギー和とするか複素和とするかは、選択肢として用意しておく」）。
+    #   `energy`（従来）/ `coherent`（位相を含む）/ `both`（両方）
+    "level_method": "both",
     "band_width": "1/1",
     "band_start": None,
     "unit": None,                  # None なら DXF の $INSUNITS

@@ -622,6 +622,7 @@ def _run_one(project, receiver, verbose=True, make_figures=True,
         two_sided=project.two_sided,
         volume=project.volume,
         # ★面の上に置いた音源（半無響室の床置きなど。2026-08-24）
+        level_method=getattr(project, "level_method", "both"),
         source_on_surface=getattr(project, "source_on_surface", True),
         source_surface_tolerance=getattr(project, "source_surface_tolerance", 0.0),
         source_direction=getattr(project, "source_direction", None),

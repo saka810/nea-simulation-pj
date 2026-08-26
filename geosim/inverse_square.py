@@ -177,42 +177,18 @@ COHERENT_LINES = 129
 
 
 def coherent_band_levels(pulses, frequencies, atmosphere, band_width="1/3",
-                         lines=COHERENT_LINES, source_power_db=None):
-    """パルス列を**位相ごと**重ねてバンド別の音圧レベルを出す [dB]（B の中身）。
+                         lines=None, source_power_db=None):
+    """パルス列を**位相ごと**重ねたバンド別の音圧レベル [dB]（B の中身）。
 
-        p(f) = Σ_n √(A_n · e^{-m d_n} / 4π) / d_n · e^{-j k d_n}
-        Lp   = Lw + 10log10( <|p(f)|²> ) + 10log10(ρc/400)
-
-    `< >` はバンドの中の周波数平均。A（エネルギー和）と**同じ量**を、
-    足すときに位相を持たせただけのもの——干渉の山谷がそのまま出る。
-
-    ★**反射の位相ずれは 0 と仮定**している（実測の吸音率からは大きさしか
-      決まらない）。山谷の**位置**は当てにならず、**振れ幅の目安**として見る。
+    ★中身は `sound_level.coherent_band_levels()`（正式な置き場はあちら。
+    音圧レベルの出力でも同じものを使うので、2026-08-26 に一本化した）。
     """
-    import absorption as ab
+    import sound_level as sl
 
-    distance = np.asarray(pulses.distance, dtype=float)
-    energy = np.asarray(pulses.energy, dtype=float)
-    frequencies = np.asarray(frequencies, dtype=float)
-    velocity = atmosphere.sound_velocity
-    m = atmosphere.absorption_coefficient(frequencies)
-    lower, upper = ab.band_edges(frequencies, band_width)
-
-    power = 0.0 if source_power_db is None else float(np.mean(
-        np.atleast_1d(np.asarray(source_power_db, dtype=float))))
-    impedance = 10.0 * np.log10(atmosphere.density * velocity / 400.0)
-
-    levels = np.empty(len(frequencies))
-    for band in range(len(frequencies)):
-        air = np.exp(-m[band] * distance)
-        amplitude = np.sqrt(np.maximum(energy[:, band], 0.0) * air
-                            / (4.0 * np.pi)) / distance
-        line = np.linspace(lower[band], upper[band], lines)
-        wave = 2.0 * np.pi * line / velocity
-        pressure = np.exp(-1j * wave[:, None] * distance[None, :]) @ amplitude
-        mean = float(np.mean(np.abs(pressure) ** 2))
-        levels[band] = (power + 10.0 * np.log10(mean + 1.0e-300) + impedance)
-    return levels
+    return sl.coherent_band_levels(
+        pulses.time, pulses.energy, pulses.distance, atmosphere, frequencies,
+        band_width=band_width,
+        lines=lines or sl.COHERENT_LINES, source_power_db=source_power_db)
 
 
 def read_coherent_levels(project, verbose=True):

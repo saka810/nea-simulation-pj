@@ -305,6 +305,55 @@ def band_levels(times, energies, distances=None, atmosphere=None,
     return result
 
 
+# バンドの中で何点の周波数を計算して平均するか（複素和のとき）
+COHERENT_LINES = 129
+
+
+def coherent_band_levels(times, energies, distances=None, atmosphere=None,
+                         frequencies=None, band_width="1/1",
+                         lines=COHERENT_LINES, source_power_db=None):
+    """**位相ごと重ねた**バンド別の音圧レベル [dB]（複素和）。
+
+        p(f) = Σ_n √(A_n · e^{-m d_n} / 4π) / d_n · e^{-j 2π f d_n / c}
+        Lp   = Lw + 10log10( <|p(f)|²> ) + 10log10(ρc/400)
+
+    `< >` はバンドの中の周波数平均。`band_levels()`（エネルギー和）と
+    **同じ量**を、足すときに位相を持たせただけのもの——干渉の山谷が出る。
+
+    ★**反射の位相ずれは 0**（＝剛な面では厳密、吸音面では仮定）。
+      材料の位相情報が無い段階では、山谷の位置ではなく**振れ幅の目安**として見る。
+    """
+    if atmosphere is None:
+        atmosphere = Atmosphere()
+    times = np.atleast_1d(np.asarray(times, dtype=float))
+    energies = np.atleast_2d(np.asarray(energies, dtype=float))
+    if distances is None:
+        distances = times * atmosphere.sound_velocity
+    distances = np.atleast_1d(np.asarray(distances, dtype=float))
+    if frequencies is None:
+        frequencies = ab.octave_bands(energies.shape[1])
+    frequencies = np.asarray(frequencies, dtype=float)
+
+    velocity = atmosphere.sound_velocity
+    m = atmosphere.absorption_coefficient(frequencies)
+    lower, upper = ab.band_edges(frequencies, band_width)
+    power = 0.0 if source_power_db is None else float(np.mean(
+        np.atleast_1d(np.asarray(source_power_db, dtype=float))))
+    impedance = 10.0 * np.log10(atmosphere.density * velocity / 400.0)
+
+    levels = np.empty(len(frequencies))
+    for band in range(len(frequencies)):
+        air = np.exp(-m[band] * distances)
+        amplitude = np.sqrt(np.maximum(energies[:, band], 0.0) * air
+                            / (4.0 * np.pi)) / distances
+        line = np.linspace(lower[band], upper[band], lines)
+        wave = 2.0 * np.pi * line / velocity
+        pressure = np.exp(-1j * wave[:, None] * distances[None, :]) @ amplitude
+        levels[band] = (power + 10.0 * np.log10(float(np.mean(
+            np.abs(pressure) ** 2)) + 1.0e-300) + impedance)
+    return levels
+
+
 def write_levels(filename, result):
     """音圧レベルを CSV に保存する。**周波数は横**（区分付きの表）。"""
     # ★自由音場（逆二乗）の値と差は**出さない**（2026-08-21 ユーザー判断。
@@ -320,6 +369,9 @@ def write_levels(filename, result):
         ("参考", "音源パワーレベル_dB", result["source_distance"],
          result["source_power"]),
     ]
+    # ★複素和（位相を含む）を出しているときは、区分を分けて一緒に入れる
+    if result.get("coherent") is not None:
+        rows.insert(2, ("複素和", "Lp_dB", None, result["coherent"]))
     return tb.write_sectioned_table(filename, result["frequencies"], rows,
                                     value_label="総合")
 

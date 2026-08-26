@@ -4000,6 +4000,94 @@ def test_hemi_anechoic():
                             100.0, 500.0) == [1, 2, 3])
 
 
+def test_frequency_response():
+    """[45] 伝達関数（干渉が見える形）と固有周波数。
+
+    ★2026-08-26 ユーザー要望
+    > 普通の室を検討する際に、まずは剛な面として、モード分布を確認しながら
+    > 形状を検討します。…そのため、干渉がみれる形である必要があります。
+    """
+    print("\n[45] 伝達関数と固有周波数（干渉が見える形）")
+    import atmosphere as at_
+    import frequency_response as fr
+    import loop_noredundancy as ln_
+    import sound_level as sl_
+
+    air = at_.Atmosphere()
+    c = air.sound_velocity
+
+    # ---- ① 直方体の固有周波数 ----
+    size = (4.0, 5.0, 3.0)
+    modes = fr.modal_frequencies(size, c, high=120.0)
+    axial = [m for m in modes if m[4] == "軸"]
+    check("★軸モードは c/(2L)（いちばん低いのは長辺）",
+          abs(axial[0][0] - c / (2 * 5.0)) < 1e-9,
+          f"{axial[0][0]:.2f} Hz / 理論 {c / 10.0:.2f} Hz")
+    check("低い順に並ぶ", all(modes[k][0] <= modes[k + 1][0]
+                              for k in range(len(modes) - 1)))
+    check("種類を見分ける（軸・接線・斜め）",
+          {m[4] for m in modes} == {"軸", "接線", "斜め"},
+          str(sorted({m[4] for m in modes})))
+    check("★(1,1,0) の周波数が式どおり",
+          any(abs(f - c / 2 * np.hypot(1 / 4.0, 1 / 5.0)) < 1e-9
+              and (nx, ny, nz) == (1, 1, 0) for f, nx, ny, nz, _k in modes))
+
+    # ---- ② モード密度とシュレーダー周波数 ----
+    volume, surface, edge = 60.0, 94.0, 48.0
+    density = fr.mode_density(np.array([50.0, 100.0]), volume, surface, edge, c)
+    check("モード密度は周波数とともに増える", density[1] > density[0],
+          str(np.round(density, 4)))
+    check("★シュレーダー周波数 2000√(T/V)",
+          abs(fr.schroeder_frequency(670.0, 0.6) - 2000.0 * np.sqrt(0.6 / 670.0))
+          < 1e-9)
+    check("容積や残響が無いときは nan（黙って 0 にしない）",
+          not np.isfinite(fr.schroeder_frequency(0.0, 0.5)))
+
+    # ---- ③ 伝達関数：経路 1 本なら 1/r の大きさで平ら ----
+    single = ln_.PulseList(band_number=2)
+    single.distance = np.array([3.0])
+    single.time = single.distance / c
+    single.energy = np.ones((1, 2))
+    frequencies = np.linspace(50.0, 200.0, 61)
+    pressure = fr.response(single, frequencies, air)
+    magnitude = np.abs(pressure)
+    check("★経路 1 本なら大きさは周波数によらず一定（干渉相手がいない）",
+          np.allclose(magnitude, magnitude[0], rtol=1e-12))
+    check("大きさは √(E/4π)/r",
+          abs(magnitude[0] - np.sqrt(2.0 / (4 * np.pi)) / 3.0) < 1e-12,
+          f"{magnitude[0]:.6f}")
+
+    # 経路 2 本なら、経路長差から決まる周期で山谷ができる
+    pair = ln_.PulseList(band_number=1)
+    pair.distance = np.array([3.0, 4.0])
+    pair.time = pair.distance / c
+    pair.energy = np.ones((2, 1))
+    fine = np.linspace(20.0, 1200.0, 20000)
+    level = np.abs(fr.response(pair, fine, air))
+    peaks = fine[1:-1][(level[1:-1] > level[:-2]) & (level[1:-1] > level[2:])]
+    spacing = float(np.median(np.diff(peaks)))
+    check("★干渉の山の間隔は c/経路長差", abs(spacing - c / 1.0) < 1.0,
+          f"{spacing:.2f} Hz / 理論 {c:.2f} Hz")
+
+    check("★出せる分解能の目安は c/最長経路",
+          abs(fr.resolution(pair, air) - c / 4.0) < 1e-9,
+          f"{fr.resolution(pair, air):.2f} Hz")
+
+    # ---- ④ 音圧レベルの足し方を選べる ----
+    energy_level = sl_.band_levels(pair.time, pair.energy, pair.distance, air,
+                                   np.array([500.0]), verbose=False)
+    coherent = sl_.coherent_band_levels(pair.time, pair.energy, pair.distance,
+                                        air, np.array([500.0]),
+                                        band_width="1/1")
+    check("★エネルギー和と複素和の両方を出せる",
+          np.isfinite(energy_level["levels"][0]) and np.isfinite(coherent[0]),
+          f"エネルギー {energy_level['levels'][0]:.2f} / "
+          f"複素 {coherent[0]:.2f} dB")
+    check("複素和はエネルギー和 +3.01 dB を超えない（同じ大きさ 2 本）",
+          coherent[0] <= energy_level["levels"][0] + 3.011,
+          f"{coherent[0] - energy_level['levels'][0]:+.3f} dB")
+
+
 def main():
     print("geosim 数値検証")
     print(f"  Python {sys.version.split()[0]} / numpy {np.__version__}")
@@ -4021,7 +4109,8 @@ def main():
                test_workbook, test_path_reuse, test_conditions_batch,
                test_panel_scroll, test_empty_model, test_impulse_fast,
                test_measurement_points, test_image_source_view,
-               test_ui_2026_08_24, test_camera_save, test_hemi_anechoic):
+               test_ui_2026_08_24, test_camera_save, test_hemi_anechoic,
+               test_frequency_response):
         fn()
 
     failed = [name for name, ok in _results if not ok]

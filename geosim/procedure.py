@@ -55,7 +55,7 @@ def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref
             paths_filename=None, reuse_paths=True, statistical_result=None,
             impulse_method="fast",
             flip_faces=None, face_materials=None, traced_history=None,
-            source_placement=None, source_on_surface=True,
+            level_method="both", source_placement=None, source_on_surface=True,
             source_surface_tolerance=0.0, source_direction=None,
             progress=None):
     """
@@ -440,6 +440,16 @@ def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref
         level_result = sl.band_levels(
             pulses.time, pulses.energy, pulses.distance, atmosphere, frequencies,
             source_power_db=source_power_db, source_distance=source_distance)
+        # ★**位相ごと重ねた値**も出す（`level_method`）。
+        #   `both` なら表に区分「複素和」の行が増える
+        if str(level_method).lower() in ("coherent", "both"):
+            level_result["coherent"] = sl.coherent_band_levels(
+                pulses.time, pulses.energy, pulses.distance, atmosphere,
+                frequencies, band_width=band_width,
+                source_power_db=source_power_db)
+            if str(level_method).lower() == "coherent":
+                # 複素和だけを見たいときは、そちらを本体に据える
+                level_result["levels"] = level_result["coherent"]
         if level_filename is not None:
             sl.write_levels(level_filename, level_result)
             print(f"[procedure] 音圧レベルを書き出しました: {level_filename}")
