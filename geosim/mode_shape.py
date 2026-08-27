@@ -104,6 +104,35 @@ def inside_mask(model, points, samples=INSIDE_SAMPLES, verbose=True):
     return keep
 
 
+def section_segments(mesh, plane="z", value=0.0):
+    """三角形と断面の**交線**を集める。→ (m, 2, 2) の線分（断面内の 2 次元座標）
+
+    切った面の**境界**（壁・什器・反射板の切り口）を図に重ねるために使う。
+    """
+    axis = AXIS[plane]
+    others = [k for k in range(3) if k != axis]
+    segments = []
+    for face in mesh:
+        vertexes = np.asarray(face.vertexes, dtype=float)
+        height = vertexes[:, axis] - float(value)
+        if np.all(height > 0) or np.all(height < 0):
+            continue                    # 断面と交わらない
+        crossings = []
+        for k in range(3):
+            a, b = k, (k + 1) % 3
+            if height[a] == 0.0:
+                crossings.append(vertexes[a])
+            if height[a] * height[b] < 0.0:
+                t = height[a] / (height[a] - height[b])
+                crossings.append(vertexes[a] + t * (vertexes[b] - vertexes[a]))
+        if len(crossings) >= 2:
+            first, second = np.asarray(crossings[0]), np.asarray(crossings[1])
+            if np.linalg.norm(first - second) > 1.0e-9:
+                segments.append([[first[others[0]], first[others[1]]],
+                                 [second[others[0]], second[others[1]]]])
+    return np.asarray(segments) if segments else np.zeros((0, 2, 2))
+
+
 def pressure_at(pulses, frequency, sound_velocity):
     """1 点の音圧（複素数）。式(2) の複素和。"""
     distance = np.asarray(pulses.distance, dtype=float)
@@ -252,6 +281,8 @@ def compute_box(project, frequencies, plane="z", value=None,
         field[:, band] = box_field(size, source, points - low, frequency,
                                    air.sound_velocity, order=order, alpha=alpha)
     return {"points": points, "field": field, "frequencies": frequencies,
+            "outline": section_segments(model.mesh, plane,
+                                        points[0][AXIS[plane]]),
             "shape": shape, "axes": (first, second), "plane": plane,
             "value": float(points[0][AXIS[plane]]),
             "inside": np.ones(len(points), dtype=bool),
@@ -353,6 +384,8 @@ def compute(project, frequencies, plane="z", value=None,
         print()
 
     return {"points": points, "field": field, "frequencies": frequencies,
+            "outline": section_segments(model.mesh, plane,
+                                        points[0][AXIS[plane]]),
             "shape": shape, "axes": (first, second), "plane": plane,
             "value": float(points[0][AXIS[plane]]), "inside": keep,
             "source": source, "spacing": spacing, "nref": reflections,
@@ -420,6 +453,14 @@ def write_figures(project, result, span=30.0, verbose=True):
         mesh = axis.pcolormesh(first, second, values, shading="nearest",
                                cmap="turbo", vmin=-span, vmax=0.0)
         figure.colorbar(mesh, ax=axis, label="音圧レベル [dB]（最大を 0 dB）")
+        # ★切り口（境界面）を重ねる。どこに壁・什器があるかが分かる
+        cut = result.get("outline")
+        if cut is not None and len(cut):
+            from matplotlib.collections import LineCollection
+            axis.add_collection(LineCollection(cut, colors="#111111",
+                                               linewidths=1.1, alpha=0.85,
+                                               zorder=3))
+
         source = result["source"]
         if abs(source[axis_index] - result["value"]) < 1.0:
             axis.plot(source[others[0]], source[others[1]], "*",

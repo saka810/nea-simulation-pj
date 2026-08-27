@@ -84,7 +84,9 @@ import view_model_gui as vg
 TAB_RAYS = "音線"
 TAB_PARTICLES = "音粒子"
 TAB_IMAGES = "虚音源"
-MODE_TAB = {"rays": TAB_RAYS, "particles": TAB_PARTICLES, "images": TAB_IMAGES}
+TAB_FIELD = "音圧分布"          # ★2026-08-26 追加（断面のモード形状）
+MODE_TAB = {"rays": TAB_RAYS, "particles": TAB_PARTICLES,
+            "images": TAB_IMAGES, "field": TAB_FIELD}
 TAB_MODE = {tab: mode for mode, tab in MODE_TAB.items()}
 
 COLOR_MODES = ("energy", "time", "reflection", "ray")
@@ -668,18 +670,20 @@ class RayParticleView:
     #   「虚音源を見るが最初の画面にあるのはなぜですか？
     #     音線確認画面と並列にある想定です」）。
     #   同じ計算結果の 3 つの見せ方なので、同居させて切り替えるのが素直
-    MODES = ("rays", "particles", "images")
+    MODES = ("rays", "particles", "images", "field")
     MODE_LABEL = dict(MODE_TAB)
 
     def __init__(self, plotter, animation=None, rays=None, mode="rays", panel=None,
-                 images=None):
+                 images=None, field=None):
         self.plotter = plotter
         self.animation = animation
         self.rays = rays
         self.images = images
+        self.field = field
         self.modes = [m for m in self.MODES
                       if (m != "images" or images is not None)
                       and (m != "particles" or animation is not None)
+                      and (m != "field" or field is not None)
                       and (m != "rays" or rays is not None)]
         self.mode = mode if mode in self.modes else self.modes[0]
         self._was_playing = True
@@ -739,6 +743,8 @@ class RayParticleView:
 
         if self.images is not None:
             self.images.set_visible(images, render=False)
+        if self.field is not None:
+            self.field.set_visible(self.mode == "field", render=False)
 
         self._refresh_label()
         if render:
@@ -752,6 +758,8 @@ class RayParticleView:
             text += "\nスペース 再生/停止\n← → コマ送り   Home 先頭"
         elif self.mode == "images":
             text += "\n下の「虚音源」の欄で絞る\nw 受音点   h 室に寄る"
+        elif self.mode == "field":
+            text += "\n下の「音圧分布」の欄で\n断面と周波数を選ぶ"
         ParticleAnimation._set_text(self.label, text)
 
     def set_mode(self, mode, render=True):
@@ -1408,7 +1416,7 @@ def view(dxf_path, raylog_path, mode="both", absorption=None, unit=None,
          max_reflection=None, colour="energy", band=None, frames=240,
          opacity=0.12, layer_opacity=None, movie=None, point_size=9.0,
          screenshot=None, interval=30, save_dir=None, image_sets=None,
-         camera_path=None):
+         field_sections=None, camera_path=None):
     """モデルの上に音線と音粒子を重ねて表示する。
 
     max_rays / max_particles
@@ -1566,15 +1574,29 @@ def view(dxf_path, raylog_path, mode="both", absorption=None, unit=None,
             panel.end_group()
             images.set_visible(False, render=False)
 
+        # ★**音圧分布（断面）**も同じ Tab の輪に入れる（2026-08-26 ユーザー要望）。
+        #   `mode_shape.py` が書いた CSV を読んで面に貼るだけ（計算はやり直さない）
+        field = None
+        field_keys = []
+        if field_sections:
+            import view_field as vf
+            panel.begin_group(TAB_FIELD)
+            field_label = panel.reserve_text(3, size=9)
+            field = vf.FieldDisplay(plotter, field_sections, label=field_label)
+            field_keys = vf.add_controls(panel, field, font=font)
+            panel.end_group()
+            field.set_visible(False, render=False)
+
         switch = None
-        if mode == "both" or images is not None:
+        if mode == "both" or images is not None or field is not None:
             # 音線・音粒子・虚音源を同居させ、**タブと Tab キー**で切り替える
             switch = RayParticleView(plotter, animation=animation, rays=rays,
-                                     mode="rays", panel=panel, images=images)
+                                     mode="rays", panel=panel, images=images,
+                                     field=field)
             plotter.add_key_event("Tab", switch.toggle)
 
         # ---- いまの画面をそのまま保存する（G-12）----
-        help_lines = list(image_keys) + [
+        help_lines = list(image_keys) + list(field_keys) + [
             "数値の枠を押すと**その桁から**打ち込める（Enter 確定 / Esc 取消）",
             "← → で桁を移動   BackSpace/Delete で 1 文字   ▲▼ で 1 段ずつ",
             "k 絞り込みの種類   j 基準点",

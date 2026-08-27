@@ -94,7 +94,16 @@ def _visualise(project, results=None):
         except Exception as error:
             print(f"[app] 虚音源は開けません（{type(error).__name__}: {error}）")
 
+        # ★音圧分布の断面（`mode_shape.py` が作った CSV）。無ければタブも出ない
+        field_sections = []
+        try:
+            import view_field as vf
+            field_sections = vf.load_sections(project, verbose=True)
+        except Exception as error:
+            print(f"[app] 音圧分布は開けません（{type(error).__name__}: {error}）")
+
         vr.view(project.dxf_path, raylog, mode="both", image_sets=image_sets,
+                field_sections=field_sections,
                 # ★吸音率は**計算と同じ決め方**で渡す（2026-08-24。実行ログに
                 #   「吸音率が未指定のレイヤ → 0.1 を使用」と出ていた）。
                 #   材料は条件表の「吸音率」シートで決まるので、
