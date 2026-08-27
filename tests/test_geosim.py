@@ -4088,6 +4088,98 @@ def test_frequency_response():
           f"{coherent[0] - energy_level['levels'][0]:+.3f} dB")
 
 
+def test_mode_shape():
+    """[46] 音圧分布（モード形状）。
+
+    ★2026-08-26 ユーザー要望（TODO G-39）「4 のモード形状の可視化も進めましょう」。
+    断面に格子を置き、指定周波数の音圧を**位相ごと重ねて**塗る。
+    """
+    print("\n[46] 音圧分布（モード形状）")
+    import mode_shape as ms
+    import read_dxffile as rd_
+
+    model = rd_.read_model(TEST_DXF, verbose=False)      # 2 × 3 × 1 m の箱
+    low, high = model.extents
+    size = np.asarray(high) - np.asarray(low)
+
+    # ---- ① 断面の軸を取り違えない（実際に踏んだ間違い）----
+    points, first, second, shape = ms.grid_points(model, plane="z", value=0.6,
+                                                  spacing=0.25)
+    check("★`z` 断面なら Z が一定（軸の取り違えを防ぐ）",
+          np.allclose(points[:, 2], 0.6) and len(np.unique(points[:, 0])) > 1,
+          f"Z {np.unique(points[:, 2])}")
+    check("格子の形と点数が合う", shape[0] * shape[1] == len(points),
+          f"{shape} / {len(points)} 点")
+    points_x, _f, _s, _sh = ms.grid_points(model, plane="x", value=1.0,
+                                           spacing=0.5)
+    check("`x` 断面なら X が一定", np.allclose(points_x[:, 0], 1.0))
+
+    # ---- ② 直方体かどうかの判定 ----
+    check("★直方体だと分かる", ms.is_box(model),
+          f"容積 {model.volume:.3f} / 寸法の積 {float(np.prod(size)):.3f}")
+
+    # ---- ③ 直方体の虚音源 ----
+    images, weights = ms.box_images(size, [0.5, 0.5, 0.5], order=2, alpha=0.0)
+    centre = size / 2.0
+    reach = 2.0 * float(np.linalg.norm(size))
+    check("★打ち切りは**室の中心からの距離**（添字ではない）",
+          np.all(np.linalg.norm(images - centre, axis=1) <= reach + 1e-9),
+          f"{len(images)} 個 / 半径 {reach:.2f} m")
+    check("次数を上げれば虚音源は増える",
+          len(ms.box_images(size, [0.5, 0.5, 0.5], order=4)[0]) > len(images))
+    check("剛（α=0）なら振幅は落ちない", np.allclose(weights, 1.0))
+    faint = ms.box_images(size, [0.5, 0.5, 0.5], order=2, alpha=0.75)[1]
+    check("吸音を入れると次数とともに落ちる",
+          faint.max() <= 1.0 + 1e-12 and faint.min() < 0.01,
+          f"最大 {faint.max():.3f} / 最小 {faint.min():.3e}")
+
+    # ---- ④ 場：α=1 なら直接音だけ（1/r）----
+    source = np.array([0.7, 1.1, 0.4])
+    probe = np.array([[1.3, 2.0, 0.6], [0.9, 0.5, 0.8]])
+    direct = ms.box_field(size, source, probe, 100.0, 343.0, order=3, alpha=1.0)
+    distance = np.linalg.norm(probe - source, axis=1)
+    check("★吸音率 1 なら直接音だけ（大きさは 1/r）",
+          np.allclose(np.abs(direct), 1.0 / distance, rtol=1e-9),
+          f"{np.abs(direct)} / {1.0 / distance}")
+
+    # ---- ⑤ 剛な箱で音源を中央に置くと、場は左右対称 ----
+    centre = size / 2.0
+    left = np.array([[0.4, 1.5, 0.5]])
+    right = np.array([[size[0] - 0.4, 1.5, 0.5]])
+    # ★吸音を少し入れて（遠い虚音源が効かなくなってから）比べる。
+    #   完全に剛（α=0）だと**打ち切った最外殻の非対称**が残るので厳密には一致しない
+    a = ms.box_field(size, centre, left, 60.0, 343.0, order=8, alpha=0.3)
+    b = ms.box_field(size, centre, right, 60.0, 343.0, order=8, alpha=0.3)
+    check("★箱＋中央の音源なら、対称な点の音圧は同じ",
+          abs(abs(a[0]) - abs(b[0])) < 1e-6 * max(abs(a[0]), 1.0),
+          f"{abs(a[0]):.6f} / {abs(b[0]):.6f}")
+    # ★完全に剛（α=0）だと級数が収束せず、**打ち切る位置で値が変わる**。
+    #   だから既定は 0 にせず、0 を指定したら注意を出す作りにしてある
+    rigid = [abs(ms.box_field(size, centre, left, 60.0, 343.0, order=n,
+                              alpha=0.0)[0]) for n in (4, 8)]
+    check("★完全に剛だと打ち切る位置で値が変わる（級数が収束しない）",
+          abs(rigid[1] - rigid[0]) > 0.1 * max(rigid[0], 1.0),
+          " → ".join(f"{v:.3f}" for v in rigid))
+    check("既定の吸音率は 0 ではない（収束させるため）",
+          ms.DEFAULT_ALPHA > 0.0, f"{ms.DEFAULT_ALPHA}")
+
+    # ---- ⑥ 高い次数ほど答えが動かなくなる（収束）----
+    point = np.array([[1.2, 2.2, 0.7]])
+    # ★よく吸う面（α=0.8）なら、遠い虚音源が効かなくなって値が動かなくなる。
+    #   吸音が小さいと級数はなかなか収束しない（＝響きが長い、ということ）
+    values = [abs(ms.box_field(size, source, point, 80.0, 343.0, order=n,
+                               alpha=0.8)[0]) for n in (4, 8, 12)]
+    check("★よく吸う面なら次数を上げても値が動かなくなる（収束）",
+          abs(values[2] - values[1]) < 1e-3 * max(values[2], 1.0)
+          and abs(values[2] - values[1]) < abs(values[1] - values[0]) + 1e-12,
+          " → ".join(f"{v:.6f}" for v in values))
+    faint_tail = [abs(ms.box_field(size, source, point, 80.0, 343.0, order=n,
+                                   alpha=0.05)[0]) for n in (2, 8)]
+    check("吸音が小さいと打ち切りで値が変わる（そう知らせる作りにしてある）",
+          abs(faint_tail[1] - faint_tail[0]) > 1e-3,
+          " → ".join(f"{v:.4f}" for v in faint_tail))
+
+
 def main():
     print("geosim 数値検証")
     print(f"  Python {sys.version.split()[0]} / numpy {np.__version__}")
@@ -4110,7 +4202,7 @@ def main():
                test_panel_scroll, test_empty_model, test_impulse_fast,
                test_measurement_points, test_image_source_view,
                test_ui_2026_08_24, test_camera_save, test_hemi_anechoic,
-               test_frequency_response):
+               test_frequency_response, test_mode_shape):
         fn()
 
     failed = [name for name, ok in _results if not ok]
