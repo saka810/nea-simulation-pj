@@ -17,6 +17,14 @@
     `nref` を大きく取る（出力に使った値と経路長を書く）
   ・受音球の半径は**格子の間隔と同じ**を既定にする（面を隙間なく覆う）
   ・格子は「点」なので、面の中に入ってしまう点（室の外）は**外して塗らない**
+
+★2026-08-27 相談で決めた（断面の設定方法）:
+  ・**何枚でも一度に切れる**。並びは `断面.json`（`section.py` が読む）
+  ・**斜めは「平面図の測線を含む鉛直面」**（傾いた面は入れない）
+  ・★**色の基準は「周波数ごとに、全断面で共通」**。断面ごとに最大を取ると
+    基準が動いて**枚どうしを比べられない**。周波数をまたいで共通にすると
+    低域だけ真っ赤になるので、そこは分ける
+  ・音線から出すときは、**全断面の点をまとめて 1 回で追跡する**（F-6 と同じ）
 """
 import io
 import math
@@ -25,6 +33,7 @@ import os
 import numpy as np
 
 import project as pj
+import section as sec
 
 # 断面の向き（名前 → 座標の添字）。
 # ★並びをそのまま添字に使わないこと（`z` を 0 番と取り違えると断面が変わる）
@@ -35,31 +44,53 @@ AXIS = {"x": 0, "y": 1, "z": 2}
 DEFAULT_SPACING = 0.25
 
 
+def resolve_section(model, plane="z", value=None, section=None):
+    """引数を Section にそろえる（`plane`/`value` の昔の呼び方も通す）。"""
+    if isinstance(section, sec.Section):
+        return section
+    if isinstance(plane, sec.Section):
+        return plane
+    if value is None:
+        low = np.asarray(model.extents[0], dtype=float)
+        high = np.asarray(model.extents[1], dtype=float)
+        value = 0.5 * (low[AXIS[plane]] + high[AXIS[plane]])
+    return sec.axis_section(plane, float(value))
+
+
 def grid_points(model, plane="z", value=None, spacing=DEFAULT_SPACING,
-                margin=0.05):
+                margin=0.05, section=None):
     """断面の上に格子の点を作る。→ (点 (n,3), 横軸, 縦軸, 形 (nrow, ncol))
 
-    `plane` は断面の法線の向き（`z` なら水平断面）、`value` はその座標。
-    省略すると室の中央。`margin` は壁からどれだけ離すか [m]。
-    """
-    low, high = np.asarray(model.extents[0], dtype=float), \
-        np.asarray(model.extents[1], dtype=float)
-    axis = AXIS[plane]
-    others = [k for k in range(3) if k != axis]
-    if value is None:
-        value = 0.5 * (low[axis] + high[axis])
+    断面は `section`（Section）で渡す。昔ながらに `plane`（`z` など）と
+    `value` を渡してもよい（軸に平行な面として組み立てる）。
 
-    def line(index):
-        start, stop = low[index] + margin, high[index] - margin
+    ★**面内の 2 本の基底（u, v）に沿って**格子を張るので、斜めの鉛直面でも
+      同じ書き方で通る。軸に平行なときは基底が座標軸そのものなので、
+      横軸・縦軸は**世界座標のまま**になる（従来と数字が変わらない）。
+
+    `margin` は壁からどれだけ離すか [m]。室の外に出た点は
+    `inside_mask` が落とす。
+    """
+    section = resolve_section(model, plane, value, section)
+    low = np.asarray(model.extents[0], dtype=float)
+    high = np.asarray(model.extents[1], dtype=float)
+
+    # 室の外接箱の 8 隅を面へ投影して、格子を張る範囲を決める
+    corners = np.array([[x, y, z] for x in (low[0], high[0])
+                        for y in (low[1], high[1])
+                        for z in (low[2], high[2])], dtype=float)
+    along, up = section.coordinates(corners)
+
+    def line(values):
+        start, stop = float(values.min()) + margin, float(values.max()) - margin
+        if stop <= start:
+            start, stop = float(values.min()), float(values.max())
         count = max(2, int(round((stop - start) / spacing)) + 1)
         return np.linspace(start, stop, count)
 
-    first, second = line(others[0]), line(others[1])
+    first, second = line(along), line(up)
     mesh_a, mesh_b = np.meshgrid(first, second)      # (nrow, ncol)
-    points = np.zeros((mesh_a.size, 3))
-    points[:, others[0]] = mesh_a.ravel()
-    points[:, others[1]] = mesh_b.ravel()
-    points[:, axis] = float(value)
+    points = section.place(mesh_a.ravel(), mesh_b.ravel())
     return points, first, second, mesh_a.shape
 
 
@@ -104,17 +135,20 @@ def inside_mask(model, points, samples=INSIDE_SAMPLES, verbose=True):
     return keep
 
 
-def section_segments(mesh, plane="z", value=0.0):
+def section_segments(mesh, plane="z", value=0.0, section=None):
     """三角形と断面の**交線**を集める。→ (m, 2, 2) の線分（断面内の 2 次元座標）
 
     切った面の**境界**（壁・什器・反射板の切り口）を図に重ねるために使う。
+    ★斜めの断面でも同じ（面からの符号付き距離で見るだけ）。
     """
-    axis = AXIS[plane]
-    others = [k for k in range(3) if k != axis]
+    if isinstance(plane, sec.Section):
+        section = plane
+    if section is None:
+        section = sec.axis_section(plane, float(value))
     segments = []
     for face in mesh:
         vertexes = np.asarray(face.vertexes, dtype=float)
-        height = vertexes[:, axis] - float(value)
+        height = section.height(vertexes)
         if np.all(height > 0) or np.all(height < 0):
             continue                    # 断面と交わらない
         crossings = []
@@ -126,10 +160,10 @@ def section_segments(mesh, plane="z", value=0.0):
                 t = height[a] / (height[a] - height[b])
                 crossings.append(vertexes[a] + t * (vertexes[b] - vertexes[a]))
         if len(crossings) >= 2:
-            first, second = np.asarray(crossings[0]), np.asarray(crossings[1])
-            if np.linalg.norm(first - second) > 1.0e-9:
-                segments.append([[first[others[0]], first[others[1]]],
-                                 [second[others[0]], second[others[1]]]])
+            pair = np.asarray(crossings[:2], dtype=float)
+            if np.linalg.norm(pair[0] - pair[1]) > 1.0e-9:
+                along, up = section.coordinates(pair)
+                segments.append([[along[0], up[0]], [along[1], up[1]]])
     return np.asarray(segments) if segments else np.zeros((0, 2, 2))
 
 
@@ -226,15 +260,16 @@ def box_field(size, source, points, frequency, sound_velocity, order=10,
 
 def compute_box(project, frequencies, plane="z", value=None,
                 spacing=DEFAULT_SPACING, order=10, alpha=DEFAULT_ALPHA,
-                verbose=True):
+                verbose=True, section=None, model=None):
     """**直方体の虚音源**で断面の音圧分布を出す（全点で同じ並びを使う）。"""
     import atmosphere as at
     import read_dxffile as rd
-    import run_project as rp
 
     frequencies = np.atleast_1d(np.asarray(frequencies, dtype=float))
-    model = rd.read_model(project.dxf_path, unit=project.unit,
-                          band_number=project.band_number, verbose=False)
+    if model is None:
+        model = rd.read_model(project.dxf_path, unit=project.unit,
+                              band_number=project.band_number, verbose=False)
+    section = resolve_section(model, plane, value, section)
     low, high = np.asarray(model.extents[0]), np.asarray(model.extents[1])
     size = high - low
 
@@ -245,7 +280,8 @@ def compute_box(project, frequencies, plane="z", value=None,
         source = model.source_points[0]
     source = np.asarray(source, dtype=float) - low      # 室の隅を原点にする
 
-    points, first, second, shape = grid_points(model, plane, value, spacing)
+    points, first, second, shape = grid_points(model, spacing=spacing,
+                                               section=section)
     air = at.Atmosphere(temperature=project.temperature,
                         humidity=project.humidity, pressure=project.pressure)
     images, _weights = box_images(size, source, order=order, alpha=alpha)
@@ -273,19 +309,24 @@ def compute_box(project, frequencies, plane="z", value=None,
         if tail > -20.0:
             print("[音圧分布] ★尾が十分に落ちていません。"
                   "次数（--order）を上げるか、吸音率を上げてください")
-        print(f"[音圧分布] 断面 {plane} = {points[0][AXIS[plane]]:.2f} m / "
+        print(f"[音圧分布] 断面『{section.name}』（{section.label()}）/ "
               f"格子 {shape[0]}×{shape[1]}（間隔 {spacing:.2f} m）")
 
     field = np.empty((len(points), len(frequencies)), dtype=complex)
     for band, frequency in enumerate(frequencies):
         field[:, band] = box_field(size, source, points - low, frequency,
                                    air.sound_velocity, order=order, alpha=alpha)
+    # ★**室の外は塗らない**。虚音源は箱の形で並べるが、断面（とくに測線の
+    #   鉛直面）は外接箱いっぱいに張るので、実際の室の外へはみ出しうる
+    keep = inside_mask(model, points, verbose=False)
+    field[~keep, :] = np.nan
     return {"points": points, "field": field, "frequencies": frequencies,
-            "outline": section_segments(model.mesh, plane,
-                                        points[0][AXIS[plane]]),
-            "shape": shape, "axes": (first, second), "plane": plane,
-            "value": float(points[0][AXIS[plane]]),
-            "inside": np.ones(len(points), dtype=bool),
+            "outline": section_segments(model.mesh, section=section),
+            "shape": shape, "axes": (first, second), "section": section,
+            "plane": "xyz"[section.axis] if section.axis is not None else "u",
+            "value": float(section.value) if section.value is not None
+            else float("nan"),
+            "inside": keep,
             "source": np.asarray(project.source if project.source is not None
                                  else model.source_points[0], dtype=float),
             "spacing": spacing, "nref": order, "rays": 0,
@@ -296,10 +337,28 @@ def compute_box(project, frequencies, plane="z", value=None,
 
 def compute(project, frequencies, plane="z", value=None,
             spacing=DEFAULT_SPACING, rays=None, nref=None, radius=None,
-            verbose=True):
-    """断面の音圧分布を求める。→ 結果の辞書
+            verbose=True, section=None, model=None):
+    """断面 1 枚の音圧分布を求める（音線から）。→ 結果の辞書"""
+    return compute_rays(project, frequencies,
+                        [resolve_section(model or _model_for(project),
+                                         plane, value, section)],
+                        spacing=spacing, rays=rays, nref=nref, radius=radius,
+                        verbose=verbose, model=model)[0]
 
-    `frequencies` は 1 つでも並びでもよい（同じ音線追跡を使い回す）。
+
+def _model_for(project):
+    """断面を組み立てるためだけにモデルを読む（軽い読み方）。"""
+    import read_dxffile as rd
+    return rd.read_model(project.dxf_path, unit=project.unit,
+                         band_number=project.band_number, verbose=False)
+
+
+def compute_rays(project, frequencies, sections, spacing=DEFAULT_SPACING,
+                 rays=None, nref=None, radius=None, verbose=True, model=None):
+    """断面を**何枚でも**まとめて求める（音線から）。→ 結果の辞書の並び
+
+    ★**音線追跡は 1 回**（全断面の格子点を一度に受音判定する）。
+      追跡は受音点に依らないので、断面が増えても追跡の手間は変わらない（F-6）。
     """
     import atmosphere as at
     import loop_deleteredundancy as ld
@@ -318,6 +377,7 @@ def compute(project, frequencies, plane="z", value=None,
                           flip_faces=rp._flip_faces_for(project),
                           face_materials=rp._face_materials_for(project),
                           verbose=False)
+    sections = [resolve_section(model, section=s_) for s_ in sections]
 
     source = project.source
     if source is None:
@@ -331,12 +391,18 @@ def compute(project, frequencies, plane="z", value=None,
                            direction=getattr(project, "source_direction", None),
                            enabled=bool(getattr(project, "source_on_surface", True)))
 
-    points, first, second, shape = grid_points(model, plane, value, spacing)
-    keep = inside_mask(model, points, verbose=verbose)
-    if verbose:
-        print(f"[音圧分布] 断面 {plane} = "
-              f"{points[0][AXIS[plane]]:.2f} m / 格子 {shape[0]}×{shape[1]}"
-              f"（間隔 {spacing:.2f} m）/ 室の中 {int(keep.sum())} 点")
+    # ---- 断面ごとに格子を作り、**まとめて 1 本の並び**にする ----
+    layout = []
+    for section in sections:
+        points, first, second, shape = grid_points(model, spacing=spacing,
+                                                   section=section)
+        keep = inside_mask(model, points, verbose=verbose)
+        if verbose:
+            print(f"[音圧分布] 断面『{section.name}』（{section.label()}）/ "
+                  f"格子 {shape[0]}×{shape[1]}（間隔 {spacing:.2f} m）"
+                  f"/ 室の中 {int(keep.sum())} 点")
+        layout.append({"section": section, "points": points, "keep": keep,
+                       "axes": (first, second), "shape": shape})
 
     ray_count = int(rays or min(project.rays, 50000))
     reflections = int(nref if nref is not None else project.nref)
@@ -354,7 +420,8 @@ def compute(project, frequencies, plane="z", value=None,
               f"受音球 {sphere:.2f} m で追跡します"
               + ("（面上の音源：半球）" if placement.on_surface else ""))
 
-    targets = points[keep]
+    targets = np.vstack([item["points"][item["keep"]] for item in layout]) \
+        if layout else np.zeros((0, 3))
     histories = lr.loop(source, targets, beam, reflections, model.mesh, sphere,
                         two_sided=project.two_sided,
                         progress=(lambda f: print(f"\r[音圧分布] 音線追跡 "
@@ -363,7 +430,17 @@ def compute(project, frequencies, plane="z", value=None,
     if verbose:
         print()
 
-    field = np.full((len(points), len(frequencies)), np.nan, dtype=complex)
+    for item in layout:
+        item["field"] = np.full((len(item["points"]), len(frequencies)),
+                                np.nan, dtype=complex)
+        item["where"] = np.flatnonzero(item["keep"])
+
+    # 追跡した順に断面へ振り分ける（並べた順と同じ）
+    owner, slot = [], []
+    for number, item in enumerate(layout):
+        owner.extend([number] * len(item["where"]))
+        slot.extend(range(len(item["where"])))
+
     lengths = []
     for index, (point, history) in enumerate(zip(targets, histories)):
         cleaned = ld.delete(history)
@@ -373,38 +450,70 @@ def compute(project, frequencies, plane="z", value=None,
                          two_sided=project.two_sided, verbose=False)
         if len(pulses.distance):
             lengths.append(float(np.max(pulses.distance)))
-        where = np.flatnonzero(keep)[index]
+        item = layout[owner[index]]
+        where = item["where"][slot[index]]
         for band, frequency in enumerate(frequencies):
-            field[where, band] = pressure_at(pulses, frequency,
-                                             air.sound_velocity)
+            item["field"][where, band] = pressure_at(pulses, frequency,
+                                                     air.sound_velocity)
         if verbose and (index + 1) % 50 == 0:
             print(f"\r[音圧分布] バックトレース {index + 1}/{len(targets)} 点",
                   end="")
     if verbose:
         print()
 
-    return {"points": points, "field": field, "frequencies": frequencies,
-            "outline": section_segments(model.mesh, plane,
-                                        points[0][AXIS[plane]]),
-            "shape": shape, "axes": (first, second), "plane": plane,
-            "value": float(points[0][AXIS[plane]]), "inside": keep,
-            "source": source, "spacing": spacing, "nref": reflections,
-            "rays": ray_count, "radius": sphere,
-            "path_length": float(np.max(lengths)) if lengths else float("nan"),
-            "sound_velocity": air.sound_velocity, "model": model}
+    length = float(np.max(lengths)) if lengths else float("nan")
+    results = []
+    for item in layout:
+        section = item["section"]
+        results.append({
+            "points": item["points"], "field": item["field"],
+            "frequencies": frequencies,
+            "outline": section_segments(model.mesh, section=section),
+            "shape": item["shape"], "axes": item["axes"], "section": section,
+            "plane": "xyz"[section.axis] if section.axis is not None else "u",
+            "value": float(section.value) if section.value is not None
+            else float("nan"),
+            "inside": item["keep"], "source": source, "spacing": spacing,
+            "nref": reflections, "rays": ray_count, "radius": sphere,
+            "path_length": length, "method": "rays",
+            "sound_velocity": air.sound_velocity, "model": model})
+    return results
 
 
 # ---- 出力 ------------------------------------------------------------------
 
-def write_csv(project, result, verbose=True):
-    """`結果/<室>_<条件>_音圧分布_<断面>.csv`（格子の点ごとの音圧レベル）。"""
-    plane, value = result["plane"], result["value"]
+def result_name(result, index=None):
+    """ファイルに使う短い名前（`01_床上1.2m` のような形）。"""
+    section = result.get("section")
+    number = result.get("index") if index is None else index
+    slug = section.slug() if section is not None else \
+        f"{result['plane']}{result['value']:.2f}m"
+    return f"{int(number) + 1:02d}_{slug}" if number is not None else slug
+
+
+def write_csv(project, result, verbose=True, peak=None):
+    """`結果/<室>_<条件>_音圧分布_<番号>_<断面名>.csv`（点ごとの音圧レベル）。
+
+    ★平面の決め方（軸に平行か／測線の鉛直面か）は**中身の見出しに書く**。
+      斜めが入るとファイル名では表せないので、`view_field` は
+      ファイル名ではなくこの行を読む。
+    """
+    import json
+
+    section = result.get("section")
     path = os.path.join(project.folder, pj.RESULT_DIR,
-                        project.prefixed(f"音圧分布_{plane}{value:.2f}m.csv"))
+                        project.prefixed(f"音圧分布_{result_name(result)}.csv"))
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    level = _levels(result)
+    level = _levels(result, peak=peak)
     with io.open(path, "w", encoding="utf-8-sig", newline="") as handle:
-        handle.write("# 断面 " + f"{plane} = {value:.3f} m / 格子 "
+        if section is not None:
+            handle.write("# section: "
+                         + json.dumps(section.to_dict(), ensure_ascii=False)
+                         + "\n")
+        handle.write("# 断面 "
+                     + (section.label() if section is not None
+                        else f"{result['plane']} = {result['value']:.3f} m")
+                     + f" / 格子 "
                      f"{result['shape'][0]}×{result['shape'][1]} / "
                      f"間隔 {result['spacing']:.3f} m / 音線 {result['rays']} 本 / "
                      f"最大反射 {result['nref']} 回\n")
@@ -421,15 +530,37 @@ def write_csv(project, result, verbose=True):
     return path
 
 
-def _levels(result):
-    """音圧レベル（最大を 0 dB とした相対値）。"""
+def _levels(result, peak=None):
+    """音圧レベル（最大を 0 dB とした相対値）。
+
+    ★`peak` は**周波数ごとの基準**（バンドの数だけの並び）。
+      断面が複数あるときは `common_peak()` で全断面をまたいだ最大を渡す。
+      断面ごとに最大を取ると基準が動いて**枚どうしを比べられない**。
+    """
     magnitude = np.abs(result["field"])
-    peak = np.nanmax(magnitude) or 1.0
+    if peak is None:
+        peak = np.nanmax(magnitude) if np.any(np.isfinite(magnitude)) else 1.0
+    peak = np.asarray(peak, dtype=float)
+    peak = np.where(np.isfinite(peak) & (peak > 0.0), peak, 1.0)
     with np.errstate(divide="ignore", invalid="ignore"):
         return 20.0 * np.log10(magnitude / peak)
 
 
-def write_figures(project, result, span=30.0, verbose=True):
+def common_peak(results):
+    """**周波数ごとに、全断面で共通**の基準（最大の |p|）。→ (バンド数,)"""
+    stack = []
+    for result in results:
+        magnitude = np.abs(result["field"])
+        with np.errstate(invalid="ignore"):
+            stack.append(np.where(np.isfinite(magnitude), magnitude,
+                                  -np.inf).max(axis=0))
+    if not stack:
+        return None
+    peak = np.max(np.vstack(stack), axis=0)
+    return np.where(np.isfinite(peak) & (peak > 0.0), peak, 1.0)
+
+
+def write_figures(project, result, span=30.0, verbose=True, peak=None):
     """断面ごと・周波数ごとの図（音圧レベルを面で塗る）。"""
     try:
         import matplotlib
@@ -440,19 +571,28 @@ def write_figures(project, result, span=30.0, verbose=True):
     import plots as pl
 
     pl.use_japanese_font()
-    level = _levels(result)
+    level = _levels(result, peak=peak)
     first, second = result["axes"]
-    axis_index = AXIS[result["plane"]]
-    others = [k for k in range(3) if k != axis_index]
-    names = ["X", "Y", "Z"]
+    section = result.get("section")
+    if section is None:
+        section = sec.axis_section(result["plane"], result["value"])
+    x_label, y_label = section.axis_labels()
 
     written = []
     for band, frequency in enumerate(result["frequencies"]):
         values = level[:, band].reshape(result["shape"])
-        figure, axis = plt.subplots(figsize=(8.4, 6.4))
+        # ★図の大きさは**断面の形**から決める（縦横比を保つので、
+        #   横長の鉛直断面を 8.4×6.4 で描くと上下が空いて題がはみ出す）
+        wide = float(first.max() - first.min()) or 1.0
+        tall = float(second.max() - second.min()) or 1.0
+        height = min(7.0, max(3.2, 5.4 * min(1.0, tall / wide) + 1.6))
+        width = min(16.0, max(6.4, (height - 1.6) * wide / tall + 2.8))
+        figure, axis = plt.subplots(figsize=(width, height))
         mesh = axis.pcolormesh(first, second, values, shading="nearest",
                                cmap="turbo", vmin=-span, vmax=0.0)
-        figure.colorbar(mesh, ax=axis, label="音圧レベル [dB]（最大を 0 dB）")
+        figure.colorbar(mesh, ax=axis,
+                        label="音圧レベル [dB]（全断面の最大を 0 dB）"
+                        if peak is not None else "音圧レベル [dB]（最大を 0 dB）")
         # ★切り口（境界面）を重ねる。どこに壁・什器があるかが分かる
         cut = result.get("outline")
         if cut is not None and len(cut):
@@ -461,27 +601,29 @@ def write_figures(project, result, span=30.0, verbose=True):
                                                linewidths=1.1, alpha=0.85,
                                                zorder=3))
 
-        source = result["source"]
-        if abs(source[axis_index] - result["value"]) < 1.0:
-            axis.plot(source[others[0]], source[others[1]], "*",
+        # 音源は**断面の近く**にあるときだけ描く（面からの距離で見る）
+        source = np.asarray(result["source"], dtype=float)
+        if abs(float(section.height([source])[0])) < 1.0:
+            along, up = section.coordinates([source])
+            axis.plot(along[0], up[0], "*",
                       color="#ffffff", markersize=14, markeredgecolor="#000000",
                       markeredgewidth=0.8, label="音源")
             axis.legend(loc="upper right", fontsize=8)
         axis.set_aspect("equal")
-        axis.set_xlabel(f"{names[others[0]]} [m]")
-        axis.set_ylabel(f"{names[others[1]]} [m]")
+        axis.set_xlabel(x_label)
+        axis.set_ylabel(y_label)
+        # 題は 3 行に分ける（断面の名前が長くなるので 1 行に詰めない）
+        how = (f"直方体の虚音源 {result['nref']} 次・"
+               f"吸音率 {result.get('alpha', 0.0):.2f}"
+               if result.get("method") == "box"
+               else f"反射 {result['nref']} 回・音線 {result['rays']:,} 本")
         axis.set_title(f"{project.room_label}／{project.condition_label}\n"
-                       f"{frequency:.1f} Hz の音圧分布"
-                       f"（{names[axis_index]} = {result['value']:.2f} m 断面）"
-                       + (f"／直方体の虚音源 {result['nref']} 次・"
-                          f"吸音率 {result.get('alpha', 0.0):.2f}"
-                          if result.get("method") == "box"
-                          else f"／反射 {result['nref']} 回・"
-                               f"音線 {result['rays']:,} 本"),
-                       fontsize=10)
+                       f"{frequency:.1f} Hz の音圧分布：{section.name}\n"
+                       f"{section.label()}／{how}",
+                       fontsize=9.5)
         figure.tight_layout()
         path = project.figure_path(
-            f"音圧分布_{result['plane']}{result['value']:.2f}m_{frequency:.0f}Hz.png")
+            f"音圧分布_{result_name(result)}_{frequency:.0f}Hz.png")
         figure.savefig(path, dpi=140)
         plt.close(figure)
         written.append(path)
@@ -491,37 +633,95 @@ def write_figures(project, result, span=30.0, verbose=True):
     return written
 
 
+def sections_for(project, model=None, sections=None, plane="z", value=None,
+                 verbose=True):
+    """使う断面を決める。→ Section の並び
+
+    優先は **① 引数で渡された並び → ② `断面.json` → ③ `--plane`/`--at`**。
+    ★`--plane`/`--at` を明示したときは、`断面.json` があってもそちらを使う
+      （その 1 枚だけ見たいという指示なので）。
+    """
+    if sections:
+        return [s_ if isinstance(s_, sec.Section) else sec.from_dict(s_)
+                for s_ in sections]
+    if value is None:
+        found = sec.load(project, verbose=verbose)
+        if found:
+            return found
+    if model is None:
+        model = _model_for(project)
+    return [resolve_section(model, plane, value)]
+
+
 def run(project, frequencies, plane="z", value=None, spacing=DEFAULT_SPACING,
         rays=None, nref=None, radius=None, span=30.0, method="auto",
-        order=10, alpha=DEFAULT_ALPHA, verbose=True):
-    """`method` は `box`（直方体の虚音源）/ `rays`（音線から）/ `auto`。
+        order=10, alpha=DEFAULT_ALPHA, verbose=True, sections=None):
+    """断面を**何枚でも**計算して CSV と図を書く。→ 結果の並び
 
+    `method` は `box`（直方体の虚音源）/ `rays`（音線から）/ `auto`。
     ★`auto` は**箱なら box**（モード形状がなめらかに出る）、
       箱でなければ `rays`（形は自由だが、点ごとに拾う経路が違うのでまだらになる）。
     """
+    model = _model_for(project)
+    sections = sections_for(project, model, sections, plane, value,
+                            verbose=verbose)
+    if verbose:
+        print(f"[音圧分布] 断面 {len(sections)} 枚 × 周波数 "
+              f"{len(np.atleast_1d(frequencies))} 本")
+        print(sec.describe(sections))
+
     if method == "auto":
-        import read_dxffile as rd
-        model = rd.read_model(project.dxf_path, unit=project.unit,
-                              band_number=project.band_number, verbose=False)
         method = "box" if is_box(model) else "rays"
         if verbose:
             print(f"[音圧分布] やり方は自動で **{method}** にしました"
                   + ("（直方体とみなせる）" if method == "box"
                      else "（直方体ではないので音線から）"))
     if method == "box":
-        result = compute_box(project, frequencies, plane=plane, value=value,
-                             spacing=spacing, order=order, alpha=alpha,
-                             verbose=verbose)
+        # ★打ち切りの説明（分解能・残る尾）は断面に依らないので**1 回だけ**出す
+        results = [compute_box(project, frequencies, section=section,
+                               spacing=spacing, order=order, alpha=alpha,
+                               verbose=verbose and number == 0, model=model)
+                   for number, section in enumerate(sections)]
     else:
-        result = compute(project, frequencies, plane=plane, value=value,
-                         spacing=spacing, rays=rays, nref=nref, radius=radius,
-                         verbose=verbose)
-    if verbose and np.isfinite(result["path_length"]):
-        print(f"[音圧分布] 最長経路 {result['path_length']:.1f} m"
-              f"（分解能の目安 {result['sound_velocity'] / result['path_length']:.2f} Hz）")
-    write_csv(project, result, verbose=verbose)
-    write_figures(project, result, span=span, verbose=verbose)
-    return result
+        results = compute_rays(project, frequencies, sections,
+                               spacing=spacing, rays=rays, nref=nref,
+                               radius=radius, verbose=verbose)
+    for number, result in enumerate(results):
+        result["index"] = number
+
+    if results and verbose and np.isfinite(results[0]["path_length"]):
+        length = results[0]["path_length"]
+        print(f"[音圧分布] 最長経路 {length:.1f} m"
+              f"（分解能の目安 "
+              f"{results[0]['sound_velocity'] / length:.2f} Hz）")
+
+    # ★色の基準は**周波数ごとに全断面で共通**（断面ごとだと比べられない）
+    peak = common_peak(results) if len(results) > 1 else None
+    if verbose and peak is not None:
+        print("[音圧分布] 色の基準は**周波数ごとに全断面で共通**にしました"
+              "（断面どうしを比べられるように）")
+    for result in results:
+        write_csv(project, result, verbose=verbose, peak=peak)
+        write_figures(project, result, span=span, verbose=verbose, peak=peak)
+    return results
+
+
+def parse_frequencies(values=None, sweep=None):
+    """`--frequency` の列挙と `--sweep 20:100:5` の範囲を混ぜる。"""
+    found = [float(v) for v in (values or [])]
+    for text in (sweep or []):
+        parts = str(text).split(":")
+        if len(parts) not in (2, 3):
+            raise ValueError(f"範囲は 低:高[:刻み] で書いてください（{text}）")
+        low, high = float(parts[0]), float(parts[1])
+        step = float(parts[2]) if len(parts) == 3 else 1.0
+        if step <= 0 or high < low:
+            raise ValueError(f"範囲がおかしいです（{text}）")
+        count = int(round((high - low) / step)) + 1
+        found.extend(float(v) for v in np.linspace(low, low + step * (count - 1),
+                                                   count))
+    # 同じ周波数は 1 本にまとめる（並びは小さい順）
+    return sorted(set(round(v, 6) for v in found))
 
 
 def main(argv=None):
@@ -532,11 +732,13 @@ def main(argv=None):
     parser.add_argument("folder", help="プロジェクトのフォルダ")
     parser.add_argument("--sheet", default=None, help="条件（シート名）")
     parser.add_argument("--frequency", type=float, action="append",
-                        required=True, help="周波数 [Hz]（繰り返し指定可）")
+                        help="周波数 [Hz]（繰り返し指定可）")
+    parser.add_argument("--sweep", action="append",
+                        help="周波数の範囲 低:高:刻み [Hz]（例 20:100:5）")
     parser.add_argument("--plane", default="z", choices=PLANES,
                         help="断面の向き（既定 z ＝水平断面）")
     parser.add_argument("--at", type=float, default=None,
-                        help="断面の位置 [m]（省略すると室の中央）")
+                        help="断面の位置 [m]。★指定すると 断面.json より優先")
     parser.add_argument("--spacing", type=float, default=DEFAULT_SPACING)
     parser.add_argument("--rays", type=int, default=None)
     parser.add_argument("--nref", type=int, default=None)
@@ -553,13 +755,17 @@ def main(argv=None):
                              "既定 0.02。★0 だと級数が収束しない）")
     args = parser.parse_args(argv)
 
+    frequencies = parse_frequencies(args.frequency, args.sweep)
+    if not frequencies:
+        parser.error("周波数を --frequency か --sweep で指定してください")
+
     base = pj.Project.load(args.folder)
     project = pj.Project(base.folder,
                          **{k: getattr(base, k) for k in pj.DEFAULTS})
     if args.sheet:
         project.condition_sheet = args.sheet
     print(f"[音圧分布] 条件『{project.condition_label}』")
-    run(project, args.frequency, plane=args.plane, value=args.at,
+    run(project, frequencies, plane=args.plane, value=args.at,
         spacing=args.spacing, rays=args.rays, nref=args.nref,
         radius=args.radius, span=args.span, method=args.method,
         order=args.order, alpha=args.alpha)

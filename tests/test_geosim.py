@@ -4180,6 +4180,133 @@ def test_mode_shape():
           " → ".join(f"{v:.4f}" for v in faint_tail))
 
 
+def test_sections():
+    """[47] 断面の決め方（1 枚／複数／斜め）。
+
+    ★2026-08-27 にユーザーと相談して決めた:
+      ・並びは `断面.json`（1 枚 = 1 行）
+      ・斜めは**平面図の測線を含む鉛直面**（傾いた面は入れない）
+      ・複数の断面は**チェックで同時に**画面へ出す
+      ・★色の基準は**周波数ごとに全断面で共通**（断面ごとだと比べられない）
+    """
+    print("\n[47] 断面の決め方")
+    import io
+    import math
+    import tempfile
+
+    import mode_shape as ms
+    import project as pj
+    import read_dxffile as rd_
+    import section as sec
+
+    # ---- ① 軸に平行な面：面内の座標は**世界座標のまま** ----
+    flat = sec.axis_section("z", 1.2, name="床上1.2m")
+    probe = np.array([[3.0, 4.0, 1.2], [-1.0, 2.5, 1.2]])
+    along, up = flat.coordinates(probe)
+    check("★軸に平行な面は面内の座標が世界座標のまま（従来の図と数字が変わらない）",
+          np.allclose(along, probe[:, 0]) and np.allclose(up, probe[:, 1]),
+          f"{along} / {up}")
+    check("面の上の点は高さ 0", np.allclose(flat.height(probe), 0.0))
+    check("面の外の点は高さが出る",
+          abs(float(flat.height([[0.0, 0.0, 2.2]])[0]) - 1.0) < 1e-9)
+    check("法線は Z 向き", np.allclose(np.abs(flat.normal), [0, 0, 1]))
+
+    # ---- ② 斜め：平面図の測線を含む**鉛直面** ----
+    line = sec.vertical_section([1.0, 1.0], [4.0, 5.0], name="測線")
+    length = math.hypot(3.0, 4.0)
+    check("★測線の鉛直面：法線は水平（＝鉛直な面）",
+          abs(float(line.normal[2])) < 1e-12, f"{line.normal}")
+    check("縦軸は高さ Z", np.allclose(line.v, [0, 0, 1]))
+    ends = np.array([[1.0, 1.0, 0.0], [4.0, 5.0, 2.0]])
+    a_end, b_end = line.coordinates(ends)
+    check("★横軸は測線に沿った距離（始点が 0・終点が線の長さ）",
+          abs(a_end[0]) < 1e-9 and abs(a_end[1] - length) < 1e-9,
+          f"{a_end} / 長さ {length:.3f}")
+    check("縦軸はそのまま高さ", abs(b_end[1] - 2.0) < 1e-9)
+    middle = line.place(np.array([length / 2]), np.array([1.5]))
+    check("面内の座標から世界座標に戻せる",
+          abs(float(line.height(middle)[0])) < 1e-9
+          and abs(float(middle[0][2]) - 1.5) < 1e-9, f"{middle}")
+    check("測線の 2 点が同じなら断ってくる",
+          _raises(ValueError, sec.vertical_section, [1.0, 1.0], [1.0, 1.0]))
+
+    # ---- ③ 断面.json（1 枚 = 1 行）の出し入れ ----
+    with tempfile.TemporaryDirectory() as folder:
+        project = pj.Project(folder)
+        written = [flat, line, sec.axis_section("x", 2.5)]
+        path = sec.save(project, written)
+        text = io.open(path, encoding="utf-8").read()
+        check("★断面.json は 1 枚 = 1 行（人が手で直すファイルなので）",
+              text.count("{\"name\"") == 3
+              and '"through": [[1.0, 1.0], [4.0, 5.0]]' in text,
+              text.strip().splitlines()[2].strip())
+        again = sec.load(project)
+        check("読み書きで往復する（枚数・名前）",
+              len(again) == 3 and [x.name for x in again]
+              == [x.name for x in written])
+        check("斜めも往復する（測線の座標）",
+              np.allclose(again[1].u, line.u)
+              and np.allclose(again[1].point, line.point))
+        # ★おかしな行があっても**その 1 枚だけ**飛ばす（黙って全部捨てない）
+        io.open(path, "w", encoding="utf-8", newline="").write(
+            '{"sections": [{"name": "変", "plane": "w", "at": 1.0},'
+            ' {"name": "良", "plane": "z", "at": 0.5}]}')
+        survived = sec.load(project)
+        check("★読めない断面があっても、読める方は残す",
+              len(survived) == 1 and survived[0].name == "良")
+
+    check("ファイル名に使えない字は落とす",
+          sec.axis_section("z", 1.0, name="床/上:1.2").slug() == "床_上_1.2",
+          sec.axis_section("z", 1.0, name="床/上:1.2").slug())
+
+    # ---- ④ 格子と切り口が斜めでも通る ----
+    model = rd_.read_model(TEST_DXF, verbose=False)      # 2 × 3 × 1 m の箱
+    diagonal = sec.vertical_section([0.0, 0.0], [2.0, 3.0], name="対角")
+    points, first, second, shape = ms.grid_points(model, section=diagonal,
+                                                  spacing=0.25)
+    check("★斜めの断面にも格子を張れる（点は全部その面の上）",
+          float(np.abs(diagonal.height(points)).max()) < 1e-9
+          and shape[0] * shape[1] == len(points), f"{shape}")
+    check("横軸は対角の長さまで（√13 = 3.606 m）",
+          abs(float(first.max()) - (math.hypot(2.0, 3.0) - 0.05)) < 1e-6,
+          f"{first.max():.4f}")
+    cut = ms.section_segments(model.mesh, section=diagonal)
+    check("★斜めでも切り口（境界面）が拾える", len(cut) > 0, f"{len(cut)} 本")
+    flat_cut = ms.section_segments(model.mesh, "z", 0.6)
+    check("軸に平行な切り口は従来どおり", len(flat_cut) > 0, f"{len(flat_cut)} 本")
+
+    # ---- ⑤ 色の基準は**周波数ごとに全断面で共通** ----
+    loud = {"field": np.array([[1.0 + 0j, 0.5 + 0j], [0.5 + 0j, 0.1 + 0j]])}
+    quiet = {"field": np.array([[0.2 + 0j, 2.0 + 0j]])}
+    peak = ms.common_peak([loud, quiet])
+    check("★基準は周波数ごと（バンドの数だけ出る）",
+          peak.shape == (2,) and np.allclose(peak, [1.0, 2.0]), f"{peak}")
+    shared = ms._levels(quiet, peak=peak)
+    alone = ms._levels(quiet)
+    check("★共通の基準だと、静かな断面は 0 dB に届かない（＝比べられる）",
+          shared[0, 0] < -13.0 and abs(alone.max()) < 1e-9,
+          f"共通 {shared[0, 0]:.2f} dB / 断面ごと {alone.max():.2f} dB")
+    check("共通の基準でも、いちばん大きい点は 0 dB",
+          abs(float(ms._levels(loud, peak=peak)[0, 0])) < 1e-9)
+
+    # ---- ⑥ 周波数は列挙と範囲を混ぜられる ----
+    check("★--sweep 20:40:5 は 20〜40 Hz を 5 Hz 刻みで",
+          ms.parse_frequencies(None, ["20:40:5"]) == [20.0, 25.0, 30.0, 35.0, 40.0])
+    check("列挙と範囲を混ぜても重複しない・小さい順",
+          ms.parse_frequencies([63.0, 25.0], ["20:30:5"])
+          == [20.0, 25.0, 30.0, 63.0])
+    check("範囲の書き方がおかしければ断る",
+          _raises(ValueError, ms.parse_frequencies, None, ["20-40"]))
+
+    # ---- ⑦ 結果のファイル名（番号 ＋ 断面の名前）----
+    check("★ファイル名は 番号_断面名（斜めは名前でしか表せない）",
+          ms.result_name({"section": line, "index": 3}) == "04_測線",
+          ms.result_name({"section": line, "index": 3}))
+
+
+
+
+
 def main():
     print("geosim 数値検証")
     print(f"  Python {sys.version.split()[0]} / numpy {np.__version__}")
@@ -4202,7 +4329,7 @@ def main():
                test_panel_scroll, test_empty_model, test_impulse_fast,
                test_measurement_points, test_image_source_view,
                test_ui_2026_08_24, test_camera_save, test_hemi_anechoic,
-               test_frequency_response, test_mode_shape):
+               test_frequency_response, test_mode_shape, test_sections):
         fn()
 
     failed = [name for name, ok in _results if not ok]
