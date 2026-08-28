@@ -85,18 +85,29 @@ RESULT_FILES = {
     "raylog": "raylog.npz",
     # 経路の幾何（反射面の並びと入射角）。**吸音材を変えた再計算に使う**（F-9）
     "paths": PATHS_FILE,
+    # 開いた辺（自由端 / T字接合）の一覧。★形だけで決まるので条件にも受音点にも依らない
+    "open_edges": "開いた辺.csv",
 }
+
+# ★**閉じたモデルを想定するか**（2026-08-28 ユーザー要望）。
+#   「そもそも閉じてる必要のないモデルもあるので、閉じたモデルを想定する場合に限る」。
+#   自由端があること自体は**モデルの側では良し悪しが決まらない**ので、
+#   利用者に言ってもらう。`自動` は「決めつけずに両方の可能性を伝える」
+CLOSED_AUTO = "自動"
+CLOSED_YES = "閉じている"
+CLOSED_NO = "閉じていない"
+CLOSED_CHOICES = (CLOSED_AUTO, CLOSED_YES, CLOSED_NO)
 
 # **受音点に依らない**結果。受音点ごとのフォルダではなく `結果/` 直下に置く。
 #   室の吸音と理論値 … 室形状と材料だけで決まる
 #   音線軌跡         … 音源から出た音線の形。受音点をまたいで共有している（F-6）
-SHARED_RESULTS = {"room", "raylog", "points"}
+SHARED_RESULTS = {"room", "raylog", "points", "open_edges"}
 
 # **条件（吸音材）に依らない**結果。ファイル名に条件名を付けず、対象室名だけにする。
 #   経路の幾何 … 吸音に依らない（それを使い回すのがこの仕組みの目的）
 #   音線軌跡   … 形は吸音に依らない（色分けに使うエネルギーだけ条件に依る）
 # 測定点の一覧は吸音材に依らない（配置だけ）ので条件名を付けない
-ROOM_SCOPED_RESULTS = {"paths", "raylog", "points"}
+ROOM_SCOPED_RESULTS = {"paths", "raylog", "points", "open_edges"}
 
 # `clear_results()` で**消さない**結果。作り直すのが高くつき、
 # かつ中身が古いかどうかを自分で判定できるもの（経路は指紋を突き合わせる）
@@ -155,6 +166,9 @@ DEFAULTS = {
     "band_start": None,
     "unit": None,                  # None なら DXF の $INSUNITS
     "orient_normals": "auto",
+    # ★閉じたモデルを想定するか（`自動` / `閉じている` / `閉じていない`）。
+    #   「閉じている」と言われたときだけ、自由端を**作図ミス**として扱う
+    "closed_model": CLOSED_AUTO,
     "two_sided": False,
     "rays": 200000,
     "nref": 120,

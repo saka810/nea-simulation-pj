@@ -29,6 +29,13 @@ BAND_CHOICES = [("8 バンド（63〜8k Hz）", 8), ("6 バンド（125〜4k Hz�
 # 時間領域に置いてから FFT するか。**波動解と突き合わせるときは厳密版**
 IMPULSE_CHOICES = [("高速（時間領域→FFT。指標を出すならこれで足りる）", "fast"),
                    ("厳密（式(2) をそのまま。波動解と比べるとき）", "exact")]
+# ★**閉じたモデルを想定するか**（2026-08-28 ユーザー要望
+# 「そもそも閉じてる必要のないモデルもあるので、閉じたモデルを想定する場合に限ります」）。
+# 自由端があること自体はモデルの側では良し悪しが決まらないので、ここで言ってもらう
+CLOSED_CHOICES = [("自動（決めつけず、どちらの可能性も知らせる）", pj.CLOSED_AUTO),
+                  ("閉じている（自由端があれば作図ミスとして知らせる）", pj.CLOSED_YES),
+                  ("閉じていない（反射板だけなど。自由端を指摘しない）",
+                   pj.CLOSED_NO)]
 NORMAL_CHOICES = [("自動（閉じていれば内向き、開いていれば CAD のまま）", "auto"),
                   ("CAD の巻き順をそのまま使う", "cad"),
                   ("面ごとに室内側へ揃える", "inward"),
@@ -291,10 +298,11 @@ class SetupWindow:
         #   ここには置かない（2026-08-21 ユーザー指摘）
         combo(0, "band_number", "周波数バンド", BAND_CHOICES)
         combo(1, "orient_normals", "法線の向き", NORMAL_CHOICES)
-        combo(2, "impulse_method", "インパルス応答の合成", IMPULSE_CHOICES)
+        combo(2, "closed_model", "閉じたモデル", CLOSED_CHOICES)
+        combo(3, "impulse_method", "インパルス応答の合成", IMPULSE_CHOICES)
         self.vars["statistical"] = tk.BooleanVar()
         ttk.Checkbutton(frame, text="統計残響式（Sabine / Eyring / Eyring-Knudsen）も計算する",
-                        variable=self.vars["statistical"]).grid(row=3, column=1,
+                        variable=self.vars["statistical"]).grid(row=4, column=1,
                                                                 sticky="w", padx=8)
 
     def _build_buttons(self, parent):
@@ -382,6 +390,8 @@ class SetupWindow:
             self.vars[key].set("" if value is None else str(value))
         self._set_combo("band_number", BAND_CHOICES, p.band_number)
         self._set_combo("orient_normals", NORMAL_CHOICES, p.orient_normals)
+        self._set_combo("closed_model", CLOSED_CHOICES,
+                        getattr(p, "closed_model", pj.CLOSED_AUTO))
         self._set_combo("impulse_method", IMPULSE_CHOICES,
                         getattr(p, "impulse_method", "fast"))
         self.vars["statistical"].set(bool(p.statistical))
@@ -437,6 +447,8 @@ class SetupWindow:
         self.project.band_number = self._combo_value("band_number", BAND_CHOICES)
         self.project.orient_normals = self._combo_value("orient_normals",
                                                         NORMAL_CHOICES)
+        self.project.closed_model = self._combo_value("closed_model",
+                                                      CLOSED_CHOICES)
         self.project.impulse_method = self._combo_value("impulse_method",
                                                         IMPULSE_CHOICES)
         self.project.statistical = bool(self.vars["statistical"].get())

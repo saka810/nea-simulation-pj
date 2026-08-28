@@ -4394,6 +4394,92 @@ def test_dxf_faces():
           str(df.find_accoreconsole()))
 
 
+def test_open_edges():
+    """[49] 開いた辺を確かめる（自由端 / T字接合）。
+
+    ★2026-08-28 ユーザー要望「閉じていない面（辺）を確認したい。なお、
+    そもそも閉じてる必要のないモデルもあるので、**閉じたモデルを想定する場合に
+    限ります**」。
+    """
+    print("\n[49] 開いた辺の確認")
+    import io
+    import tempfile
+
+    import open_edges as oe
+    import project as pj
+    import read_dxffile as rd_
+
+    # ---- ① 閉じた箱には開いた辺が無い ----
+    box = rd_.read_model(TEST_DXF, verbose=False)        # 2 × 3 × 1 m の箱
+    closed = oe.summarise(box, verbose=False)
+    check("★閉じた箱には自由端も T字接合も無い",
+          not closed[oe.FREE] and not closed[oe.TEE],
+          f"自由端 {len(closed[oe.FREE])} / T字 {len(closed[oe.TEE])}")
+    check("閉じているときの言い方",
+          "閉じています" in oe.closure_note(closed))
+
+    # ---- ② 開いた形（一面反射板）は自由端が出る ----
+    plate = rd_.read_model(os.path.join(ROOT, "test2.dxf"), verbose=False)
+    opened = oe.summarise(plate, verbose=False)
+    check("★開いた形には自由端が出る", len(opened[oe.FREE]) > 0,
+          f"{len(opened[oe.FREE])} かたまり")
+    check("自由端は 1 本ずつでなく**かたまり**でまとまる",
+          len(opened["segments"][oe.FREE]) >= len(opened[oe.FREE]),
+          f"{len(opened['segments'][oe.FREE])} 本 → "
+          f"{len(opened[oe.FREE])} かたまり")
+
+    # ---- ③ ★言い方が「閉じているべきか」で変わる（ユーザー要望の核）----
+    auto = oe.closure_note(opened, pj.CLOSED_AUTO)
+    yes = oe.closure_note(opened, pj.CLOSED_YES)
+    no = oe.closure_note(opened, pj.CLOSED_NO)
+    check("★『閉じている』想定なら作図ミスと言う", "作図ミス" in yes, yes[:40])
+    check("★『閉じていない』想定なら指摘しない",
+          "作図ミス" not in no and "そのままで結構" in no, no[:40])
+    check("『自動』はどちらの可能性も伝える（決めつけない）",
+          "作図ミス" in auto and "問題ありません" in auto, auto[:40])
+
+    # ---- ④ 作図チェックの重さも設定で変わる ----
+    def levels(expect):
+        issues = rd_.check_model(plate, verbose=False, closed_expected=expect)
+        return {item["level"] for item in issues
+                if "開いた辺" in item["message"] or "自由端" in item["message"]}
+
+    check("★『閉じていない』なら注意止まり（警告にしない）",
+          "warning" not in levels(False), f"{levels(False)}")
+    check("『閉じている』なら警告として出す",
+          "warning" in levels(True), f"{levels(True)}")
+
+    # ---- ⑤ かたまりの組み方 ----
+    line = [((0, 0, 0), (1, 0, 0)), ((2, 0, 0), (1, 0, 0)),
+            ((5, 5, 5), (6, 5, 5))]
+    groups = oe.chains(line)
+    check("つながる辺は 1 かたまり、離れた辺は別のかたまり",
+          len(groups) == 2 and sorted(len(g) for g in groups) == [2, 3],
+          f"{[len(g) for g in groups]}")
+    check("かたまりの長さを測れる",
+          abs(oe.length_of(groups[0]) - 2.0) < 1e-9
+          or abs(oe.length_of(groups[1]) - 2.0) < 1e-9)
+
+    # ---- ⑥ 設定の既定は「自動」（勝手に決めつけない）----
+    check("★既定は『自動』（モデルの側では決められないので）",
+          pj.DEFAULTS["closed_model"] == pj.CLOSED_AUTO,
+          pj.DEFAULTS["closed_model"])
+
+    # ---- ⑦ 表と図の置き場（条件にも受音点にも依らない）----
+    with tempfile.TemporaryDirectory() as folder:
+        project = pj.Project(folder, **dict(pj.DEFAULTS))
+        project.dxf = os.path.basename(os.path.join(ROOT, "test2.dxf"))
+        project.condition_sheet = "ある条件"
+        path = oe.write_csv(project, plate, opened, verbose=False)
+        check("★開いた辺の表は `結果/` 直下・条件名なし（形だけで決まるので）",
+              os.path.dirname(path).endswith(pj.RESULT_DIR)
+              and "ある条件" not in os.path.basename(path),
+              os.path.basename(path))
+        text = io.open(path, encoding="utf-8-sig").read()
+        check("表に区分（自由端 / T字接合）が入る",
+              "自由端" in text and "区分" in text)
+
+
 def main():
     print("geosim 数値検証")
     print(f"  Python {sys.version.split()[0]} / numpy {np.__version__}")
@@ -4417,7 +4503,7 @@ def main():
                test_measurement_points, test_image_source_view,
                test_ui_2026_08_24, test_camera_save, test_hemi_anechoic,
                test_frequency_response, test_mode_shape, test_sections,
-               test_dxf_faces):
+               test_dxf_faces, test_open_edges):
         fn()
 
     failed = [name for name, ok in _results if not ok]

@@ -1910,7 +1910,8 @@ def read_model(file_name, unit=None, absorption_table=None, default_absorption=N
     return model
 
 
-def check_model(model, absorption_table=None, verbose=True):
+def check_model(model, absorption_table=None, verbose=True,
+                closed_expected=None):
     """作図ミスを洗い出す（TODO B-10）。
 
     計算に入る前に「そもそもモデルとして成立しているか」を機械的に確かめる。
@@ -1921,6 +1922,7 @@ def check_model(model, absorption_table=None, verbose=True):
     | 項目 | まずい理由 |
     |---|---|
     | 面が 1 枚も無い | DXF のエンティティ種別が非対応かもしれない |
+    | 開いた辺・自由端 | ★**閉じた室を想定しているときだけ**作図ミス（`closed_expected`） |
     | 音源／受音点が無い | src / rec レイヤの POINT を描き忘れ |
     | 音源／受音点がモデルの外 | 座標系の取り違え。直接音すら出ない |
     | 吸音率が引けないレイヤ | 既定値 0.1 で計算されるので、結果が意味を持たない |
@@ -1972,15 +1974,30 @@ def check_model(model, absorption_table=None, verbose=True):
                        f"（例: 面 {duplicated[0]}）。"
                        f"音線がどちらに当たるか定まりません")
 
-    if not model.is_closed:
-        level = "info" if model.open_edges < 4 else "warning"
-        add(level, f"開いた辺が {model.open_edges} 本あります"
-                   f"（閉じた室のつもりなら作図ミス。一面反射板などなら問題ありません）")
+    # ★**閉じているべきかはモデルの側では決まらない**（2026-08-28 ユーザー指摘。
+    #   一面反射板の検討もふつうにある）。`closed_expected` で言ってもらい、
+    #   **「閉じている」と言われたときだけ作図ミスとして扱う**。
+    #   何も言われなければ（None）、どちらの可能性もあると伝える
+    if not model.is_closed and closed_expected is not False:
+        level = "info" if (model.open_edges < 4 or closed_expected is None) \
+            else "warning"
+        tail = ("。**閉じた室を想定しているので作図ミスです**"
+                if closed_expected else
+                "（閉じた室のつもりなら作図ミス。"
+                "一面反射板などなら問題ありません）")
+        add(level, f"開いた辺が {model.open_edges} 本あります" + tail)
     if model.free_edges:
         length = sum(float(np.linalg.norm(b - a)) for a, b in model.free_edges)
-        add("warning", f"自由端（他の辺に覆われていない開いた辺）が "
-                       f"{len(model.free_edges)} 本・計 {length:.2f} m あります。"
-                       f"宙に浮いた片面の板や面の抜けです。容積は目安になります")
+        body = (f"自由端（他の辺に覆われていない開いた辺）が "
+                f"{len(model.free_edges)} 本・計 {length:.2f} m あります。"
+                f"宙に浮いた片面の板や面の抜けです")
+        if closed_expected is False:
+            # 閉じていないモデルとして扱う設定。★それでも**容積は目安**になる
+            add("info", body + "（閉じていないモデルとして扱う設定なので"
+                               "想定どおりです。ただし容積は目安になります）")
+        else:
+            add("warning", body + "。容積は目安になります。"
+                                  "`python open_edges.py <DXF>` で場所を確かめられます")
     if not model.winding_consistent:
         add("warning", "巻き順が一貫していません"
                        "（隣り合う面で法線が反対を向いている箇所があります）")

@@ -57,6 +57,7 @@ def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref
             flip_faces=None, face_materials=None, traced_history=None,
             level_method="both", source_placement=None, source_on_surface=True,
             source_surface_tolerance=0.0, source_direction=None,
+            closed_expected=None,
             progress=None):
     """
     閉じた室でも、一面だけの壁のような**開いた形状**でも計算できる
@@ -219,7 +220,9 @@ def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref
     mesh = model.mesh
 
     # 作図ミスの洗い出し（TODO B-10）。計算に入る前に指摘するほうが早い
-    issues = rd.check_model(model, absorption_table=absorption_table)
+    # ★「閉じた室を想定しているか」は利用者にしか決められない（2026-08-28）
+    issues = rd.check_model(model, absorption_table=absorption_table,
+                            closed_expected=closed_expected)
     if any(i["level"] == "error" for i in issues):
         print("[procedure] ★ エラーがあります。結果は当てになりません")
 

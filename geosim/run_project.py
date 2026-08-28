@@ -359,6 +359,21 @@ def _clock(seconds):
             else f"{minutes}:{second:02d}")
 
 
+def _closed_expected(project):
+    """★**閉じた室を想定しているか**（2026-08-28 ユーザー要望）。
+
+    > そもそも閉じてる必要のないモデルもあるので、閉じたモデルを想定する場合に限ります。
+
+    `自動` は None（決めつけず、どちらの可能性も伝える）。
+    """
+    value = str(getattr(project, "closed_model", pj.CLOSED_AUTO) or "").strip()
+    if value == pj.CLOSED_YES:
+        return True
+    if value == pj.CLOSED_NO:
+        return False
+    return None
+
+
 def _receiver_groups(project, receivers):
     """受音点のレイヤ名（測線）。取れなければ空。"""
     try:
@@ -626,6 +641,8 @@ def _run_one(project, receiver, verbose=True, make_figures=True,
         source_on_surface=getattr(project, "source_on_surface", True),
         source_surface_tolerance=getattr(project, "source_surface_tolerance", 0.0),
         source_direction=getattr(project, "source_direction", None),
+        # 閉じた室を想定しているか（作図チェックの言い方が変わる）
+        closed_expected=_closed_expected(project),
         flip_faces=flip_faces,
         face_materials=face_materials,
         traced_history=traced_history,

@@ -737,6 +737,23 @@ class FaceEditor:
             vg.add_opacity_control(self.plotter, font=font, panel=panel,
                                    target_key="o")
 
+            # ★**開いた辺を重ねて見る**（2026-08-28 ユーザー要望
+            #   「閉じていない面（辺）を確認したい」）。
+            #   赤＝自由端（面の抜け・宙に浮いた板の外周）、
+            #   橙＝T字接合（面は閉じている。辺の分け方が違うだけ）
+            try:
+                import open_edges as oe
+                report = oe.summarise(self.model, verbose=False)
+                self.edge_actors = oe.add_actors(self.plotter, self.model,
+                                                 report, visible=False)
+                counts = {kind: len(report["segments"][kind])
+                          for kind in (oe.FREE, oe.TEE)}
+                oe.add_controls(panel, self.edge_actors, self.plotter, counts)
+            except Exception as error:
+                # ★保険で握りつぶすときは**理由も出す**（黙って落とさない）
+                print(f"[face_editor] 開いた辺を出せません"
+                      f"（{type(error).__name__}: {error}）")
+
             # 受音点に置く「人」の正面方向（G-5 の伝搬方向の図で使う）。
             # CAD で表すのは難しいので、3D が見えているここで決める
             if self.head_azimuth and self.model.receiver_points:
