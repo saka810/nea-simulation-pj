@@ -35,7 +35,7 @@
 ;;;    見落とす**（2026-08-28 の検算で、27 本あるはずが 7 本になった）。
 ;;; ============================================================================
 
-(setq *cc-version* "1.2")
+(setq *cc-version* "1.3")
 
 ;; 判定で描く線の置き場（CHECKCLEAR はこの 2 つを消す）
 (setq *cc-layer-free* "_閉じ判定_自由端")
@@ -424,22 +424,29 @@
   (reverse out)
 )
 
+(defun cc-saved-p (name / found item)
+  (setq found nil)
+  (foreach item *cc-view-saved*
+    (if (= name (cdr (assoc 2 item))) (setq found T)))
+  found
+)
+
 (defun c:CHECKVIEW ( / name others judged)
   (if (null *cc-face-layers*)
     (progn (princ "\n[閉じ判定] 先に CHECKCLOSED を実行してください。") (princ))
     (progn
       (setvar "CMDECHO" 0)
       ;; ---- 元の状態を控える（entget を丸ごと。オン/オフ・色・透過が戻る）----
-      ;; ★★**控えるのは 1 回目だけ**。2 回目も控えると「整えたあとの状態」を
-      ;;   元の状態として覚えてしまい、CHECKVIEWOFF で戻らなくなる
-      (if (null *cc-view-saved*)
-        (progn
-          (foreach name (cc-all-layers)
-            (setq *cc-view-saved*
-                  (cons (entget (tblobjname "LAYER" name)) *cc-view-saved*)))
-          (setq *cc-view-lw* (getvar "LWDISPLAY"))
-        )
-      )
+      ;; ★★控えるのは**画層ごとに 1 回目だけ**。2 回目も控え直すと
+      ;;   「整えたあとの状態」を元の状態として覚えてしまい、
+      ;;   CHECKVIEWOFF で戻らなくなる。
+      ;;   ★作りながら何度も回す使い方なので、**あとから増えた画層も
+      ;;     そのとき控える**（増えた画層だけ戻らない、を防ぐ）
+      (if (null *cc-view-saved*) (setq *cc-view-lw* (getvar "LWDISPLAY")))
+      (foreach name (cc-all-layers)
+        (if (not (cc-saved-p name))
+          (setq *cc-view-saved*
+                (cons (entget (tblobjname "LAYER" name)) *cc-view-saved*))))
 
       ;; 判定の画層を現在層にしておく（消す画層が現在層だと確認を求められる）
       (if (tblsearch "LAYER" *cc-layer-free*)
@@ -559,10 +566,14 @@
       (setq before (sslength ss))
       (princ (strcat "\n[閉じ判定] ACIS " (itoa before)
                      " 個を分解して辺を拾います（すぐ元に戻します）…"))
-      (command "_.UNDO" "_BEgin")
+      ;; ★★戻すのは **`UNDO マーク` → `UNDO 後退`**。
+      ;;   `UNDO 開始/終了` ＋ `U` だと「グループの開始点が見つかりました」で
+      ;;   止まり、**分解したまま戻らない**（2026-08-28 に実際に踏んだ。
+      ;;   1 回目から戻っておらず、2 回目の判定が「面が 1 枚も見つかりません」に
+      ;;   なって気づいた）
+      (command "_.UNDO" "_Mark")
       (cc-acis (reverse acis))
-      (command "_.UNDO" "_End")
-      (command "_.U")
+      (command "_.UNDO" "_Back")
       ;; ★戻ったことを必ず確かめる（黙って図面を壊さない）
       (setq ss (ssget "_X" '((0 . "REGION,3DSOLID") (410 . "Model"))))
       (if (or (null ss) (/= before (sslength ss)))
