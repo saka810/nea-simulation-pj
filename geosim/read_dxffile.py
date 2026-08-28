@@ -1050,8 +1050,31 @@ def _point_key(point, digits):
     return tuple(np.round(np.asarray(point, dtype=float), digits))
 
 
-def _edge_map(triangles, tol=1.0e-9):
+# 辺を突き合わせる許容を**モデルの対角**の何倍にするか。
+# ★1e-9 m の決め打ちだと実務のモデルで開いた辺を過大に数える（上の説明）
+EDGE_TOLERANCE_RATIO = 1.0e-7
+
+# 対角が出せないときの保険 [m]
+EDGE_TOLERANCE_MIN = 1.0e-9
+
+
+def edge_tolerance(triangles, tol=None):
+    """辺を突き合わせる許容 [m]。★**モデルの大きさに合わせる**。
+
+    `tol` を明示すればそれを使う（参照実装・テストの一致確認のため残す）。
+    """
+    if tol is not None:
+        return float(tol)
+    points = np.asarray(triangles, dtype=float).reshape(-1, 3)
+    if not len(points):
+        return EDGE_TOLERANCE_MIN
+    diagonal = float(np.linalg.norm(points.max(axis=0) - points.min(axis=0)))
+    return max(EDGE_TOLERANCE_MIN, diagonal * EDGE_TOLERANCE_RATIO)
+
+
+def _edge_map(triangles, tol=None):
     """無向辺 → その辺を持つ面インデックスのリスト、および有向辺の出現回数を返す。"""
+    tol = edge_tolerance(triangles, tol)
     digits = int(round(-np.log10(tol)))
     undirected = {}
     directed = {}
@@ -1064,7 +1087,7 @@ def _edge_map(triangles, tol=1.0e-9):
     return undirected, directed
 
 
-def open_edge_count(triangles, tol=1.0e-9):
+def open_edge_count(triangles, tol=None):
     """開いた辺（三角形 1 枚にしか属さない辺）の本数を返す。0 なら閉じている。
 
     閉じた多面体では、すべての辺がちょうど 2 枚の三角形に共有される。
@@ -1075,7 +1098,7 @@ def open_edge_count(triangles, tol=1.0e-9):
     return sum(1 for faces in undirected.values() if len(faces) != 2)
 
 
-def open_edge_segments(triangles, tol=1.0e-9):
+def open_edge_segments(triangles, tol=None):
     """開いた辺を線分の列 [(始点, 終点), …] で返す。
 
     `open_edge_count()` が本数だけを返すのに対し、こちらは**場所**を返す。
@@ -1087,7 +1110,7 @@ def open_edge_segments(triangles, tol=1.0e-9):
             for (a, b), faces in undirected.items() if len(faces) != 2]
 
 
-def uncovered_open_edges(triangles, tol=1.0e-9, gap=1.0e-6):
+def uncovered_open_edges(triangles, tol=None, gap=None):
     """開いた辺のうち、**他の開いた辺に覆われていないもの**を返す。
 
     「開いた辺」には性質のまったく違う 2 種類が混ざっている。
@@ -1106,6 +1129,9 @@ def uncovered_open_edges(triangles, tol=1.0e-9, gap=1.0e-6):
 
     戻り値: 覆われていない線分のリスト [(始点, 終点), …]
     """
+    tol = edge_tolerance(triangles, tol)
+    if gap is None:
+        gap = tol * 1000.0          # 直線上で「重なっている」とみなす幅
     segments = open_edge_segments(triangles, tol)
     if not segments:
         return []
@@ -1152,7 +1178,7 @@ def uncovered_open_edges(triangles, tol=1.0e-9, gap=1.0e-6):
     return uncovered
 
 
-def winding_is_consistent(triangles, tol=1.0e-9):
+def winding_is_consistent(triangles, tol=None):
     """頂点の巻き順が一貫しているかを返す。
 
     巻き順が一貫した面同士が辺を共有するとき、その辺は互いに逆向きに現れる

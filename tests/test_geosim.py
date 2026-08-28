@@ -4394,6 +4394,13 @@ def test_dxf_faces():
           str(df.find_accoreconsole()))
 
 
+def _shift(box):
+    """1 枚だけ大きくずらす（本物の隙間を作る）。"""
+    out = np.zeros_like(box)
+    out[0] = 0.05
+    return out
+
+
 def test_open_edges():
     """[49] 開いた辺を確かめる（自由端 / T字接合）。
 
@@ -4465,7 +4472,26 @@ def test_open_edges():
           pj.DEFAULTS["closed_model"] == pj.CLOSED_AUTO,
           pj.DEFAULTS["closed_model"])
 
-    # ---- ⑦ 表と図の置き場（条件にも受音点にも依らない）----
+    # ---- ⑦ ★辺を突き合わせる許容は**モデルの大きさに合わせる** ----
+    #   1e-9 m の決め打ちだと実務のモデルで開いた辺を過大に数える
+    #   （階段教室で 353 本と出たが、AutoCAD 側の同じ判定では 146 本だった）
+    box = np.array([np.asarray(f.vertexes, float) for f in
+                    rd_.read_model(TEST_DXF, verbose=False).mesh])
+    small = rd_.edge_tolerance(box)
+    big = rd_.edge_tolerance(box * 1000.0)
+    check("★許容はモデルの大きさに比例する（単位にも大きさにも依らない）",
+          abs(big / small - 1000.0) < 1e-6, f"{small:.3e} → {big:.3e} m")
+    check("明示すればその値を使う（参照実装との一致確認のため）",
+          rd_.edge_tolerance(box, 1.0e-9) == 1.0e-9)
+    check("★端数が乗っていても閉じていると分かる（1e-9 では割れていた）",
+          0 == rd_.open_edge_count(
+              box + np.random.RandomState(0).uniform(-1e-9, 1e-9, box.shape)),
+          f"{rd_.open_edge_count(box)} 本")
+    check("本当に離れていれば開いた辺として出る",
+          rd_.open_edge_count(box + np.array([[[0.0, 0.0, 0.0]]])
+                              * 0 + _shift(box)) > 0)
+
+    # ---- ⑧ 表と図の置き場（条件にも受音点にも依らない）----
     with tempfile.TemporaryDirectory() as folder:
         project = pj.Project(folder, **dict(pj.DEFAULTS))
         project.dxf = os.path.basename(os.path.join(ROOT, "test2.dxf"))
