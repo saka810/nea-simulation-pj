@@ -1821,6 +1821,13 @@ def read_model(file_name, unit=None, absorption_table=None, default_absorption=N
               f"閉じたポリラインです。**REGION と 3DSOLID（ACIS）は読めません**")
         print(f"[read_dxffile]   CAD で面に分解して書き出してください"
               f"（docs/DXFデータの作り方.md 参照）")
+        # ★ACIS しか無いなら、変換のしかたも出す（黙って終わらせない）
+        acis = sum(model.skipped.get("非対応エンティティ", {}).get(name, 0)
+                   for name in ("REGION", "3DSOLID"))
+        if acis:
+            print(f"[read_dxffile]   ★ACIS（REGION / 3DSOLID）が {acis} 個 "
+                  f"あります。AutoCAD が入っていれば、次で面に直せます:")
+            print(f"      python dxf_faces.py \"{file_name}\"")
         if model.skipped:
             print(f"[read_dxffile]   読み飛ばした種別: {model.skipped}")
 

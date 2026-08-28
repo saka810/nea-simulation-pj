@@ -269,7 +269,9 @@ class FaceEditor:
                 "読めるのは 3DFACE / ポリフェイスメッシュ / 閉じたポリラインで、"
                 "**REGION と 3DSOLID（ACIS）は読めません**。"
                 "CAD で面に分解して書き出してください"
-                "（docs/DXFデータの作り方.md 参照）")
+                "（docs/DXFデータの作り方.md 参照）。"
+                "AutoCAD が入っていれば "
+                "`python dxf_faces.py <DXF>` で面に直せます")
 
         # 自動判定（レイの偶奇）。ここでは**反転するか否かの判定にしか使わない**
         self.enclosure = rd.encloses_point(

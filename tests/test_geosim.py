@@ -4307,6 +4307,93 @@ def test_sections():
 
 
 
+def test_dxf_faces():
+    """[48] ACIS（REGION / 3DSOLID）の DXF を面の DXF に直す（TODO B-22）。
+
+    ★2026-08-28。AutoCAD の中で `EXPLODE` して**輪郭の辺**を書き出させ、
+    それを閉じた輪に組み直して DXF にする。
+    AutoCAD が要るのは**分解のところだけ**なので、
+    組み直しと書き出しはここで確かめられる。
+    """
+    print("\n[48] ACIS を面に直す")
+    import io
+    import tempfile
+
+    import dxf_faces as df
+    import read_dxffile as rd_
+
+    # ---- ① 辺の集まりを閉じた輪に組み直す ----
+    square = [((0, 0, 0), (1, 0, 0)), ((1, 1, 0), (1, 0, 0)),
+              ((1, 1, 0), (0, 1, 0)), ((0, 1, 0), (0, 0, 0))]
+    loops = df.loops_from_edges(square)
+    check("★向きがばらばらの辺でも輪になる（CAD が出す順は決まっていない）",
+          len(loops) == 1 and len(loops[0]) == 4, f"{loops}")
+    check("輪の点は全部使われる（重複しない）",
+          len({tuple(p) for p in loops[0]}) == 4)
+
+    # ---- ② 穴のある面は輪が 2 つ（黙って塞がない）----
+    hole = square + [((0.2, 0.2, 0), (0.4, 0.2, 0)),
+                     ((0.4, 0.2, 0), (0.4, 0.4, 0)),
+                     ((0.4, 0.4, 0), (0.2, 0.2, 0))]
+    loops = df.loops_from_edges(hole)
+    check("★穴のある面は輪が 2 つになる（数えて知らせるため）",
+          len(loops) == 2, f"{[len(l) for l in loops]}")
+
+    # ---- ③ 閉じない辺（欠けている）も落とさず返す ----
+    broken = square[:3]
+    loops = df.loops_from_edges(broken)
+    check("辺が足りない輪も返す（黙って消さない）", len(loops) == 1)
+
+    # ---- ④ 端点のわずかなずれは同じ点とみなす ----
+    fuzzy = [((0, 0, 0), (1, 0, 0)), ((1, 0, 0.001), (1, 1, 0)),
+             ((1, 1, 0), (0, 1, 0)), ((0, 1, 0), (0, 0, 0))]
+    check("端点が 0.001 ずれていてもつながる（許容 0.01）",
+          len(df.loops_from_edges(fuzzy)) == 1)
+
+    # ---- ⑤ 平面から外れているかを測る ----
+    check("平らな輪はずれ 0", df.plane_error(loops[0] if loops else []) < 1e-9)
+    warped = [(0, 0, 0), (1, 0, 0), (1, 1, 0.5), (0, 1, 0)]
+    check("★ねじれた輪はずれが出る（読み込み時に三角形へ割られる）",
+          df.plane_error(warped) > 0.05, f"{df.plane_error(warped):.3f}")
+
+    # ---- ⑥ 書き出した DXF が**そのまま読める**（往復）----
+    with tempfile.TemporaryDirectory() as folder:
+        path = os.path.join(folder, "faces.dxf")
+        polygons = [("床", [(0, 0, 0), (2000, 0, 0), (2000, 3000, 0),
+                            (0, 3000, 0)]),
+                    ("壁", [(0, 0, 0), (2000, 0, 0), (2000, 0, 1000)])]
+        df.write_faces_dxf(path, polygons, insunits=4)
+        model = rd_.read_model(path, verbose=False)
+        check("★書き出した DXF をそのまま読める（閉じたポリライン）",
+              len(model.mesh) == 3, f"三角形 {len(model.mesh)} 枚")
+        check("★レイヤ名が保たれる（吸音材の割り当てに使う）",
+              set(model.layer_areas) == {"床", "壁"},
+              f"{sorted(model.layer_areas)}")
+        check("単位が mm として読まれる（$INSUNITS を引き継ぐ）",
+              abs(model.layer_areas["床"] - 6.0) < 1e-6,
+              f"床 {model.layer_areas['床']:.3f} m2")
+
+    # ---- ⑦ AutoCAD が出した辺の一覧を読む ----
+    with tempfile.TemporaryDirectory() as folder:
+        dump = os.path.join(folder, "edges.txt")
+        io.open(dump, "w", encoding="utf-8", newline="").write(
+            "L,1,床,0,0,0,1000,0,0\n"
+            "L,1,床,1000,0,0,1000,1000,0\n"
+            "X,2,天井,ARC\n"
+            "END,2\n")
+        groups, dropped = df.read_dump(dump)
+        check("辺の一覧を読める（グループとレイヤ）",
+              list(groups) == [1] and groups[1]["layer"] == "床"
+              and len(groups[1]["edges"]) == 2)
+        check("★直線でない辺は落とさずに数える（円弧は面にできない）",
+              dropped == [("天井", "ARC")], f"{dropped}")
+
+    check("accoreconsole を探せる（無い端末では None）",
+          df.find_accoreconsole() is None
+          or df.find_accoreconsole().endswith("accoreconsole.exe"),
+          str(df.find_accoreconsole()))
+
+
 def main():
     print("geosim 数値検証")
     print(f"  Python {sys.version.split()[0]} / numpy {np.__version__}")
@@ -4329,7 +4416,8 @@ def main():
                test_panel_scroll, test_empty_model, test_impulse_fast,
                test_measurement_points, test_image_source_view,
                test_ui_2026_08_24, test_camera_save, test_hemi_anechoic,
-               test_frequency_response, test_mode_shape, test_sections):
+               test_frequency_response, test_mode_shape, test_sections,
+               test_dxf_faces):
         fn()
 
     failed = [name for name, ok in _results if not ok]
