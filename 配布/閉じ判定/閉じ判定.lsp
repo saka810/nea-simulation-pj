@@ -35,7 +35,7 @@
 ;;;    見落とす**（2026-08-28 の検算で、27 本あるはずが 7 本になった）。
 ;;; ============================================================================
 
-(setq *cc-version* "1.1")
+(setq *cc-version* "1.2")
 
 ;; 判定で描く線の置き場（CHECKCLEAR はこの 2 つを消す）
 (setq *cc-layer-free* "_閉じ判定_自由端")
@@ -57,6 +57,11 @@
 (defun cc-edge-key (a b / ka kb)
   (setq ka (cc-key a *cc-res*) kb (cc-key b *cc-res*))
   (if (< ka kb) (strcat ka "|" kb) (strcat kb "|" ka))
+)
+
+(defun cc-note-layer (name)
+  (if (and name (not (member name *cc-face-layers*)))
+    (setq *cc-face-layers* (cons name *cc-face-layers*)))
 )
 
 (defun cc-3d (p)
@@ -88,6 +93,7 @@
 ;; 分解しなくても辺が分かるもの（3DFACE / 閉じたポリライン）
 (defun cc-plain (e / d ty pts p flag z)
   (setq d (entget e) ty (cdr (assoc 0 d)))
+  (cc-note-layer (cdr (assoc 8 d)))
   (cond
     ((= ty "3DFACE")
      (setq pts (list (cdr (assoc 10 d)) (cdr (assoc 11 d))
@@ -172,6 +178,7 @@
     ;; ★種別は**分解する前に**控える（分解すると元の図形は消える）。
     ;;   REGION は 1 個が 1 枚の面。3DSOLID は面の REGION に割れるので数えない
     (setq ty (cdr (assoc 0 (entget e))))
+    (cc-note-layer (cdr (assoc 8 (entget e))))
     (if (= ty "REGION") (setq *cc-faces* (1+ *cc-faces*)))
     (setq kids (cc-burst e))
     (foreach c kids
@@ -398,6 +405,97 @@
   (princ)
 )
 
+;; ------------------------------------------------ 画面を見やすくする ----
+;; ★何が邪魔かを決め打ちせず、**面を拾えた画層かどうか**で決める。
+;;   図面ごとに通芯・文字の画層名は違うので、名前で当てにいかない
+
+(defun cc-join (names / out)
+  (setq out "")
+  (foreach n names
+    (setq out (if (= out "") n (strcat out "," n))))
+  out
+)
+
+(defun cc-all-layers ( / tb out)
+  (setq out nil tb (tblnext "LAYER" T))
+  (while tb
+    (setq out (cons (cdr (assoc 2 tb)) out))
+    (setq tb (tblnext "LAYER")))
+  (reverse out)
+)
+
+(defun c:CHECKVIEW ( / name others judged)
+  (if (null *cc-face-layers*)
+    (progn (princ "\n[閉じ判定] 先に CHECKCLOSED を実行してください。") (princ))
+    (progn
+      (setvar "CMDECHO" 0)
+      ;; ---- 元の状態を控える（entget を丸ごと。オン/オフ・色・透過が戻る）----
+      ;; ★★**控えるのは 1 回目だけ**。2 回目も控えると「整えたあとの状態」を
+      ;;   元の状態として覚えてしまい、CHECKVIEWOFF で戻らなくなる
+      (if (null *cc-view-saved*)
+        (progn
+          (foreach name (cc-all-layers)
+            (setq *cc-view-saved*
+                  (cons (entget (tblobjname "LAYER" name)) *cc-view-saved*)))
+          (setq *cc-view-lw* (getvar "LWDISPLAY"))
+        )
+      )
+
+      ;; 判定の画層を現在層にしておく（消す画層が現在層だと確認を求められる）
+      (if (tblsearch "LAYER" *cc-layer-free*)
+        (setvar "CLAYER" *cc-layer-free*)
+        (setvar "CLAYER" *cc-layer-tee*))
+
+      (setq judged (list *cc-layer-free* *cc-layer-tee*))
+      (setq others nil)
+      (foreach name (cc-all-layers)
+        (if (and (not (member name *cc-face-layers*))
+                 (not (member name judged)))
+          (setq others (cons name others))))
+
+      ;; ---- 面の無い画層を消す（通芯・文字・ハッチなど）----
+      (if others (command "_.-LAYER" "_Off" (cc-join others) ""))
+      ;; ---- 面の画層を透かす（中の赤い線が見えるように）----
+      (command "_.-LAYER" "_TRansparency" "70" (cc-join *cc-face-layers*) "")
+      ;; ---- 判定の線は透かさず、自由端を太く ----
+      (command "_.-LAYER" "_TRansparency" "0" (cc-join judged) "")
+      (if (tblsearch "LAYER" *cc-layer-free*)
+        (command "_.-LAYER" "_LWeight" "0.50" *cc-layer-free* ""))
+      (setvar "LWDISPLAY" 1)
+
+      ;; ---- 表示スタイルは X線（面が透ける）----
+      ;; ★カメラ（視線の向き）は触らない。合わせた向きを崩さないため
+      (command "_.VSCURRENT" "_X")
+      (setvar "VSFACEOPACITY" 30)
+      (setvar "CMDECHO" 1)
+      (princ (strcat "\n[閉じ判定] 画面を整えました（面の無い画層 "
+                     (itoa (length others)) " 枚を非表示、面を透過 70%、"
+                     "自由端を太線、表示スタイルを X線）。"))
+      (princ "\n           CHECKVIEWOFF で元に戻せます。")
+      (princ)
+    )
+  )
+)
+
+(defun c:CHECKVIEWOFF ( / item)
+  (if (null *cc-view-saved*)
+    (princ "\n[閉じ判定] 戻す状態を控えていません（CHECKVIEW を実行していません）。")
+    (progn
+      (setvar "CMDECHO" 0)
+      (setvar "CLAYER" "0")
+      (foreach item *cc-view-saved* (entmod item))
+      (setvar "LWDISPLAY" *cc-view-lw*)
+      (command "_.VSCURRENT" "_2")
+      (setq *cc-view-saved* nil)      ; 次に整えるときは今の状態を控え直す
+      (setvar "CMDECHO" 1)
+      (princ "\n[閉じ判定] 画層の表示・透過・線の太さを元に戻しました。")
+      (princ "\n           ★表示スタイルだけは元の設定を読み取れないので、")
+      (princ "\n             2D ワイヤフレームにしてあります。必要なら選び直してください。")
+    )
+  )
+  (princ)
+)
+
 ;; -------------------------------------------------------- 本体 ----
 
 (defun cc-report (free tee groups / total)
@@ -426,7 +524,8 @@
   (princ (strcat "\n  橙の線＝T字接合（レイヤ " *cc-layer-tee* "）"))
   (if (> (length groups) 0)
     (princ "\n  CHECKNEXT で自由端のかたまりを 1 つずつ拡大できます。"))
-  (princ "\n  CHECKCLEAR で判定の線を消せます。\n")
+  (princ "\n  CHECKCLEAR で判定の線を消せます。")
+  (princ "\n  CHECKVIEWOFF で画面の見え方を元に戻せます。\n")
 )
 
 (defun c:CHECKCLOSED ( / ss n e acis plain diag open split free tee before)
@@ -434,7 +533,7 @@
   (setvar "CMDECHO" 0)
   (c:CHECKCLEAR)
 
-  (setq *cc-raw* nil *cc-curved* 0 *cc-faces* 0)
+  (setq *cc-raw* nil *cc-curved* 0 *cc-faces* 0 *cc-face-layers* nil)
   (setq *cc-lo* (list 1e20 1e20 1e20) *cc-hi* (list -1e20 -1e20 -1e20))
 
   ;; ---- ① 分解せずに読めるもの（3DFACE / 閉じたポリライン）----
@@ -509,6 +608,8 @@
                      '(lambda (a b) (> (cc-length a) (cc-length b)))))
       (setq *cc-index* 0)
       (setvar "CMDECHO" 1)
+      ;; ★判定のあとに**自動で見やすくする**（2026-08-28 ユーザー要望）
+      (c:CHECKVIEW)
       (cc-report free tee *cc-groups*)
     )
   )
