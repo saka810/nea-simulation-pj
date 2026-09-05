@@ -644,6 +644,171 @@ def test_iso3382_decay():
           f"{int(np.argmax(pulse ** 2)) / fs * 1000:.1f} ms")
 
 
+# ------------------------------------------------ 第2段の修正（2026-09-05）
+def test_fixes_2026_09_05():
+    print("\n[9c] 結果を誤らせていた箇所の修正（評価レポート 第2段）")
+    import frequency_response as fr
+    import sound_level as sl
+    from atmosphere import Atmosphere
+
+    # ---- ① 受音球は「基点から壁までの線分」と球の交差で見る ----
+    direction = np.array([[1.0, 0.0, 0.0]])
+    origin = np.zeros((1, 3))
+    wall = np.array([1.0])
+    # 壁 1.0 m・球の中心 1.1 m・半径 0.2 m → 線分は 0.9〜1.0 m で球の中にいる
+    check("★垂足が壁より先でも、線分が球を通れば受音",
+          bool(rs.inside_sphere_batch(0.2, direction, origin,
+                                      np.array([1.1, 0.0, 0.0]), wall)[0]))
+    check("  従来のやり方（method='foot'）では落としていた",
+          not bool(rs.inside_sphere_batch(0.2, direction, origin,
+                                          np.array([1.1, 0.0, 0.0]), wall,
+                                          method="foot")[0]))
+    check("★垂足が基点より後ろでも、基点が球の中なら受音",
+          bool(rs.inside_sphere_batch(0.2, direction, origin,
+                                      np.array([-0.1, 0.0, 0.0]), wall)[0]))
+    check("本当に届かなければ受音しない",
+          not bool(rs.inside_sphere_batch(0.2, direction, origin,
+                                          np.array([1.5, 0.0, 0.0]), wall)[0]))
+    check("接するときは受音（等号を含む）",
+          bool(rs.inside_sphere_batch(0.2, direction, origin,
+                                      np.array([0.5, 0.2, 0.0]), wall)[0]))
+    check("壁に当たらない（inf）音線でも判定できる",
+          bool(rs.inside_sphere_batch(0.2, direction, origin,
+                                      np.array([50.0, 0.0, 0.0]),
+                                      np.array([np.inf]))[0]))
+
+    rng = np.random.default_rng(11)
+    dirs = rng.standard_normal((400, 3))
+    dirs /= np.linalg.norm(dirs, axis=1, keepdims=True)
+    orgs = rng.standard_normal((400, 3))
+    rec = rng.standard_normal(3)
+    walls = rng.uniform(0.1, 3.0, 400)
+    for method in ("segment", "foot"):
+        batch = rs.inside_sphere_batch(0.5, dirs, orgs, rec, walls, method=method)
+        one = np.array([rs.inside_sphere(0.5, dirs[i], orgs[i], rec, walls[i],
+                                         method=method) for i in range(400)])
+        check(f"受音判定（{method}）が scalar 版と完全一致",
+              np.array_equal(batch, one), f"受音 {int(batch.sum())} 本")
+    segment = rs.inside_sphere_batch(0.5, dirs, orgs, rec, walls)
+    foot = rs.inside_sphere_batch(0.5, dirs, orgs, rec, walls, method="foot")
+    check("★取りこぼしが減るだけ（以前拾えたものは必ず拾う）",
+          bool(np.all(segment[foot])),
+          f"線分 {int(segment.sum())} 本 / 垂足 {int(foot.sum())} 本")
+    try:
+        rs.inside_sphere_batch(0.5, dirs, orgs, rec, walls, method="unknown")
+        ok = False
+    except ValueError:
+        ok = True
+    check("知らない判定の仕方は理由を告げて止まる", ok)
+
+    # ---- ② 複素和が帯域別の音源パワーレベルを保つ ----
+    air = Atmosphere()
+    times = np.array([1.0 / air.sound_velocity])
+    energies = np.ones((1, 2))
+    distances = np.array([1.0])
+    bands = np.array([500.0, 1000.0])
+    power = [80.0, 100.0]
+    energy = sl.band_levels(times, energies, distances, air, bands,
+                            source_power_db=power, verbose=False)["levels"]
+    coherent = sl.coherent_band_levels(times, energies, distances, air, bands,
+                                       source_power_db=power)
+    check("★経路 1 本ならエネルギー和と複素和は一致する",
+          np.allclose(coherent, energy, atol=1e-9),
+          f"複素 {np.round(coherent, 3)} / エネルギー {np.round(energy, 3)}")
+    # PWL だけの効きを見る（空気吸収は帯域ごとに違うので、その差を引いて比べる）
+    base = sl.coherent_band_levels(times, energies, distances, air, bands,
+                                   source_power_db=None)
+    check("★帯域別 PWL がそのまま乗る（平均へ潰さない）",
+          np.allclose(coherent - base, power, atol=1e-9),
+          f"乗った量 {np.round(coherent - base, 3)} / 与えた PWL {power}")
+    check("  以前は平均へ潰していた（80/100 → 両方 90 相当）",
+          abs((coherent[1] - coherent[0])
+              - (energy[1] - energy[0])) < 1e-9,
+          f"複素の差 {coherent[1] - coherent[0]:.3f} / "
+          f"エネルギーの差 {energy[1] - energy[0]:.3f} dB")
+    flat = sl.coherent_band_levels(times, energies, distances, air, bands,
+                                   source_power_db=90.0)
+    check("  1 つだけ渡せば全帯域に同じ値が乗る",
+          np.allclose(flat - base, 90.0, atol=1e-9),
+          f"{np.round(flat - base, 3)}")
+
+    # ---- ③ 複素和のときは総合値・A 特性・内訳も同じ足し方 ----
+    two_t = np.array([3.0, 4.0]) / air.sound_velocity
+    two_d = np.array([3.0, 4.0])
+    two_e = np.ones((2, 2))
+    full = sl.coherent_levels(two_t, two_e, two_d, air, bands,
+                              source_power_db=power)
+    check("複素和でも内訳と総合値が揃う",
+          {"levels", "direct", "reflected", "early", "late",
+           "a_weighted", "overall", "overall_a"} <= set(full),
+          str(sorted(full)))
+    check("★総合値はその複素和のバンドから作られる",
+          abs(full["overall"] - 10.0 * np.log10(
+              np.sum(10.0 ** (full["levels"] / 10.0)))) < 1e-9,
+          f"{full['overall']:.3f} dB")
+    check("A 特性は複素和のレベル + A 補正",
+          np.allclose(full["a_weighted"],
+                      full["levels"] + sl.a_weighting(bands)))
+    single_energy = sl.band_levels(two_t[:1], two_e[:1], two_d[:1], air, bands,
+                                   source_power_db=power, verbose=False)["levels"]
+    check("★直接音は 1 本なのでエネルギー和と一致する",
+          np.allclose(full["direct"], single_energy, atol=1e-9),
+          f"複素 {np.round(full['direct'], 3)} / エネルギー {np.round(single_energy, 3)}")
+    both = sl.band_levels(two_t, two_e, two_d, air, bands,
+                          source_power_db=power, verbose=False)["levels"]
+    check("同じ大きさ 2 本なら複素和はエネルギー和 +3.01 dB を超えない",
+          bool(np.all(full["levels"] <= both + 3.011)),
+          f"複素 {np.round(full['levels'], 2)} / エネルギー {np.round(both, 2)}")
+
+    # ---- ④ 固有周波数の次数を寸法と上限周波数から決める ----
+    size, velocity = (20.0, 5.0, 3.0), 343.0
+    auto = fr.modal_frequencies(size, velocity, 250.0)
+    fixed = fr.modal_frequencies(size, velocity, 250.0, orders=12)
+    def has(modes, order):
+        return any((m[1], m[2], m[3]) == order for m in modes)
+    check("★長い室で取りこぼしていた高次の軸モードが入る",
+          has(auto, (20, 0, 0)) and not has(fixed, (20, 0, 0)),
+          f"自動 {len(auto)} 個 / 12 次固定 {len(fixed)} 個")
+    check("  必要な次数は floor(2 L f / c)",
+          max(m[1] for m in auto) == int(2 * 20.0 * 250.0 / velocity),
+          f"x 方向の最大次数 {max(m[1] for m in auto)}")
+    check("  上限周波数を超えるモードは入らない",
+          max(m[0] for m in auto) <= 250.0 + 1e-9)
+    check("  下限より低いモードは入らない",
+          min(m[0] for m in fr.modal_frequencies(size, velocity, 250.0, low=100.0))
+          >= 100.0)
+    check("orders を渡せば従来どおり頭打ちにできる（互換）",
+          max(m[1] for m in fixed) <= 12)
+    check("★最低次は (1,0,0) で c/(2L)",
+          abs(auto[0][0] - velocity / (2 * 20.0)) < 1e-9,
+          f"{auto[0][0]:.3f} Hz / 理論 {velocity / 40.0:.3f} Hz")
+    check("寸法が 0 なら空を返す（落ちない）",
+          fr.modal_frequencies((0.0, 5.0, 3.0), velocity, 250.0) == [])
+
+    # ---- ⑤ 気圧の単位は kPa。Pa を渡したら止める ----
+    check("既定は 101.325 kPa", abs(Atmosphere().pressure - 101.325) < 1e-9)
+    for bad, why in ((101325.0, "Pa で渡した"), (0.0, "0"), (500.0, "範囲外")):
+        try:
+            Atmosphere(pressure=bad)
+            ok, message = False, ""
+        except ValueError as error:
+            ok, message = True, str(error)
+        check(f"★気圧 {bad:g}（{why}）は理由を告げて止まる", ok, message[:60])
+    check("  Pa と分かるときは換算値を教える",
+          "101.325 kPa です" in _pressure_error(101325.0))
+    check("妥当な範囲は通る",
+          abs(Atmosphere(pressure=95.0).pressure - 95.0) < 1e-9)
+
+
+def _pressure_error(value):
+    from atmosphere import Atmosphere
+    try:
+        Atmosphere(pressure=value)
+    except ValueError as error:
+        return str(error)
+    return ""
+
+
 # ---------------------------------------------------------------- 統計残響式
 def test_statistical_reverberation():
     print("\n[10] 統計残響式（Sabine / Eyring / Eyring-Knudsen）")
@@ -4212,13 +4377,37 @@ def test_frequency_response():
     single.time = single.distance / c
     single.energy = np.ones((1, 2))
     frequencies = np.linspace(50.0, 200.0, 61)
-    pressure = fr.response(single, frequencies, air)
-    magnitude = np.abs(pressure)
+    # 空気吸収を切れば、干渉相手がいないので大きさは周波数によらない
+    magnitude = np.abs(fr.response(single, frequencies, air,
+                                   air_absorption=False))
     check("★経路 1 本なら大きさは周波数によらず一定（干渉相手がいない）",
           np.allclose(magnitude, magnitude[0], rtol=1e-12))
     check("大きさは √(E/4π)/r",
           abs(magnitude[0] - np.sqrt(2.0 / (4 * np.pi)) / 3.0) < 1e-12,
           f"{magnitude[0]:.6f}")
+
+    # ★空気吸収（2026-09-05 に実装。それまで分岐が `pass` で ON/OFF 差 0 dB だった）
+    far = ln_.PulseList(band_number=8)
+    far.distance = np.array([100.0])
+    far.time = far.distance / c
+    far.energy = np.ones((1, 8))
+    check_f = np.array([1000.0, 4000.0, 8000.0])
+    on = np.abs(fr.response(far, check_f, air, band=7))
+    off = np.abs(fr.response(far, check_f, air, band=7, air_absorption=False))
+    got = 20.0 * np.log10(on / off)
+    # 振幅に効くのは exp(-m d / 2)。**エネルギーの exp(-m d) と 2 倍を取り違えないこと**
+    want = -air.absorption_coefficient(check_f) * 100.0 * 10.0 * np.log10(np.e)
+    check("★空気吸収が効く（ON/OFF が 0 dB ではない）",
+          np.all(np.abs(got) > 0.4),
+          f"100 m で {np.round(got, 2)} dB")
+    check("  減衰は振幅の exp(-m d / 2) と厳密に一致（ISO 9613-1）",
+          np.allclose(got, want, atol=1e-9),
+          f"実装 {np.round(got, 3)} / 規格 {np.round(want, 3)} dB")
+    check("  air_absorption=False なら掛からない",
+          np.allclose(off, np.sqrt(1.0 / (4 * np.pi)) / 100.0, rtol=1e-12))
+    check("  周波数を刻んで回しても同じ（chunk に依らない）",
+          np.allclose(fr.response(far, check_f, air, band=7, chunk=1), 
+                      fr.response(far, check_f, air, band=7)))
 
     # 経路 2 本なら、経路長差から決まる周期で山谷ができる
     pair = ln_.PulseList(band_number=1)
@@ -4678,7 +4867,7 @@ def main():
     for fn in (test_read_dxf, test_soundray_generator, test_energy_decay,
                test_backtrace, test_image_sources, test_vectorised_geometry,
                test_atmosphere, test_absorption, test_impulse, test_reverberation,
-               test_iso3382_decay,
+               test_iso3382_decay, test_fixes_2026_09_05,
                test_statistical_reverberation, test_ray_log,
                test_normals, test_check_model, test_clarity,
                test_project, test_resample, test_direction, test_modes,

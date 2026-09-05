@@ -185,12 +185,22 @@ python procedure.py ..\test.dxf --absorption ..\absorption.csv --out ..\結果 ^
 温度・湿度・気圧から**音速と空気吸収**を求める。移植元のない**新規モジュール**（2026-08-14）。
 
 ```python
-Atmosphere(temperature=20.0, humidity=40.0, pressure=101.325)
+Atmosphere(temperature=20.0, humidity=40.0, pressure=101.325)   # ★気圧は kPa
     .sound_velocity                 # [m/s]
+    .density                        # [kg/m³]
     .absorption_coefficient(f)      # [1/m]（E = E0 exp(-m d) の m）
     .absorption_db_per_metre(f)     # [dB/m]
     .replace(temperature=25.0)      # 一部だけ変えた新しい Atmosphere（GUI 用）
 ```
+
+★★**気圧の単位は kPa**（Pa ではない）。Pa（101325）を渡すと密度が 1000 倍になり、
+音圧レベルの `10log10(ρc/400)` が **+30 dB** ずれる。それまでどこも例外を出さず
+**黙って通っていた**ので、`_check_pressure` が 20〜120 kPa の範囲で見張るようにした
+（Pa と分かるときは換算値を添える。2026-09-05）。
+
+★空気吸収は **ISO 9613-1 と数値まで一致する**ことを確認済み
+（規格式を独立に書き起こして 20℃50% / 20℃70% / 15℃60% × 8 バンドを比較、
+すべて比 1.0000。2026-09-05）。
 
 元コードは音速を `c0 = 340.0` の定数、空気吸収を `1.81e-8 * f^1.57` のべき乗近似で
 固定していた。どちらも温度・湿度から計算する形にした。
@@ -420,10 +430,22 @@ energy_decay(sound_ray, normal, absorption, initial_energy) -> float
 ### receiver_sphere.py
 
 ```python
-inside_sphere(sphere_radius, sound_ray, soundray_comesfrom, receiver_point, min_distance) -> bool
+inside_sphere(sphere_radius, sound_ray, soundray_comesfrom, receiver_point,
+              min_distance, method="segment") -> bool
+inside_sphere_batch(...) -> ndarray(bool)
 ```
 音線（線分）が受音球を通過したかの判定（元コード 649〜663 行）。
-判定 3 条件: ①受音点から音線への垂線距離 ≤ 球半径、②足までの射影距離が最寄り壁より手前、③射影距離 ≥ 0（前方）。
+
+★**判定は「基点から最寄り壁までの線分と球の交差」**（`method='segment'`。2026-09-05）。
+垂線の足を `[0, 最寄り壁までの距離]` に押し込んでから、その点と受音点の距離を半径と比べる。
+
+それ以前は 3 条件（①垂線距離 ≤ 球半径、②射影距離 ≤ 最寄り壁、③射影距離 ≥ 0）だった。
+**これは線分と球の交差と同値ではない**：垂線の足が線分の外にあっても、
+線分の端が球の中に入っていることがある（壁まで 1.0 m・球の中心 1.1 m・半径 0.2 m なら
+線分は 0.9〜1.0 m で球の中にいるのに ③ で落ちていた）。
+起きるのは**受音点が壁から受音半径以内にあるとき**。判定は必ず**増える**方向にしか動かない
+（`test.dxf` で受音点を天井から 0.08 m に置くと 1590 → 1661 本）。
+`method='foot'` で元コードのやり方を再現できる（**参照実装**）。
 ※2026-08-12 修正: ②の比較に垂線距離を使っていたのを射影距離（`inner_product`）に変更（元コード 663 行 `distd .le. disttmp`）。
 　旧実装では壁の向こう側にある受音球でも受音と誤判定しうる状態だった。
 検証: 壁より手前の受音点 → True、壁の向こうの受音点 → False（旧実装は True）、後方の受音点 → False。
@@ -1840,6 +1862,28 @@ STI は IEC 60268-16。**インパルス応答を帯域分割して積分する�
 幾何音響では普通この形）。背景騒音と聴覚マスキングは
 **PWL と騒音レベルの両方がそろっているときだけ**効かせる（絶対値が要るため）。
 6 バンド（125〜4k）計算では 8 kHz が無いので**重みを外して正規化し直し警告する**。
+
+**複素和（位相を含む足し方）** `coherent_band_levels()` / `coherent_levels()`
+
+    p(f) = Σ √(A_n e^{-m d_n}/4π)/d_n · e^{-j2πf d_n/c}
+    Lp   = Lw + 10log10( <|p(f)|²> ) + 10log10(ρc/400)      < > はバンド内の周波数平均
+
+★**音源パワーレベルは帯域ごとに持つ**（2026-09-05 に修正）。それまで
+`np.mean(source_power_db)` で**1 つの数に潰していた**ので、PWL に傾きがあると
+帯域別のレベルが丸ごと狂った（`[80, 100] dB` を入れると両方 79.1 dB になり、
+エネルギー和の `[69.1, 89.1] dB` に対して ±10 dB ずれた）。
+配列にするのは `band_levels()` と同じ `_power_levels()`。
+
+★**`level_method='coherent'` のときは総合値・A 特性・内訳まで同じ足し方で出し直す**
+（`coherent_levels()` が `band_levels()` と同じ鍵の dict を返す）。
+それ以前は `procedure` が `levels` だけ差し替えていたので、
+**1 つの結果の中でエネルギー和と複素和が混ざっていた**。
+総合値（帯域合成）はバンドごとの `|p|²` を足す（バンドは重ならない周波数を
+見ているので、ここは位相を持たせずに足すのが正しい）。
+
+★`spl.csv` の**音源距離は独立した行**（`音源距離_m`）。2026-09-05 より前は
+「音源パワーレベル_dB」の行の 3 列目に距離が入っていて、項目の名前と値が食い違っていた。
+`summary.py` は**昔の置き場も見る**ので、以前のプロジェクトも読める。
 
 数式は `docs/技術説明書.md` 9.8・9.9 節。検算（解析解との一致）は
 `tests/test_geosim.py` [31][32]。

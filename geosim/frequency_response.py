@@ -34,33 +34,70 @@ DEFAULT_LOW, DEFAULT_HIGH, DEFAULT_STEP = 20.0, 250.0, 0.5
 # 図に描く固有周波数の色
 MODE_COLOR = "#c0392b"
 
+# 伝達関数を作るときに一度に扱う周波数の数（メモリは 周波数 × パルス になる）
+RESPONSE_CHUNK = 256
+
+# 固有周波数を並べる上限。大きい室・高い周波数では数万個になるので頭打ちにする
+MODE_LIMIT = 20000
+
 
 # ---- 伝達関数 --------------------------------------------------------------
 
-def response(pulses, frequencies, atmosphere, band=None, air_absorption=True):
+def response(pulses, frequencies, atmosphere, band=None, air_absorption=True,
+             chunk=RESPONSE_CHUNK):
     """パルス列から伝達関数 `H(f)`（複素数）を作る。
 
-        H(f) = Σ_n √(A_n · e^{-m d_n} / 4π) / d_n · e^{-j 2π f d_n / c}
+        H(f) = Σ_n √(A_n · e^{-m(f) d_n} / 4π) / d_n · e^{-j 2π f d_n / c}
 
     査読論文 式(2)（＝書籍 式(2.67)）と同じ形。`band` を指定するとその帯域の
     エネルギーを使い、省略すると**全帯域の合計**を使う。
+
+    ★**空気吸収は「その周波数の」係数で掛ける**（2026-09-05 に実装）。
+      それまでは `air_absorption and band is not None` の分岐が `pass` のままで、
+      **ON にしても OFF と 0.0 dB 差**だった（100 m・8 kHz でも変わらなかった）。
+
+      - `m(f)` は `atmosphere.absorption_coefficient` が返す**エネルギーの**減衰係数
+        [1/m]。振幅に掛かるのは `e^{-m d / 2}`（＝上式の平方根の中に入る形）。
+        **2 倍の取り違えをしないこと**（エネルギー e^{-md} ↔ 振幅 e^{-md/2}）
+      - バンドの中心周波数ではなく**評価している周波数 f そのもの**で引く。
+        `H(f)` は連続な周波数の関数なので、そのほうが素直で `band=None` でも定まる
+      - `pulses.energy` には距離減衰も空気吸収も入っていない
+        （入るのは `sound_level.received_energy` の側）。だから**ここで掛けるのが正しく、
+        二重に掛かることはない**
+
+    ★`band=None`（全帯域の合計）は**広帯域の目安**。バンド別の吸音率を足しているので、
+      1 つの周波数の応答としては近似になる。バンドを指定できるならそのほうが正確。
+
+    メモリは (周波数 × パルス) の複素配列になるので `chunk` 本ずつ周波数を刻んで回す。
     """
     distance = np.asarray(pulses.distance, dtype=float)
     energy = np.asarray(pulses.energy, dtype=float)
-    frequencies = np.asarray(frequencies, dtype=float)
+    frequencies = np.atleast_1d(np.asarray(frequencies, dtype=float))
     velocity = atmosphere.sound_velocity
 
     if band is None:
         weight = energy.sum(axis=1)
     else:
         weight = energy[:, int(band)]
-    if air_absorption and band is not None:
-        # 帯域を指定したときだけ空気吸収を掛ける（全帯域合計では意味が定まらない）
-        pass
     amplitude = np.sqrt(np.maximum(weight, 0.0) / (4.0 * np.pi)) / distance
 
+    # エネルギーの減衰係数 m(f) [1/m]。振幅には半分の指数で効く
+    if air_absorption:
+        coefficient = np.atleast_1d(
+            atmosphere.absorption_coefficient(frequencies))
+    else:
+        coefficient = np.zeros(len(frequencies))
+
     wave = 2.0 * np.pi * frequencies / velocity
-    return np.exp(-1j * wave[:, None] * distance[None, :]) @ amplitude
+    out = np.empty(len(frequencies), dtype=complex)
+    for start in range(0, len(frequencies), max(1, int(chunk))):
+        stop = min(start + max(1, int(chunk)), len(frequencies))
+        phase = np.exp(-1j * wave[start:stop, None] * distance[None, :])
+        if air_absorption:
+            phase *= np.exp(-0.5 * coefficient[start:stop, None]
+                            * distance[None, :])
+        out[start:stop] = phase @ amplitude
+    return out
 
 
 def resolution(pulses, atmosphere):
@@ -73,29 +110,66 @@ def resolution(pulses, atmosphere):
 
 # ---- 固有周波数（直方体とみなした目安）--------------------------------------
 
-def modal_frequencies(size, sound_velocity, high, low=0.0, orders=12):
+def modal_frequencies(size, sound_velocity, high, low=0.0, orders=None,
+                      limit=MODE_LIMIT):
     """直方体の固有周波数。→ [(f, nx, ny, nz, 種類), …]（低い順）
 
         f = c/2 · √((nx/Lx)² + (ny/Ly)² + (nz/Lz)²)
 
     種類は `軸`（1 つだけ 0 でない）/ `接線`（2 つ）/ `斜め`（3 つ）。
     ★**箱とみなした目安**なので、形が箱から離れるほど当てにならない。
+
+    ★**次数は上限周波数と室の寸法から決める**（2026-09-05。`orders=None` が既定）。
+      それまでは各軸 0〜12 次の固定で、**長い室では取りこぼしていた**
+      （20×5×3 m・250 Hz 以下で、x 方向 20 次の 171.9 Hz が抜けていた）。
+
+      1 軸だけ見れば `f ≥ (c/2)(n/L)` なので、必要な次数は
+
+          n_max = floor(2 L f_high / c)
+
+      さらに、nx を決めると残りの軸に使える周波数が減るので、
+      **残りの予算から ny・nz の上限を決めて枝を刈る**。
+      これで無駄な組み合わせを回さずに済む（20 m の室でも一瞬）。
+
+    引数:
+        orders : int | None   軸ごとの次数の上限。None なら上式から決める。
+                              数字を渡すと**それを上限として頭打ちにする**
+                              （昔の呼び方との互換。`orders=12` で従来と同じ）
+        limit  : 数が増えすぎたときに打ち切る本数（既定 `MODE_LIMIT`）
     """
     size = np.asarray(size, dtype=float)
+    if np.any(size <= 0.0) or high <= 0.0:
+        return []
+
+    half = 0.5 * sound_velocity
+
+    def top(length, budget):
+        """その軸に使える最大の次数（残りの周波数の予算 budget から）。"""
+        value = int(math.floor(budget * length / half + 1e-9))
+        return value if orders is None else min(value, int(orders))
+
     found = []
-    for nx in range(orders + 1):
-        for ny in range(orders + 1):
-            for nz in range(orders + 1):
+    for nx in range(top(size[0], high) + 1):
+        fx = half * nx / size[0]
+        rest_y = math.sqrt(max(high * high - fx * fx, 0.0))
+        for ny in range(top(size[1], rest_y) + 1):
+            fy = half * ny / size[1]
+            rest_z = math.sqrt(max(high * high - fx * fx - fy * fy, 0.0))
+            for nz in range(top(size[2], rest_z) + 1):
                 if nx == ny == nz == 0:
                     continue
-                value = 0.5 * sound_velocity * math.sqrt(
-                    (nx / size[0]) ** 2 + (ny / size[1]) ** 2
-                    + (nz / size[2]) ** 2)
+                value = math.sqrt(fx * fx + fy * fy
+                                  + (half * nz / size[2]) ** 2)
                 if low <= value <= high:
                     kind = {1: "軸", 2: "接線", 3: "斜め"}[
                         sum(1 for n in (nx, ny, nz) if n)]
                     found.append((value, nx, ny, nz, kind))
     found.sort()
+    if limit and len(found) > limit:
+        # 低いほうから残す。★黙って切らずに知らせる
+        print(f"[伝達関数] 固有周波数が {len(found)} 個あるので低い順に "
+              f"{limit} 個だけ残しました（{found[limit - 1][0]:.1f} Hz まで）")
+        found = found[:limit]
     return found
 
 

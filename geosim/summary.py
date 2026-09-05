@@ -262,7 +262,10 @@ def write_level_summary(project, verbose=True):
         if table is None:
             continue
         frequencies = frequencies if frequencies is not None else table["frequencies"]
-        distance = table["values"].get("音源パワーレベル_dB", "")
+        # ★音源距離は独立した行（2026-09-05）。**昔のファイルも読める**ように、
+        #   以前の置き場（音源パワーレベルの行の 3 列目）も見る
+        distance = (table["values"].get("音源距離_m")
+                    or table["values"].get("音源パワーレベル_dB", ""))
         for key in LEVEL_ROWS:
             if key in table["rows"]:
                 records.append((name, key, distance if key == "Lp_dB" else None,

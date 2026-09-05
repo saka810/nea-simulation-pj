@@ -446,13 +446,21 @@ def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref
         # ★**位相ごと重ねた値**も出す（`level_method`）。
         #   `both` なら表に区分「複素和」の行が増える
         if str(level_method).lower() in ("coherent", "both"):
-            level_result["coherent"] = sl.coherent_band_levels(
+            coherent = sl.coherent_levels(
                 pulses.time, pulses.energy, pulses.distance, atmosphere,
                 frequencies, band_width=band_width,
                 source_power_db=source_power_db)
+            level_result["coherent"] = coherent["levels"]
             if str(level_method).lower() == "coherent":
-                # 複素和だけを見たいときは、そちらを本体に据える
-                level_result["levels"] = level_result["coherent"]
+                # ★複素和だけを見たいときは、**総合値・A 特性・内訳まで
+                #   同じ足し方で出し直す**（2026-09-05）。以前は `levels` だけ
+                #   差し替えていたので、1 つの結果の中で足し方が混ざっていた
+                for key in ("levels", "direct", "reflected", "early", "late",
+                            "a_weighted", "overall", "overall_a"):
+                    level_result[key] = coherent[key]
+                level_result["excess"] = (level_result["levels"]
+                                          - level_result["freefield"])
+            level_result["level_method"] = str(level_method).lower()
         if level_filename is not None:
             sl.write_levels(level_filename, level_result)
             print(f"[procedure] 音圧レベルを書き出しました: {level_filename}")
