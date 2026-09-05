@@ -24,7 +24,21 @@ FIR で処理したい場合は `method='fir'` を指定できる。
 
     1. インパルス応答をオクターブバンドに分ける
     2. Schroeder 積分（後ろ向きの積分）で減衰曲線を作る
-    3. -5 dB と -35 dB を横切る時刻の差から T30 を求める
+    3. **-5〜-35 dB の区間に直線を最小二乗で当て、傾きから T30 を外挿する**（ISO 3382）
+
+## 読み取り方（2026-09-05 に ISO 準拠へ変更）
+
+★**評価区間の全サンプルへの最小二乗回帰**が ISO 3382 の規定。
+それ以前は「-5 dB と -35 dB を横切る**2 点**の時刻差」で出していた（元コード 134 行）。
+
+- 減衰がまっすぐなら両者はほぼ一致する（合成した指数減衰で差 1% 未満）。
+  **これまでの数字が的外れだったという意味ではない**
+- 減衰が曲がっていると大きくずれる。`test.dxf` の実測で **125 Hz で 35.7%**
+- 回帰にすると**適合の良し悪しが数値で出る**のが実利。
+  ISO 3382-2 の非線形性 `ξ = 1000(1-r²)` が同時に手に入り、
+  「このバンドは読んではいけない」を人の目でなく数字で言える
+
+2 点法は `fit='crossing'` で残してある（元 Fortran との一致確認に使う）。
 """
 
 import numpy as np
@@ -52,7 +66,35 @@ DECAY_MEASURES = {
     "T30": (-5.0, -35.0),
 }
 
-# IEC 61260 のクラス 1 オクターブフィルタに相当する次数（Butterworth 6 次）
+# 減衰曲線の読み取り方。
+#   'least_squares' … 評価区間の全サンプルへ直線を最小二乗で当てる（**ISO 3382**。既定）
+#   'crossing'      … 開始 dB と終了 dB を横切る 2 点の時刻差（元コード 134 行）。
+#                     参照実装として残す。ISO 準拠の数字が要るときは使わないこと
+DECAY_FIT_LEAST_SQUARES = "least_squares"
+DECAY_FIT_CROSSING = "crossing"
+DECAY_FITS = (DECAY_FIT_LEAST_SQUARES, DECAY_FIT_CROSSING)
+DEFAULT_DECAY_FIT = DECAY_FIT_LEAST_SQUARES
+
+# ISO 3382 の曲率 C を出すときの評価区間（T20 と T30）。
+# ★C は「どの区間で残響時間を読んだか」に依らない**減衰曲線そのものの性質**なので、
+#   db_max / db_min を変えてもこの 2 つで測る
+CURVATURE_RANGES = (DECAY_MEASURES["T20"], DECAY_MEASURES["T30"])
+
+# ISO 3382 が求める余裕。評価区間の下端より、さらにこれだけ下まで
+# 減衰が見えていること（T30 なら -45 dB まで）。
+# 実測では暗騒音の話だが、シミュレーションでは**反射回数の打ち切り**と
+# **インパルス応答長の打ち切り**が同じ役目の「床」を作る
+DECAY_MARGIN_DB = 10.0
+
+# 曲率 C・非線形性 ξ の「ここから先は信用しない」の目安。
+#   C  … ISO 3382-1 の曲率 [%]
+#   ξ  … ISO 3382-2 の非線形性 1000(1-r²)。精密級 ξ<=5 / 工学級 ξ<=10 が目安
+CURVATURE_LIMIT_PERCENT = 10.0
+NONLINEARITY_LIMIT = 10.0
+
+# IEC 61260 のオクターブバンドに合わせた Butterworth の次数（6 次）。
+# ★「クラス 1」とは名乗らない：クラスは次数ではなく**減衰量マスクへの適合**で
+#   決まるもので、その試験はこのリポジトリでは行っていない（2026-09-05）
 FILTER_ORDER = 6
 
 # method='fir' のときのタップ数
@@ -352,19 +394,102 @@ def _crossing_index(decay_db, level):
     return int(below[0]) if len(below) else -1
 
 
-def _decay_time(decay_db, dt, db_start, db_end):
-    """2 つのレベルを横切る時刻の差から 60 dB 減衰時間を外挿する。元コード 134 行。"""
+def _decay_time(decay_db, dt, db_start, db_end, fit=DEFAULT_DECAY_FIT,
+                detail=False):
+    """減衰曲線から 60 dB 減衰時間を求める。**既定は ISO 3382 の最小二乗回帰。**
+
+    引数:
+        decay_db  (n,) Schroeder 積分を dB にしたもの（先頭が 0 dB）
+        dt        サンプル間隔 [s]
+        db_start / db_end  評価区間 [dB]（T30 なら -5 / -35）
+        fit       'least_squares'（ISO 3382。既定）| 'crossing'（2 点法。元コード 134 行）
+        detail    True なら (値, 適合の情報) を返す
+
+    戻り値:
+        60 dB 減衰時間 [s]。求まらなければ `np.nan`
+        （評価区間に届いていない／傾きが負でない＝減衰していない）
+
+    `detail=True` の情報:
+        'slope_db_per_s' 傾き / 'intercept_db' 切片 / 'r2' 決定係数 /
+        'xi' ISO 3382-2 の非線形性 1000(1-r²) / 'range_db' 使った区間 [dB] /
+        'range_s' 使った区間 [s] / 'samples' 使った点の数 / 'fit' 読み取り方
+    """
+    if fit not in DECAY_FITS:
+        raise ValueError(f"fit は {DECAY_FITS} のいずれかです: {fit!r}")
+
     start = _crossing_index(decay_db, db_start)
     stop = _crossing_index(decay_db, db_end)
     if start < 0 or stop < 0 or stop <= start:
+        return (np.nan, None) if detail else np.nan
+
+    if fit == DECAY_FIT_CROSSING:
+        # **参照実装**（元コード 134 行）。区間の 2 点しか見ない。
+        # ISO 3382 が求めているのは区間全体への回帰なので、規格準拠の数字には使わない
+        value = (stop - start) * dt * 60.0 / (db_start - db_end)
+        if not detail:
+            return value
+        return value, {"slope_db_per_s": (db_end - db_start) / ((stop - start) * dt),
+                       "intercept_db": np.nan, "r2": np.nan, "xi": np.nan,
+                       "range_db": (float(db_start), float(db_end)),
+                       "range_s": (start * dt, stop * dt),
+                       "samples": 2, "fit": fit}
+
+    # ---- ISO 3382：評価区間の全サンプルへ直線を最小二乗で当てる ----
+    time = np.arange(start, stop + 1) * dt
+    level = np.asarray(decay_db[start:stop + 1], dtype=float)
+    slope, intercept = np.polyfit(time, level, 1)
+    if not np.isfinite(slope) or slope >= 0.0:
+        # 減衰していない（適合不良）。黙って変な値を返さない
+        return (np.nan, None) if detail else np.nan
+    value = -60.0 / slope
+    if not detail:
+        return value
+
+    # 決定係数。直線からのずれ＝減衰が曲がっている／途中で床に当たっている度合い。
+    # ISO 3382-2 はこれを ξ = 1000(1-r²) という形で使う（小さいほど直線的）
+    residual = level - (slope * time + intercept)
+    variance = float(np.sum((level - level.mean()) ** 2))
+    r2 = 1.0 - float(np.sum(residual ** 2)) / variance if variance > 0.0 else np.nan
+    return value, {"slope_db_per_s": float(slope), "intercept_db": float(intercept),
+                   "r2": r2, "xi": np.nan if np.isnan(r2) else 1000.0 * (1.0 - r2),
+                   "range_db": (float(db_start), float(db_end)),
+                   "range_s": (float(time[0]), float(time[-1])),
+                   "samples": int(len(time)), "fit": fit}
+
+
+def curvature_percent(decay_db, dt, fit=DEFAULT_DECAY_FIT):
+    """**ISO 3382 の曲率 C** [%]。
+
+        C = (T30 / T20 - 1) × 100
+
+    減衰がまっすぐなら 0 に近い。反射回数不足で音が途中で切れている場合や、
+    音場が拡散していない（小さい室・平行面・面ごとに吸音率が大きく違う）場合に大きくなる。
+
+    ★**残響時間をどの区間で読んだかに依らない**。C は減衰曲線そのものの性質なので、
+      `decay_curves` に db_max / db_min を渡していても T20・T30 の区間で測る。
+      2026-09-05 より前は「評価区間を半分にした値との食い違い」（-5〜-20 dB）を
+      曲率と呼んでいたが、これは ISO の C ではなく、実測で偽警報を出していた
+      （`test.dxf` の 2 kHz で ISO の C が +0.4% なのに -11.8% と出た）。
+    """
+    (t20_start, t20_end), (t30_start, t30_end) = CURVATURE_RANGES
+    t20 = _decay_time(decay_db, dt, t20_start, t20_end, fit=fit)
+    t30 = _decay_time(decay_db, dt, t30_start, t30_end, fit=fit)
+    if np.isnan(t20) or np.isnan(t30) or t20 == 0.0:
         return np.nan
-    return (stop - start) * dt * 60.0 / (db_start - db_end)
+    return (t30 / t20 - 1.0) * 100.0
+
+
+def _decay_floor_db(decay_db):
+    """減衰曲線がどこまで下がったか [dB]（見えている範囲）。届いていなければ大きい値。"""
+    finite = np.asarray(decay_db, dtype=float)
+    finite = finite[np.isfinite(finite)]
+    return float(finite.min()) if len(finite) else np.nan
 
 
 def decay_curves(time, ir, frequencies=None, db_max=DB_MAX, db_min=DB_MIN,
                  band_width=ab.BAND_WIDTH_OCTAVE,
                  method="butter", order=FILTER_ORDER, numtaps=FIR_NUMTAPS,
-                 verbose=True):
+                 fit=DEFAULT_DECAY_FIT, verbose=True):
     """オクターブバンドごとの減衰曲線と残響時間を求める。元コード 99〜135 行。
 
     引数:
@@ -373,10 +498,14 @@ def decay_curves(time, ir, frequencies=None, db_max=DB_MAX, db_min=DB_MIN,
         frequencies (nf,) | None  中心周波数。None なら 63〜8k の 8 バンド
         db_max / db_min  評価区間 [dB]。既定 -5 / -35（＝T30）
                     -5 / -25 なら T20、0 / -10 なら EDT 相当
+        fit         'least_squares'（ISO 3382。既定）| 'crossing'（2 点法・参照実装）
 
     戻り値: dict
         'frequencies' / 'time' / 'decay' (nf, n) [dB] /
-        'reverberation_time' (nf,) [s] / 'curvature' (nf,) [%]
+        'reverberation_time' (nf,) [s] / 'curvature' (nf,) [%]（**ISO 3382 の C**）/
+        'nonlinearity' (nf,)（**ISO 3382-2 の ξ = 1000(1-r²)**）/
+        'r2' (nf,) / 'floor_db' (nf,)（減衰曲線が下がりきった深さ）/
+        'fit' (nf,) 適合の情報 dict のリスト / 'fit_method'
 
     ※ 帯域幅×減衰時間（BT 積）が小さいと推定のばらつきが大きくなる
       （例: 125 Hz で T60 = 0.3 s）。これは手法の限界であって不具合ではない
@@ -394,6 +523,10 @@ def decay_curves(time, ir, frequencies=None, db_max=DB_MAX, db_min=DB_MIN,
     decay = np.empty((len(frequencies), len(ir)))
     rt = np.empty(len(frequencies))
     curvature = np.empty(len(frequencies))
+    nonlinearity = np.empty(len(frequencies))
+    r_squared = np.empty(len(frequencies))
+    floor_db = np.empty(len(frequencies))
+    fits = [None] * len(frequencies)
 
     for i, fc in enumerate(frequencies):
         band = octave_bandpass(ir, fc, sampling_frequency, method=method,
@@ -403,48 +536,97 @@ def decay_curves(time, ir, frequencies=None, db_max=DB_MAX, db_min=DB_MIN,
         if dc[0] <= 0.0:
             decay[i] = -np.inf
             rt[i] = curvature[i] = np.nan
+            nonlinearity[i] = r_squared[i] = floor_db[i] = np.nan
             continue
 
         with np.errstate(divide="ignore"):
             decay[i] = 10.0 * np.log10(np.maximum(dc, 0.0) / dc[0])
 
-        rt[i] = _decay_time(decay[i], dt, db_max, db_min)
+        # ★ISO 3382：評価区間の全サンプルへの最小二乗回帰（`fit` で 2 点法にも切替可）
+        rt[i], info = _decay_time(decay[i], dt, db_max, db_min, fit=fit, detail=True)
+        fits[i] = info
+        nonlinearity[i] = np.nan if info is None else info["xi"]
+        r_squared[i] = np.nan if info is None else info["r2"]
 
-        # 曲率（ISO 3382 の C）。評価区間を半分にした推定値との食い違い。
-        # 減衰がまっすぐなら 0 % に近い。反射回数不足で音が途中で切れている場合や
-        # 暗騒音がある場合は大きくずれるので、結果を信用してよいかの目安になる
-        half = _decay_time(decay[i], dt, db_max, (db_max + db_min) / 2.0)
-        curvature[i] = (np.nan if (np.isnan(half) or half == 0.0)
-                        else (rt[i] / half - 1.0) * 100.0)
+        # 曲率（ISO 3382 の C = (T30/T20 - 1)×100）。減衰がまっすぐなら 0 % に近い。
+        # 反射回数不足で音が途中で切れている場合や、音場が拡散していない場合に大きくなる
+        curvature[i] = curvature_percent(decay[i], dt, fit=fit)
+        floor_db[i] = _decay_floor_db(decay[i])
 
     if verbose:
         label = f"T{int(abs(db_min - db_max)):d}"
-        for fc, value, c in zip(frequencies, rt, curvature):
+        for fc, value, c, xi in zip(frequencies, rt, curvature, nonlinearity):
             if np.isnan(value):
                 print(f"[reverberation] {fc:7.0f} Hz : {label} = 算出不可"
                       f"（減衰が {db_min:.0f} dB に届いていません）")
                 continue
-            if not np.isnan(c) and abs(c) > 10.0:
-                note = f"  ★曲率 {c:+.0f}% — 減衰が直線でないので信用しないこと"
-            else:
-                note = "" if np.isnan(c) else f"  (曲率 {c:+.0f}%)"
+            marks = []
+            if not np.isnan(c) and abs(c) > CURVATURE_LIMIT_PERCENT:
+                marks.append(f"★曲率 {c:+.0f}%")
+            elif not np.isnan(c):
+                marks.append(f"曲率 {c:+.0f}%")
+            if not np.isnan(xi) and xi > NONLINEARITY_LIMIT:
+                marks.append(f"★ξ {xi:.0f}")
+            elif not np.isnan(xi):
+                marks.append(f"ξ {xi:.1f}")
+            note = f"  ({' / '.join(marks)})" if marks else ""
             print(f"[reverberation] {fc:7.0f} Hz : {label} = {value:.3f} s{note}")
-        finite = curvature[~np.isnan(curvature)]
-        if len(finite) and np.any(np.abs(finite) > 10.0):
-            print("[reverberation] ※曲率が大きいときは、最大反射回数 nref が足りず"
-                  "音が途中で途切れていることが多いです。"
-                  "エネルギーが 35 dB 以上減衰するまで反射させる必要があります。")
+        _print_quality_note(frequencies, curvature, nonlinearity, floor_db, db_min)
 
     return {"frequencies": frequencies,
             "time": dt * np.arange(len(ir)),
             "decay": decay,
             "reverberation_time": rt,
-            "curvature": curvature}
+            "curvature": curvature,
+            "nonlinearity": nonlinearity,
+            "r2": r_squared,
+            "floor_db": floor_db,
+            "fit": fits,
+            "fit_method": fit}
+
+
+def _print_quality_note(frequencies, curvature, nonlinearity, floor_db, db_min):
+    """曲率・非線形性・減衰の余裕について、読むときの注意を出す。
+
+    ★**ISO 3382 は評価区間の下端よりさらに 10 dB 下まで減衰が見えていることを求める**
+      （T30 なら -45 dB）。実測では暗騒音の話だが、シミュレーションでは
+      反射回数の打ち切りとインパルス応答長の打ち切りが同じ役目の「床」を作る。
+    """
+    bad_c = [f"{f:.0f}Hz" for f, c in zip(frequencies, curvature)
+             if not np.isnan(c) and abs(c) > CURVATURE_LIMIT_PERCENT]
+    bad_xi = [f"{f:.0f}Hz" for f, x in zip(frequencies, nonlinearity)
+              if not np.isnan(x) and x > NONLINEARITY_LIMIT]
+    if bad_c or bad_xi:
+        if bad_c:
+            print(f"[reverberation] ★ 曲率が {CURVATURE_LIMIT_PERCENT:.0f}% を超えたバンド"
+                  f"（{' / '.join(bad_c)}）は減衰が直線でないのでそのまま信用しないこと。")
+        if bad_xi:
+            print(f"[reverberation] ★ 非線形性 ξ（ISO 3382-2）が "
+                  f"{NONLINEARITY_LIMIT:.0f} を超えたバンド（{' / '.join(bad_xi)}）は"
+                  f"回帰直線に乗っていません。")
+        print("[reverberation]   よくある原因:")
+        print("[reverberation]   ・最大反射回数 nref の不足で後部残響が切れている"
+              "（procedure.py が別途エネルギーで判定して警告する）")
+        print("[reverberation]   ・音場が拡散していない。小さい室・平行面・"
+              "面ごとに吸音率が大きく違う場合は、**減衰が本当に 2 段階になる**ので"
+              "曲率が出るのが正しい（EDT と T30 の差にも表れる）")
+
+    # ISO 3382 が求める余裕（評価区間の下端 + 10 dB）まで減衰が見えているか
+    needed = db_min - DECAY_MARGIN_DB
+    short = [f"{f:.0f}Hz" for f, floor in zip(frequencies, floor_db)
+             if not np.isnan(floor) and floor > needed]
+    if short:
+        print(f"[reverberation] ★ ISO 3382 は評価区間の下端よりさらに "
+              f"{DECAY_MARGIN_DB:.0f} dB 下（{needed:.0f} dB）まで減衰が見えていることを"
+              f"求めます。届いていないバンド: {' / '.join(short)}")
+        print("[reverberation]   最大反射回数 nref を増やすか、"
+              "インパルス応答の長さ（max_time）を延ばしてください。")
 
 
 def decay_measures(time, ir, frequencies=None, measures=None, method="butter",
                    band_width=ab.BAND_WIDTH_OCTAVE,
-                   order=FILTER_ORDER, numtaps=FIR_NUMTAPS, verbose=True):
+                   order=FILTER_ORDER, numtaps=FIR_NUMTAPS,
+                   fit=DEFAULT_DECAY_FIT, verbose=True):
     """**EDT / T20 / T30 をまとめて求める。**
 
     減衰曲線は 1 回だけ作り、評価区間を変えて読み取るので `decay_curves` を
@@ -453,45 +635,69 @@ def decay_measures(time, ir, frequencies=None, measures=None, method="butter",
     引数:
         measures : {名前: (開始dB, 終了dB)} | None
                    None なら EDT / T20 / T30（`DECAY_MEASURES`）
+        fit      : 'least_squares'（ISO 3382。既定）| 'crossing'（2 点法・参照実装）
 
     戻り値: dict
         'frequencies' / 'time' / 'decay' (nf, n) [dB]
-        'measures'  {名前: (nf,) [s]}
-        'curvature' (nf,) [%]   T30 と T20 の食い違い（ISO 3382 の C）
+        'measures'      {名前: (nf,) [s]}
+        'nonlinearity'  {名前: (nf,)}   ISO 3382-2 の ξ = 1000(1-r²)
+        'fit'           {名前: [適合の情報 dict]}
+        'curvature'     (nf,) [%]   **ISO 3382 の C = (T30/T20 - 1)×100**
+        'floor_db'      (nf,)       減衰曲線が下がりきった深さ
+        'fit_method'
     """
     if measures is None:
         measures = DECAY_MEASURES
     base = decay_curves(time, ir, frequencies=frequencies, method=method,
-                        order=order, numtaps=numtaps, verbose=False, band_width=band_width)
+                        order=order, numtaps=numtaps, verbose=False,
+                        band_width=band_width, fit=fit)
     dt = float(base["time"][1] - base["time"][0])
 
-    values = {}
+    values, nonlinearity, fits = {}, {}, {}
     for name, (db_start, db_end) in measures.items():
-        values[name] = np.array([_decay_time(d, dt, db_start, db_end)
-                                 for d in base["decay"]])
+        pairs = [_decay_time(d, dt, db_start, db_end, fit=fit, detail=True)
+                 for d in base["decay"]]
+        values[name] = np.array([v for v, _ in pairs])
+        nonlinearity[name] = np.array([np.nan if i is None else i["xi"]
+                                       for _, i in pairs])
+        fits[name] = [i for _, i in pairs]
 
     if verbose:
         # **周波数は横**（table.py の共通ルール）
-        print_frequency_table(base["frequencies"],
-                              list(values.items()) + [("曲率%", base["curvature"])])
+        rows = list(values.items())
+        rows += [(f"ξ({name})", nonlinearity[name]) for name in values]
+        rows.append(("曲率%", base["curvature"]))
+        print_frequency_table(base["frequencies"], rows)
         # 横向きの表にすると行末に ★ を付けられないので、
         # どのバンドが該当するかを注意書きの側に書く
-        marked = [f"{f:.0f}Hz" for f, c in zip(base["frequencies"],
-                                               base["curvature"])
-                  if not np.isnan(c) and abs(c) > 10.0]
-        if marked:
-            print(f"[reverberation] ★ 曲率が 10% を超えたバンド"
-                  f"（{' / '.join(marked)}）は減衰が直線でないので"
-                  f"そのまま信用しないこと。よくある原因:")
-            print("[reverberation]   ・最大反射回数 nref の不足で後部残響が切れている"
-                  "（procedure.py が別途エネルギーで判定して警告する）")
-            print("[reverberation]   ・音場が拡散していない。小さい室・平行面・"
-                  "面ごとに吸音率が大きく違う場合は、**減衰が本当に 2 段階になる**ので"
-                  "曲率が出るのが正しい（EDT と T30 の差にも表れる）")
+        deepest = min((db_end for _, db_end in measures.values()), default=DB_MIN)
+        _print_quality_note(base["frequencies"], base["curvature"],
+                            base["nonlinearity"], base["floor_db"], deepest)
 
     return {"frequencies": base["frequencies"], "time": base["time"],
             "decay": base["decay"], "measures": values,
-            "curvature": base["curvature"]}
+            "nonlinearity": nonlinearity, "fit": fits,
+            "curvature": base["curvature"], "floor_db": base["floor_db"],
+            "fit_method": fit}
+
+
+# インパルス応答の立ち上がりとみなすレベル（ピークからの差 [dB]）。ISO 3382-1
+ONSET_THRESHOLD_DB = -20.0
+
+
+def _onset_index(energy, threshold_db=ONSET_THRESHOLD_DB):
+    """**インパルス応答の立ち上がり**の添字（ISO 3382-1）。
+
+    ピークより `threshold_db` 低いレベルを**最初に超える**点。
+    探すのはピークまでの範囲だけ（後ろの残響に同じレベルの点があっても拾わない）。
+    """
+    energy = np.asarray(energy, dtype=float)
+    peak = int(np.argmax(energy))
+    if energy[peak] <= 0.0:
+        return 0
+    threshold = energy[peak] * 10.0 ** (threshold_db / 10.0)
+    above = np.nonzero(energy[:peak + 1] >= threshold)[0]
+    return int(above[0]) if len(above) else peak
 
 
 def clarity_measures(time, ir, frequencies=None, method="butter",
@@ -519,7 +725,18 @@ def clarity_measures(time, ir, frequencies=None, method="butter",
 
     **時刻の起点は直接音の到来時刻**にする（音源から受音点までの伝搬時間ぶん、
     インパルス応答の先頭には無音がある。そこを含めると 50 ms の窓がずれる）。
-    ここでは各バンドで**エネルギーが最大になる時刻**を直接音とみなす。
+
+    ★**起点は「ピークより 20 dB 低いレベルを最初に超える点」**（ISO 3382-1。
+      2026-09-05 に変更）。以前は各バンドで**エネルギーが最大になる時刻**（`argmax`）を
+      直接音としていたが、これには 2 つの問題があった。
+
+      1. 強い初期反射が直接音より大きいと、起点がその反射まで飛ぶ
+      2. **帯域フィルタを通すと直接音のパルスが時間的に広がる**ので、
+         低域では `argmax` が真の立ち上がりより**あと**に来る。63 Hz では
+         フィルタの応答自体が数十 ms に及び、50 ms の窓が構造的にずれて
+         **C50 / D50 が系統的に大きく出ていた**
+
+      探すのはピークまでの範囲だけ（「最初に超える」の意味）。
 
     戻り値: dict  'frequencies' / 'C50' / 'C80' / 'D50' / 'Ts' 各 (nf,)
     """
@@ -540,8 +757,8 @@ def clarity_measures(time, ir, frequencies=None, method="butter",
         if total <= 0.0:
             continue
 
-        # 直接音の到来時刻を起点にする
-        start = int(np.argmax(energy))
+        # 直接音の到来時刻を起点にする（ISO 3382-1：ピークより 20 dB 低い点）
+        start = _onset_index(energy)
         energy = energy[start:]
         t = time[start:] - time[start]
         total = energy.sum()
@@ -572,9 +789,23 @@ def write_clarity_measures(filename, result):
 
 
 def write_decay_measures(filename, result):
-    """EDT / T20 / T30 を CSV に保存する。**周波数は横**（table.py の共通ルール）。"""
+    """EDT / T20 / T30 を CSV に保存する。**周波数は横**（table.py の共通ルール）。
+
+    ★**適合の質も一緒に書く**（2026-09-05）。ISO 3382 の回帰にすると
+    決定係数が手に入るので、`ξ = 1000(1-r²)`（ISO 3382-2 の非線形性）を
+    指標ごとに並べ、曲率 C と「減衰が実際にどこまで下がったか」も添える。
+    **どのバンドを読んでよいかを、警告文ではなく数値で残す**ため。
+
+    区分付きの表（`table.write_sectioned_table`）にはしない。
+    `summary.py` が行の名前で拾う形になっており、行を足すだけなら
+    まとめ表の側に手を入れずに済むため（読み手にとっても 1 行 1 指標のまま）。
+    """
     rows = {f"{name}_s": values for name, values in result["measures"].items()}
+    for name, values in result.get("nonlinearity", {}).items():
+        rows[f"{name}_xi"] = values
     rows["curvature_percent"] = result["curvature"]
+    if result.get("floor_db") is not None:
+        rows["decay_floor_db"] = result["floor_db"]
     return tb.write_frequency_table(filename, result["frequencies"], rows)
 
 
@@ -628,13 +859,16 @@ def write_decay_curve(filename, result, interval=DECAY_CSV_INTERVAL):
 
 def reverberation_time(time, ir, rt_filename=None, decay_filename=None,
                        frequencies=None, measures=None, method="butter",
-                       band_width=ab.BAND_WIDTH_OCTAVE, verbose=True):
+                       band_width=ab.BAND_WIDTH_OCTAVE,
+                       fit=DEFAULT_DECAY_FIT, verbose=True):
     """残響指標（EDT / T20 / T30）の算出と保存をまとめて行う。
 
     measures を渡せば評価区間を変えられる（既定は `DECAY_MEASURES`）。
+    fit を渡せば読み取り方を変えられる（既定は ISO 3382 の最小二乗回帰）。
     """
     result = decay_measures(time, ir, frequencies=frequencies, measures=measures,
-                            method=method, verbose=verbose, band_width=band_width)
+                            method=method, verbose=verbose, band_width=band_width,
+                            fit=fit)
     if rt_filename is not None:
         write_reverberation_time(rt_filename, result)
         if verbose:

@@ -961,11 +961,29 @@ Python には scipy があるので、そこは既存ライブラリに任せる
 
 ```python
 reverberation_time(time, ir, rt_filename=None, decay_filename=None,
-                   frequencies=None, db_max=-5.0, db_min=-35.0, numtaps=4096) -> dict
+                   frequencies=None, measures=None, method="butter",
+                   band_width="1/1", fit="least_squares") -> dict
 decay_curves(...) -> dict          # 保存なし
-bandpass(signal, numtaps, lower, upper) -> ndarray
+decay_measures(...) -> dict        # EDT / T20 / T30 をまとめて
+curvature_percent(decay_db, dt, fit=...) -> float   # ISO 3382 の C
+octave_bandpass(signal, centre_frequency, sampling_frequency, ...) -> ndarray
 schroeder_integral(x) -> ndarray
 ```
+
+**★減衰曲線の読み取りは ISO 3382 の最小二乗回帰**（2026-09-05）。
+評価区間の全サンプルへ直線を当て、傾き a から `T = -60/a` を求める。
+
+`fit='crossing'` を渡すと、**開始 dB と終了 dB を横切る 2 点の時刻差**という
+元コード（`ipls2rt_fortran.f90` 134 行）のやり方になる。**参照実装として残してある**
+（このリポジトリの流儀。元 Fortran との一致確認に使う）。ISO 準拠の数字には使わないこと。
+
+| 減衰の形 | 回帰と 2 点法の差 |
+|---|---|
+| まっすぐ（合成した指数減衰） | 1 % 未満。**それ以前の数字が的外れだった訳ではない** |
+| 曲がっている（`test.dxf` の 125 Hz） | **35.7 %**（0.135 s → 0.184 s） |
+
+回帰にした実利は**適合の良し悪しが数値で出る**こと。
+`ξ = 1000(1-r²)`（ISO 3382-2 の非線形性）が指標ごとに手に入る。
 
 **`decay_measures()` が EDT / T20 / T30 を一度に返す**（2026-08-14）。
 60 dB 減を厳密に見ることは実務でほとんど無く、減衰の直線部分を測って外挿するため。
@@ -978,8 +996,25 @@ schroeder_integral(x) -> ndarray
 
 減衰曲線は 1 回だけ作って評価区間を変えて読み取るので、`decay_curves` を 3 回呼ぶより速い。
 戻り値の dict は `frequencies` / `time` / `decay` (nf, n) [dB] /
-`measures` {名前: (nf,)} / `curvature` (nf,) [%]。
+`measures` {名前: (nf,)} / `nonlinearity` {名前: (nf,)} ξ /
+`fit` {名前: [適合の情報]} / `curvature` (nf,) [%] / `floor_db` (nf,) / `fit_method`。
 `measures` 引数に `{名前: (開始dB, 終了dB)}` を渡せば評価区間を変えられる。
+
+**★曲率は ISO 3382 の C = (T30/T20 - 1)×100**（2026-09-05 に修正）。
+それ以前は「評価区間を半分にした値との食い違い」（-5〜-20 dB）を曲率と呼んでいたが、
+これは ISO の C ではなく、実測で**偽警報**を出していた
+（`test.dxf` の 2 kHz で ISO の C が +0.4 % なのに -11.8 % と出た）。
+★C は**残響時間をどの区間で読んだかに依らない**（減衰曲線そのものの性質）ので、
+`db_max` / `db_min` を変えても T20・T30 の区間で測る。
+
+**★ISO 3382 の余裕**：評価区間の下端よりさらに 10 dB 下（T30 なら -45 dB）まで
+減衰が見えていることを求める。実測では暗騒音の話だが、シミュレーションでは
+**反射回数の打ち切り**と**インパルス応答長の打ち切り**が同じ役目の床を作る。
+届いていないバンドは端末に知らせ、`decay_floor_db` として CSV にも残す。
+
+CSV（`rt.csv`）の行は `EDT_s` / `T20_s` / `T30_s` / `EDT_xi` / `T20_xi` / `T30_xi` /
+`curvature_percent` / `decay_floor_db`。**区分付きの表にはしていない**——
+`summary.py` が行の名前で拾う形なので、行を足すだけならまとめ表に手を入れずに済む。
 
 **元コードとの相違点：巡回畳み込みの自作 FIR → Butterworth（scipy）** ★重要
 
@@ -2043,7 +2078,18 @@ openpyxl が無い環境では Excel だけ作れずに済む（CSV は書ける
 
 **時刻の起点は直接音の到来時刻**にする。音源から受音点までの伝搬時間ぶん、
 インパルス応答の先頭には無音があり、そこを含めると 50 ms の窓がずれるため。
-各バンドでエネルギーが最大になる時刻を直接音とみなしている。
+
+★**起点は「ピークより 20 dB 低いレベルを最初に超える点」**（ISO 3382-1。
+`_onset_index`。2026-09-05 に変更）。それ以前は各バンドで**エネルギーが最大になる時刻**
+（`argmax`）を直接音としていたが、2 つの問題があった。
+
+1. 強い初期反射が直接音より大きいと、起点がその反射まで飛ぶ
+2. **帯域フィルタを通すと直接音のパルスが時間的に広がる**ので、低域では `argmax` が
+   真の立ち上がりより**あと**に来る
+
+`test.dxf` の実測で、起点は 63 Hz が 18.6 ms → 3.4 ms、125 Hz が 44.1 ms → 1.4 ms へ動き、
+**C50 が 63 Hz で 17.1 dB、125 Hz で 9.0 dB 下がった**（それまで過大に出ていた）。
+500 Hz 以上は 0.4〜1.1 dB の差にとどまる。
 
 ### read_dxffile.check_model() ― 作図ミスの自動チェック（B-10）
 

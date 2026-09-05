@@ -471,14 +471,177 @@ def test_reverberation():
     measures = rv.decay_measures(t, ir, verbose=False)["measures"]
     check("EDT / T20 / T30 が揃って出る",
           set(measures) == {"EDT", "T20", "T30"}, str(sorted(measures)))
+
+    # ★1 つの雑音実現だけで見ない（2026-09-05）。
+    #   評価区間が短いほど BT 積が小さく、実現ごとに数 % 〜十数 % ぶれる。
+    #   EDT（0〜-10 dB）はとくにばらつくので、**実現を変えて平均**して偏りを見る。
+    #   これは推定量の性質（ISO 3382 でも BT 積が小さい条件は不確かさが増すとされる）
+    #   であって実装の誤りではない。1 実現の閾値を通すだけの試験は運任せになる
+    tolerance = {"EDT": 0.06, "T20": 0.03, "T30": 0.02}
     for name in ("EDT", "T20", "T30"):
-        err = np.abs(measures[name] - 0.5) / 0.5
+        gathered = []
+        for seed in range(8):
+            noise = np.random.default_rng(seed).standard_normal(nn)
+            gathered.append(rv.decay_measures(t, noise * np.exp(-t / tau),
+                                              verbose=False)["measures"][name])
+        mean = float(np.nanmean(np.array(gathered)))
         # 指数減衰なら EDT も T20 も T30 も同じ値になるはず
-        check(f"{name} が理論 T60 = 0.5 s を再現", np.nanmedian(err) < 0.06,
-              f"中央値 {np.nanmedian(err) * 100:.2f} % "
-              f"（{np.nanmin(measures[name]):.3f}〜{np.nanmax(measures[name]):.3f} s）")
+        check(f"{name} が理論 T60 = 0.5 s を再現（8 実現 × 8 バンドの平均）",
+              abs(mean / 0.5 - 1.0) < tolerance[name],
+              f"平均 {mean:.4f} s / 理論 0.5000 s（誤差 {(mean / 0.5 - 1) * 100:+.2f} %、"
+              f"許容 {tolerance[name] * 100:.0f} %）")
     check("直線減衰なら曲率がほぼ 0",
           np.nanmedian(np.abs(rv.decay_measures(t, ir, verbose=False)["curvature"])) < 10.0)
+
+
+# ------------------------------------------- 減衰曲線の読み取り（ISO 3382 準拠）
+def test_iso3382_decay():
+    print("\n[9b] 減衰曲線の読み取り（ISO 3382 の最小二乗回帰）")
+    fs = 44100.0
+    dt = 1.0 / fs
+
+    # ---- 雑音のない理想の減衰曲線。回帰は解析解と厳密に一致するはず ----
+    for want in (0.3, 0.8, 2.0):
+        n = int(fs * want * 1.5)
+        t = dt * np.arange(n)
+        decay = -60.0 * t / want                      # まっすぐ 60 dB/T で下がる
+        got, info = rv._decay_time(decay, dt, -5.0, -35.0, detail=True)
+        check(f"直線の減衰曲線から T30 = {want} s を厳密に再現",
+              abs(got - want) < 1e-9,
+              f"{got:.9f} s / 傾き {info['slope_db_per_s']:.4f} dB/s / "
+              f"r2 = {info['r2']:.6f}")
+        check(f"  適合の情報が揃う（区間 {info['range_db']}）",
+              info["samples"] > 100 and info["xi"] < 1e-6 and info["fit"] == "least_squares",
+              f"点数 {info['samples']} / ξ = {info['xi']:.3e}")
+
+    # ---- 2 点法は参照実装として残っている（元コード 134 行）----
+    n = int(fs * 1.5)
+    t = dt * np.arange(n)
+    decay = -60.0 * t / 1.0
+    crossing = rv._decay_time(decay, dt, -5.0, -35.0, fit="crossing")
+    check("★2 点法（fit='crossing'）が参照実装として残っている",
+          abs(crossing - 1.0) < 1e-3, f"{crossing:.6f} s")
+    check("直線なら回帰と 2 点法は一致する",
+          abs(crossing - rv._decay_time(decay, dt, -5.0, -35.0)) < 1e-3)
+    check("既定は ISO 3382 の最小二乗回帰",
+          rv.DEFAULT_DECAY_FIT == "least_squares", rv.DEFAULT_DECAY_FIT)
+    try:
+        rv._decay_time(decay, dt, -5.0, -35.0, fit="unknown")
+        ok = False
+    except ValueError:
+        ok = True
+    check("知らない読み取り方は理由を告げて止まる", ok)
+
+    # ---- 曲がった減衰（非拡散室で普通に起きる）では両者がずれる ----
+    # 二重勾配：速い減衰と遅い減衰の和。エネルギーで作って dB に直す
+    t2 = dt * np.arange(int(fs * 4.0))
+    fast = 10.0 ** (-60.0 * t2 / 0.4 / 10.0)
+    slow = 0.02 * 10.0 ** (-60.0 * t2 / 1.6 / 10.0)
+    bent = 10.0 * np.log10(fast + slow)
+    lsq = rv._decay_time(bent, dt, -5.0, -35.0)
+    two = rv._decay_time(bent, dt, -5.0, -35.0, fit="crossing")
+    check("★二重勾配では回帰と 2 点法が食い違う（規格が回帰を求める理由）",
+          abs(lsq / two - 1.0) > 0.02,
+          f"回帰 {lsq:.4f} s / 2 点法 {two:.4f} s（差 {(lsq / two - 1) * 100:+.1f} %）")
+    _, info = rv._decay_time(bent, dt, -5.0, -35.0, detail=True)
+    check("★曲がっていれば非線形性 ξ が大きく出る（ISO 3382-2）",
+          info["xi"] > rv.NONLINEARITY_LIMIT,
+          f"ξ = {info['xi']:.1f} / r2 = {info['r2']:.4f}（限度 {rv.NONLINEARITY_LIMIT}）")
+    straight = rv._decay_time(decay, dt, -5.0, -35.0, detail=True)[1]
+    check("まっすぐなら ξ はほぼ 0", straight["xi"] < 1e-6,
+          f"ξ = {straight['xi']:.3e}")
+
+    # ---- 曲率は ISO の C = (T30/T20 - 1)×100 ----
+    t20 = rv._decay_time(bent, dt, -5.0, -25.0)
+    t30 = rv._decay_time(bent, dt, -5.0, -35.0)
+    check("★曲率 C = (T30/T20 - 1)×100（ISO 3382 の定義）",
+          abs(rv.curvature_percent(bent, dt) - (t30 / t20 - 1.0) * 100.0) < 1e-9,
+          f"C = {rv.curvature_percent(bent, dt):+.2f} %")
+    check("まっすぐなら曲率はほぼ 0", abs(rv.curvature_percent(decay, dt)) < 1e-6,
+          f"{rv.curvature_percent(decay, dt):+.3e} %")
+    # ★曲率は「どの区間で残響時間を読んだか」に依らない。
+    #   2026-09-05 より前は評価区間を半分にした値との食い違いを曲率と呼んでいたので、
+    #   db_max / db_min を変えると曲率まで変わっていた
+    rng0 = np.random.default_rng(5)
+    nn0 = 2 ** 16
+    tt0 = dt * np.arange(nn0)
+    ir0 = rng0.standard_normal(nn0) * np.exp(-tt0 / (0.4 / 6.907755))
+    c30 = rv.decay_curves(tt0, ir0, verbose=False)["curvature"]
+    c20 = rv.decay_curves(tt0, ir0, db_max=-5.0, db_min=-25.0,
+                          verbose=False)["curvature"]
+    check("★曲率は残響時間を読んだ区間に依らない（曲線そのものの性質）",
+          np.allclose(c30, c20, equal_nan=True),
+          f"T30 の呼び出し {np.round(c30, 2)} / T20 の呼び出し {np.round(c20, 2)}")
+
+    # ---- 減衰していない／届かない曲線は NaN（黙って変な値を返さない）----
+    check("評価区間に届かなければ NaN",
+          np.isnan(rv._decay_time(-2.0 * np.ones(1000), dt, -5.0, -35.0)))
+    rising = np.linspace(0.0, -40.0, 1000)
+    rising[500:] = -40.0 + np.linspace(0.0, 5.0, 500)   # 途中から上がる
+    check("減衰が単調でなくても落ちない（値か NaN を返す）",
+          np.isfinite(rv._decay_time(rising, dt, -5.0, -35.0))
+          or np.isnan(rv._decay_time(rising, dt, -5.0, -35.0)))
+
+    # ---- ISO 3382 の余裕（評価区間の下端よりさらに 10 dB）----
+    check("余裕は 10 dB（T30 なら -45 dB まで見えていること）",
+          rv.DECAY_MARGIN_DB == 10.0, f"{rv.DECAY_MARGIN_DB} dB")
+    shallow = -60.0 * t / 1.0
+    shallow = np.maximum(shallow, -38.0)               # -38 dB で床に当たる
+    check("減衰の底が分かる（余裕の判定に使う）",
+          abs(rv._decay_floor_db(shallow) + 38.0) < 1e-9,
+          f"{rv._decay_floor_db(shallow):.2f} dB")
+
+    # ---- 出力に適合の質が載る ----
+    rng = np.random.default_rng(0)
+    nn = 2 ** 17
+    tt = dt * np.arange(nn)
+    ir = rng.standard_normal(nn) * np.exp(-tt / (0.5 / 6.907755))
+    result = rv.decay_measures(tt, ir, verbose=False)
+    check("結果に非線形性 ξ が指標ごとに入る",
+          set(result["nonlinearity"]) == {"EDT", "T20", "T30"},
+          str(sorted(result["nonlinearity"])))
+    check("結果に減衰の底が入る", np.all(result["floor_db"] < -35.0),
+          f"{np.round(result['floor_db'], 1)}")
+    check("結果に使った読み取り方が入る", result["fit_method"] == "least_squares")
+    info = result["fit"]["T30"][3]
+    check("適合の情報に使った区間（dB と秒）が入る",
+          info["range_db"] == (-5.0, -35.0) and info["range_s"][1] > info["range_s"][0],
+          f"{info['range_db']} dB / {info['range_s'][0]:.3f}〜{info['range_s'][1]:.3f} s")
+
+    import tempfile
+    import table as tb
+    with tempfile.TemporaryDirectory() as folder:
+        path = os.path.join(folder, "rt.csv")
+        rv.write_decay_measures(path, result)
+        freq, rows = tb.read_frequency_table(path)
+        check("CSV に ξ・曲率・減衰の底が載る",
+              {"T30_s", "T30_xi", "curvature_percent", "decay_floor_db"} <= set(rows),
+              str(sorted(rows)))
+        check("まとめ表が拾う行名は変わっていない（summary.py の互換）",
+              {"EDT_s", "T20_s", "T30_s"} <= set(rows))
+
+    # ---- 明瞭度の起点は「ピークより 20 dB 低い点」（ISO 3382-1）----
+    energy = np.zeros(1000)
+    energy[100] = 0.001          # 立ち上がり（ピークの -30 dB）
+    energy[150] = 0.02           # ピークの -17 dB → ここが起点
+    energy[200] = 1.0            # ピーク
+    check("★起点はピークより 20 dB 低いレベルを最初に超える点（ISO 3382-1）",
+          rv._onset_index(energy) == 150, f"添字 {rv._onset_index(energy)}")
+    check("  ピーク以降の同じレベルは拾わない",
+          rv._onset_index(np.concatenate([energy, energy])) == 150)
+    check("  しきい値は -20 dB", rv.ONSET_THRESHOLD_DB == -20.0)
+    check("全部 0 なら先頭を返す（落ちない）", rv._onset_index(np.zeros(10)) == 0)
+
+    # 直接音より強い初期反射があっても、起点は直接音のまま
+    n = int(fs * 0.5)
+    pulse = np.zeros(n)
+    pulse[int(fs * 0.010)] = 1.0        # 直接音
+    pulse[int(fs * 0.030)] = 3.0        # 強い初期反射（直接音より大きい）
+    onset = rv._onset_index(pulse ** 2)
+    check("★強い初期反射があっても起点は直接音（argmax だと反射へ飛ぶ）",
+          onset == int(fs * 0.010),
+          f"起点 {onset / fs * 1000:.1f} ms / argmax は "
+          f"{int(np.argmax(pulse ** 2)) / fs * 1000:.1f} ms")
 
 
 # ---------------------------------------------------------------- 統計残響式
@@ -4515,6 +4678,7 @@ def main():
     for fn in (test_read_dxf, test_soundray_generator, test_energy_decay,
                test_backtrace, test_image_sources, test_vectorised_geometry,
                test_atmosphere, test_absorption, test_impulse, test_reverberation,
+               test_iso3382_decay,
                test_statistical_reverberation, test_ray_log,
                test_normals, test_check_model, test_clarity,
                test_project, test_resample, test_direction, test_modes,

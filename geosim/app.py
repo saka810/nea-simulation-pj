@@ -196,7 +196,9 @@ def _report_saved(project):
     else:
         # CSV の列名はそのままだと読みにくいので短くする
         short = {"EDT_s": "EDT", "T20_s": "T20", "T30_s": "T30",
-                 "curvature_percent": "曲率%", "sabine_s": "Sabine",
+                 "EDT_xi": "ξ(EDT)", "T20_xi": "ξ(T20)", "T30_xi": "ξ(T30)",
+                 "curvature_percent": "曲率%", "decay_floor_db": "減衰の底 dB",
+                 "sabine_s": "Sabine",
                  "eyring_s": "Eyring", "eyring_knudsen_s": "Eyring-Knudsen"}
         rows = dict(rt["rows"])
         if stat is not None:
@@ -232,6 +234,9 @@ def _report(project, results):
     if rt is not None:
         # **周波数は横**（table.py の共通ルール）。CSV・図と向きを揃える
         rows = dict(rt["measures"])
+        # ★適合の質も並べる（ISO 3382-2 の非線形性 ξ = 1000(1-r²)）。2026-09-05
+        for name, values in rt.get("nonlinearity", {}).items():
+            rows[f"ξ({name})"] = values
         rows["曲率%"] = rt["curvature"]
         if stat is not None:
             for key, label in rv.STATISTICAL_LABELS.items():
