@@ -1752,17 +1752,23 @@ def test_redraw():
 
     # ★置き場の約束（2026-08-21 に変更）。受音点ごとは `結果/recN/` `図/recN/`、
     #   受音点に依らないもの（統計残響式・材料別面積・音線軌跡）は `結果/` 直下
+    #
+    # ★名前に `現状` が入るのは 2026-09-06 の判断（不具合報告 WIN240377 の ②）。
+    #   条件シートを選ばなくても、計算は条件表の先頭シート（`現状`）の材料を使うので、
+    #   その名前を結果に残す。`_経路.npz` は条件に依らないので付かない
     rec1_results = project.path(pj.RESULT_DIR, pj.RECEIVER_DIR % 1)
     rec1_figures = project.path(pj.FIGURE_DIR, pj.RECEIVER_DIR % 1)
     check("受音点ごとの結果は 結果/rec1/ に入る",
-          os.path.isfile(os.path.join(rec1_results, "研修室_条件A_rt.csv")),
+          os.path.isfile(os.path.join(rec1_results, "研修室_条件A_現状_rt.csv")),
           str(sorted(os.listdir(rec1_results))))
     check("受音点に依らない結果は 結果/ 直下に入る",
-          os.path.isfile(project.path(pj.RESULT_DIR, "研修室_条件A_吸音率と理論値.csv")),
+          os.path.isfile(project.path(pj.RESULT_DIR,
+                                      "研修室_条件A_現状_吸音率と理論値.csv")),
           str(sorted(os.listdir(project.path(pj.RESULT_DIR)))))
     check("受音点ごとの図は 図/rec1/ に入る", os.path.isdir(rec1_figures))
     check("まとめ表が作られる",
-          os.path.isfile(project.path(pj.RESULT_DIR, "研修室_条件A_まとめ_残響時間.csv")))
+          os.path.isfile(project.path(pj.RESULT_DIR,
+                                      "研修室_条件A_現状_まとめ_残響時間.csv")))
     # ★ファイル名の頭に対象室＋条件名が入る（報告書に出しても見分けが付くように）
     check("★結果ファイルすべてに対象室＋条件名が付く",
           all(n.startswith("研修室_条件A_") for n in os.listdir(rec1_results)),
@@ -2287,6 +2293,18 @@ def test_shared_trace_and_batch_backtrace():
 
 
 # -------------------------------------------- 結果ファイルの名前と室のまとめ
+def _make_condition_book(path, sheets):
+    """条件表の骨だけの xlsx を作る（シート名だけ見るテスト用）。"""
+    from openpyxl import Workbook
+    book = Workbook()
+    book.remove(book.active)
+    book.create_sheet("吸音率")           # RESERVED_SHEETS。条件には数えない
+    for name in sheets:
+        book.create_sheet(name)
+    book.save(path)
+    return path
+
+
 def test_result_naming():
     print("\n[30] 結果ファイルの名前（対象室＋条件名）と『吸音率と理論値』")
     import csv
@@ -2317,6 +2335,63 @@ def test_result_naming():
     check("図にも頭が付く",
           os.path.basename(project.figure_path("decay.png"))
           == "視聴覚室_残響改善案_decay.png")
+
+    # ---- ★条件シート未指定でも、実際に使うシート名を条件名にする ----
+    #
+    # 2026-09-06 ユーザー判断（不具合報告 WIN240377 の ②）。
+    # `condition_table.sheet_of()` は指定が無ければ**先頭シート**を使うので、
+    # 「シートを選ばずに計算」しても材料はそのシートのもの。
+    # 名前を空にすると、どの条件で計算したかが結果に残らない。
+    import condition_table as ct
+
+    named = tempfile.mkdtemp(prefix="geosim_sheet_")
+    try:
+        book_path = os.path.join(named, pj.DEFAULT_CONDITION_FILE)
+        _make_condition_book(book_path, ["現状", "改修案"])
+        blank = pj.Project(named, name="室")
+        check("★シート未指定なら条件表の先頭シート名が条件名になる",
+              blank.condition_label == "現状",
+              f"{blank.prefixed('rt.csv')}")
+        chosen = pj.Project(named, name="室")
+        chosen.condition_sheet = "改修案"
+        check("  明示したシートが優先される",
+              chosen.condition_label == "改修案", chosen.prefixed("rt.csv"))
+        check("  条件表が無ければ条件名は空のまま",
+              pj.Project(tempfile.mkdtemp(), name="室").condition_label == "",
+              "（条件を分けていないので付けない）")
+
+        # ★答えを凍結する。計算の**途中**で条件表が作られるので、
+        #   引き直すと同じ 1 回の実行の中でファイル名が変わってしまう
+        late = tempfile.mkdtemp(prefix="geosim_late_")
+        frozen = pj.Project(late, name="室")
+        check("計算の頭では条件表が無い → 条件名なし", frozen.condition_label == "")
+        _make_condition_book(os.path.join(late, pj.DEFAULT_CONDITION_FILE),
+                             ["現状"])
+        check("★途中で条件表ができても、その実行の中では名前が変わらない",
+              frozen.condition_label == "",
+              f"{frozen.prefixed('rt.csv')}（凍結）")
+        check("  次に作った Project では新しい名前になる",
+              pj.Project(late, name="室").condition_label == "現状")
+
+        # ---- 昔の名前を残さない ----
+        folder2 = os.path.join(named, "結果")
+        os.makedirs(folder2, exist_ok=True)
+        for name in ("室_まとめ_音圧レベル.csv", "まとめ_音圧レベル.csv",
+                     "室_現状_まとめ_音圧レベル.csv"):
+            with open(os.path.join(folder2, name), "w", encoding="utf-8") as f:
+                f.write("x")
+        removed = blank.drop_old_names(folder2, "まとめ_音圧レベル.csv")
+        left = sorted(os.listdir(folder2))
+        check("★昔の名前のまとめ表は消す（どちらが最新か分からなくなるため）",
+              left == ["室_現状_まとめ_音圧レベル.csv"], f"残り {left}")
+        check("  消した名前を返す", sorted(removed)
+              == ["まとめ_音圧レベル.csv", "室_まとめ_音圧レベル.csv"], str(removed))
+        check("  いま書く名前は消さない",
+              os.path.exists(os.path.join(folder2, "室_現状_まとめ_音圧レベル.csv")))
+        check("  無ければ何もしない（落ちない）",
+              blank.drop_old_names(folder2, "無い表.csv") == [])
+    finally:
+        shutil.rmtree(named, ignore_errors=True)
 
     # ---- 昔の名前も読める（頭を付ける前・1 枚にまとめる前のプロジェクト）----
     project.ensure_dirs()
@@ -2870,8 +2945,9 @@ def test_workbook():
     # ---- ★CSV は残っている（役割を分ける）----
     rec1 = project.path(pj.RESULT_DIR, pj.RECEIVER_DIR % 1)
     check("★CSV は今のまま残す（逐次読み込み・描き直しに使う）",
-          os.path.isfile(os.path.join(rec1, "エクセル室_条件A_rt.csv"))
-          and os.path.isfile(os.path.join(rec1, "エクセル室_条件A_spl.csv")),
+          os.path.isfile(os.path.join(rec1, "エクセル室_条件A_現状_rt.csv"))
+          and os.path.isfile(os.path.join(rec1,
+                                          "エクセル室_条件A_現状_spl.csv")),
           str(sorted(os.listdir(rec1))))
 
     # ---- 雛形に流し込む（体裁を残す）----
@@ -4269,6 +4345,54 @@ def test_hemi_anechoic():
           and iq.trace_label("rec2") == "短辺稜線方向"
           and iq.trace_label("rec3") == "長辺稜線方向"
           and iq.trace_label("rec9") == "rec9")
+
+    # ---- ⑦a まとめ表は「条件名なし」で書かれていても読める ----
+    #
+    # ★2026-09-06 の不具合報告（WIN240377）。条件を選ばずに計算すると
+    #   `run_project` は `<室>_まとめ_音圧レベル.csv` を書くのに、
+    #   `inverse_square.main()` は条件表のシートを数え上げて `condition_sheet` を
+    #   自分で立てるため、読む側だけ `<室>_<条件>_まとめ_…` を探して
+    #   **「先に計算してください」で止まっていた**。
+    #   `read_levels()` が `prefixed()` で 1 通りしか組んでいなかったのが原因で、
+    #   すぐ上の `read_points()`（`existing_result_path`）と流儀が割れていた。
+    import shutil
+    import tempfile
+
+    import project as pj_
+    import summary as sm_
+    import table as tb_
+
+    folder = tempfile.mkdtemp()
+    try:
+        shutil.copy(TEST_DXF, os.path.join(folder, "室.dxf"))
+        os.makedirs(os.path.join(folder, pj_.RESULT_DIR), exist_ok=True)
+        written = pj_.Project(folder, dxf="室.dxf")          # 条件シートなし
+        check("条件を選ばなければファイル名に条件名は付かない",
+              written.prefixed(sm_.LEVEL_FILE) == f"室_{sm_.LEVEL_FILE}",
+              written.prefixed(sm_.LEVEL_FILE))
+        tb_.write_sectioned_table(
+            os.path.join(folder, pj_.RESULT_DIR,
+                         written.prefixed(sm_.LEVEL_FILE)),
+            np.array([500.0, 1000.0]),
+            [("rec1", "Lp_dB", "2.0", np.array([80.0, 81.0]))],
+            value_label="音源距離_m")
+
+        reader = pj_.Project(folder, dxf="室.dxf")
+        reader.condition_sheet = "現状"                       # 読む側だけ条件名が立つ
+        check("★条件名なしで書かれたまとめ表を、条件名つきの側から読める",
+              iq.read_levels(reader)[0] is not None,
+              f"探す名前: {reader.name_candidates(sm_.LEVEL_FILE)}")
+        frequencies, levels = iq.read_levels(reader)
+        check("  中身も読めている（周波数と受音点）",
+              frequencies is not None and len(frequencies) == 2
+              and "rec1" in levels, str(sorted(levels)))
+        check("  条件名つきで書いた場合はそちらを優先する",
+              iq.read_levels(written)[0] is not None)
+        missing = pj_.Project(tempfile.mkdtemp(), dxf="無い.dxf")
+        check("  本当に無ければ None を返す（黙って落ちない）",
+              iq.read_levels(missing) == (None, {}))
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
     # ★半自由音場（Q=2）の理論線：逆二乗どおりに 6 dB/倍距離で落ちる
     theory = iq.free_field_levels(np.array([1.0, 2.0, 4.0]))
     check("★半自由音場の理論線は 6 dB/倍距離",

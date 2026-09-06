@@ -192,6 +192,7 @@ def write_reverberation_summary(project, verbose=True):
     path = os.path.join(project.folder, pj.RESULT_DIR,
                         project.prefixed(REVERBERATION_FILE))
     _write(path, frequencies, records)
+    project.drop_old_names(os.path.dirname(path), REVERBERATION_FILE)
     if verbose:
         print(f"[まとめ] 残響時間（{len(folders)} 点 ＋ 平均 ＋ 理論値）: {path}")
     return path
@@ -226,6 +227,7 @@ def write_clarity_summary(project, verbose=True):
     path = os.path.join(project.folder, pj.RESULT_DIR,
                         project.prefixed(CLARITY_FILE))
     _write(path, frequencies, records)
+    project.drop_old_names(os.path.dirname(path), CLARITY_FILE)
     if verbose:
         print(f"[まとめ] 明瞭度（{len(folders)} 点 ＋ 平均）: {path}")
     return path
@@ -283,6 +285,7 @@ def write_level_summary(project, verbose=True):
     path = os.path.join(project.folder, pj.RESULT_DIR,
                         project.prefixed(LEVEL_FILE))
     _write(path, frequencies, records, extra_label="音源距離_m")
+    project.drop_old_names(os.path.dirname(path), LEVEL_FILE)
     if verbose:
         print(f"[まとめ] 音圧レベル（{len(folders)} 点 ＋ 平均）: {path}")
     return path
@@ -323,6 +326,7 @@ def write_sti_summary(project, verbose=True):
 
     path = os.path.join(project.folder, pj.RESULT_DIR, project.prefixed(STI_FILE))
     _write(path, frequencies, records, extra_label="総合")
+    project.drop_old_names(os.path.dirname(path), STI_FILE)
     if verbose:
         print(f"[まとめ] STI（{len(folders)} 点 ＋ 平均）: {path}")
     return path

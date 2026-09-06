@@ -48,8 +48,8 @@ NEA（日本環境アメニティ株式会社）のシミュレーション PJ�
 書き直したら作り直す：
 
 ```
-.venv\Scripts\python docsuild_pdf.py            # docs/*.md を全部
-.venv\Scripts\python docsuild_pdf.py 技術説明書.md   # 1 つだけ
+.venv\Scripts\python docs\build_pdf.py            # docs/*.md を全部
+.venv\Scripts\python docs\build_pdf.py 技術説明書.md   # 1 つだけ
 ```
 
 **追加のライブラリは要らない。**数式は matplotlib の mathtext で画像に焼き、
@@ -294,7 +294,7 @@ python procedure.py ..\test.dxf --absorption ..\absorption.csv --absorption-kind
 .\.venv\Scripts\python tests\test_geosim.py
 ```
 
-**829 項目**（2026-09-05 時点）。解析的に答えが分かる問題（直方体の虚音源距離、
+**844 項目**（2026-09-06 時点）。解析的に答えが分かる問題（直方体の虚音源距離、
 減衰率が既知の応答など）で数式レベルの正しさを確かめる。
 **数式に関わるコードを変更したら必ず走らせること。**
 
