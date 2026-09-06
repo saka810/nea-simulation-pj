@@ -3,6 +3,7 @@
 NEA（日本環境アメニティ株式会社）のシミュレーション PJ。
 幾何音響シミュレーション（音線法 ＋ 虚音源バックトレース）の **Fortran → Python 移植**。
 
+- **使い方（操作手順書）** … [docs/使い方マニュアル.md](docs/使い方マニュアル.md)（PDF 版 `docs/pdf/使い方マニュアル.pdf`）
 - 各モジュールの役割・Fortran との対応・実装状況 … [PROGRAM_STRUCTURE.md](PROGRAM_STRUCTURE.md)
 - 作業一覧 … [TODO.md](TODO.md)
 - 数式とフローの解説 … [docs/技術説明書.md](docs/技術説明書.md)
