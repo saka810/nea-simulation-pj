@@ -313,6 +313,7 @@ python procedure.py ..\test.dxf --absorption ..\absorption.csv --absorption-kind
 |---|---|
 | `test.dxf` | 2×3×1 m の直方体（mm 単位、音源・受音点入り、法線内向き） |
 | `test2.dxf` | 閉じたポリラインで描いた平面 9 角形 ＋ 立ち上げた壁の 2 面（開いた形状） |
+| `docs/例題/五角形の部屋.dxf` | **使い方マニュアルの例題**。五角形平面 3×4 m ×天井高 2.7 m（26.73 m³）。レイヤ 4 種・音源 1 点・受音点 3 点 |
 
 ## Git 管理外のもの
 
