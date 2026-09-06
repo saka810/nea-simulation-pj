@@ -21,6 +21,54 @@ RUN_INFO_FILE = "計算情報.csv"
 from atmosphere import Atmosphere
 
 
+def _freeze_condition_name(project, verbose=True):
+    """**この実行で使う条件名を、計算を始める前に確定させる。**
+
+    ★条件シートを選ばずに計算しても、材料は条件表の**先頭シート**のものが使われる
+      （`condition_table.sheet_of`）。名前が実態と食い違わないよう、
+      `Project.condition_label` はそのシート名へフォールバックする
+      （2026-09-06 ユーザー判断・不具合報告 WIN240377 の ②）。
+
+    ★★**ここで `condition_sheet` に焼き付けるのが肝**。条件表は計算の**途中**で
+      作られる（`_update_condition_table` は面の情報が要るので `process` のあと）。
+      焼き付けないと、同じ 1 回の実行の中で
+      「表ができる前に書いた `室_吸音率と理論値.csv`」と
+      「表ができた後に書いた `室_現状_まとめ_….csv`」が**混在する**（実際に踏んだ）。
+
+    ★**`project.json` には書き戻さない**（`save()` のあとに立てる）。
+      書き戻すと、利用者が選んでいないシート名が設定として残ってしまう。
+      受音点ごとの子プロジェクトへは `DEFAULTS` 経由でそのまま伝わる。
+    """
+    import condition_table as ct
+
+    if project.condition_sheet:
+        return
+    if _stem_is_named(project):
+        return              # 条件表のファイル名が条件名（従来どおり）
+    sheet = project._fallback_sheet()
+    if not sheet:
+        # ★条件表がまだ無い＝**この実行の中で作られる**
+        #   （`_update_condition_table` → `ct.update`。面の情報が要るので後半）。
+        #   そのとき付く名前（`ct.FIRST_SHEET`）を**先取りする**。
+        #   先取りしないと「1 回目は名前なし・2 回目から名前あり」になり、
+        #   描き直し（`--redraw`）やまとめ表の作り直しで名前が変わってしまう。
+        #   作られるシートは**そのとき実際に使った材料**を記録したものなので、
+        #   1 回目にこの名前を付けても実態と食い違わない
+        if not ct.is_book(project.condition_path):
+            return
+        sheet = ct.FIRST_SHEET
+    project.condition_sheet = sheet
+    if verbose:
+        print(f"[run] 条件シートの指定が無いので『{sheet}』として扱います"
+              f"（結果ファイル名にもこの名前が付きます）")
+
+
+def _stem_is_named(project):
+    """条件表のファイル名そのものが条件名になっているか（`条件A.xlsx` など）。"""
+    stem = os.path.splitext(os.path.basename(project.condition_path or ""))[0]
+    return bool(stem) and stem not in pj.DEFAULT_CONDITION_STEMS
+
+
 def run(project, verbose=True, make_figures=True, progress=None,
         reuse_paths=True):
     """プロジェクトの条件で計算し、結果 CSV と図を書き出す。
@@ -32,6 +80,7 @@ def run(project, verbose=True, make_figures=True, progress=None,
     """
     project.ensure_dirs()
     project.save()      # 実行した条件を必ず残す（あとで再現できるように）
+    _freeze_condition_name(project, verbose=verbose)
 
     dxf = project.dxf_path
     if not dxf or not os.path.exists(dxf):
