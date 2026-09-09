@@ -4931,6 +4931,98 @@ def test_dxf_faces():
     check("★穴のある面は輪が 2 つになる（数えて知らせるため）",
           len(loops) == 2, f"{[len(l) for l in loops]}")
 
+    # ---- ②b ★穴を開けたまま三角形に割る（2026-09-09 ユーザー指摘）----
+    #
+    # > 元々ドーナッツ状（中が空いている）の床が、一面の床になってしまっています
+    #
+    # 実案件（階段教室）の `床_1F` が**外周 367.48 m² ＋ 穴 102.27 m²** で、
+    # 本来 265.22 m² のドーナツなのに外周だけを面にしていたため、
+    # **2 層吹き抜けが幻の床で塞がっていた**（音線がそこで反射してしまう）。
+    # 穴を橋でつないで三角形に割り、3DFACE で書くようにした。
+    def _area3(triangles):
+        total = 0.0
+        for a, b, c in triangles:
+            u = np.asarray(b, float) - np.asarray(a, float)
+            v = np.asarray(c, float) - np.asarray(a, float)
+            total += float(np.linalg.norm(np.cross(u, v))) / 2.0
+        return total
+
+    ring_outer = [(0, 0, 0), (4, 0, 0), (4, 4, 0), (0, 4, 0)]
+    ring_hole = [(1, 1, 0), (1, 3, 0), (3, 3, 0), (3, 1, 0)]
+    parts = df.triangles_with_holes([ring_outer, ring_hole])
+    check("★ドーナツ状の面を三角形に割れる（穴を塞がない）",
+          parts is not None, f"{parts if parts is None else len(parts)} 枚")
+    check("  面積が「外周 − 穴」と一致する（16 − 4 = 12）",
+          abs(_area3(parts) - 12.0) < 1e-9, f"{_area3(parts):.6f}")
+
+    def _covers(triangles, point):
+        """その点を覆う三角形の数（重心座標で見る）。"""
+        found = 0
+        for a, b, c in triangles:
+            a, b, c = (np.asarray(p, float) for p in (a, b, c))
+            v0, v1, v2 = c - a, b - a, np.asarray(point, float) - a
+            d00, d01, d02 = v0 @ v0, v0 @ v1, v0 @ v2
+            d11, d12 = v1 @ v1, v1 @ v2
+            den = d00 * d11 - d01 * d01
+            if abs(den) < 1e-12:
+                continue
+            u = (d11 * d02 - d01 * d12) / den
+            w = (d00 * d12 - d01 * d02) / den
+            if u >= -1e-9 and w >= -1e-9 and u + w <= 1.0 + 1e-9:
+                found += 1
+        return found
+
+    check("★穴の中は覆われない（ここが塞がっていた）",
+          _covers(parts, (2.0, 2.0, 0.0)) == 0,
+          f"{_covers(parts, (2.0, 2.0, 0.0))} 枚")
+    check("  床の上は覆われる", _covers(parts, (0.5, 0.5, 0.0)) >= 1)
+
+    # 穴が 2 つでも通る（橋を 1 つずつ架ける）
+    two = df.triangles_with_holes([[(0, 0, 0), (6, 0, 0), (6, 3, 0), (0, 3, 0)],
+                                   [(1, 1, 0), (1, 2, 0), (2, 2, 0), (2, 1, 0)],
+                                   [(4, 1, 0), (4, 2, 0), (5, 2, 0), (5, 1, 0)]])
+    check("穴が 2 つでも割れる（18 − 1 − 1 = 16）",
+          two is not None and abs(_area3(two) - 16.0) < 1e-9,
+          "割れなかった" if two is None else f"{_area3(two):.6f}")
+
+    # ★鉛直な面（z が動く面）でも通る＝2 次元へ落とす軸の取り方が正しい
+    upright = df.triangles_with_holes(
+        [[(0, 0, 0), (0, 0, 4), (0, 4, 4), (0, 4, 0)],
+         [(0, 1, 1), (0, 1, 3), (0, 3, 3), (0, 3, 1)]])
+    check("★鉛直な面（壁の開口）でも割れる",
+          upright is not None and abs(_area3(upright) - 12.0) < 1e-9,
+          "割れなかった" if upright is None else f"{_area3(upright):.6f}")
+
+    # ★穴が外周の外にあるなど、筋の通らない形は None を返す（黙って作らない）
+    outside = df.triangles_with_holes([ring_outer,
+                                       [(9, 9, 0), (9, 10, 0), (10, 10, 0)]])
+    check("★筋の通らない形は None（面積が合わなければ穴を開けない）",
+          outside is None, str(outside if outside is None else len(outside)))
+
+    # ---- ②c 穴のある面は 3DFACE で書き、そのまま読み戻せる ----
+    with tempfile.TemporaryDirectory() as folder:
+        path = os.path.join(folder, "donut.dxf")
+        # mm 単位で書く（$INSUNITS=4）
+        big = [(0, 0, 0), (4000, 0, 0), (4000, 4000, 0), (0, 4000, 0)]
+        small = [(1000, 1000, 0), (1000, 3000, 0), (3000, 3000, 0), (3000, 1000, 0)]
+        made = df.triangles_with_holes([big, small])
+        df.write_faces_dxf(path, [], insunits=4,
+                           triangles=[("床_1F", t) for t in made])
+        model = rd_.read_model(path, verbose=False)
+        check("★3DFACE で書いた穴あきの面をそのまま読める",
+              len(model.mesh) == len(made), f"三角形 {len(model.mesh)} 枚")
+        check("  面積も一致（16 − 4 = 12 m2）",
+              abs(model.surface_area - 12.0) < 1e-6,
+              f"{model.surface_area:.6f} m2")
+        check("  レイヤ名が保たれる", set(model.layer_areas) == {"床_1F"},
+              str(sorted(model.layer_areas)))
+        # ★読み込み側の同一平面パッチが 1 枚にまとめ直す（画面では「1 枚の床」）
+        groups = rd_.coplanar_groups(
+            [tuple(f.vertexes) for f in model.mesh],
+            np.array([f.normal for f in model.mesh], dtype=float))
+        check("★読み込み側で同一平面パッチ 1 枚にまとまる（見た目は 1 枚の床）",
+              len(set(groups)) == 1, f"{len(set(groups))} パッチ")
+
     # ---- ③ 閉じない辺（欠けている）も落とさず返す ----
     broken = square[:3]
     loops = df.loops_from_edges(broken)
