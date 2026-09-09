@@ -36,6 +36,40 @@ PLANE_TOLERANCE = 1.0
 # accoreconsole を探す場所
 ACCORE_GLOB = r"C:\Program Files\Autodesk\AutoCAD *\accoreconsole.exe"
 
+# ★★**`accoreconsole` はシステムのコードページで書き出す**（日本語 Windows なら CP932）。
+#   2026-09-06 の不具合報告 ⑤ で実案件を踏んだ：UTF-8 だけで読んでいたので
+#   **日本語の画層名が全部 U+FFFD に置き換わり、そのまま出力 DXF に焼き付いていた**。
+#   画層名は吸音材の割り当てに使うので、崩れると条件表が引けない。
+#   さらに悪いのは**化け方が同じ画層が 1 つにまとめられる**ことで、
+#   実案件（階段教室）では 22 画層が 20 に減った
+#   （`PHP_階段裏`＋`PHP_階段下`、`開口_2F小`＋`開口_2F大` が統合された）。
+#   ★`errors="replace"` は**最後の手段**にする（黙って壊すのを避けるため）。
+DUMP_ENCODINGS = ("cp932", "utf-8")
+
+# 元の DXF を読むときの順。こちらは UTF-8 が普通
+# （`$DWGCODEPAGE ANSI_932` でも中身は UTF-8 のことが多い）。
+# `read_dxffile` と同じ並びにしてある
+DXF_ENCODINGS = ("utf-8", "cp932")
+
+
+def read_text(path, encodings=DUMP_ENCODINGS, label=""):
+    """テキストを、順に試して読めた文字コードで読む。
+
+    どれでも読めなければ**最後の手段**として `errors="replace"` に落とし、
+    ★黙って壊さずに理由を告げる（画層名が崩れると吸音材が引けなくなるため）。
+    """
+    with io.open(path, "rb") as handle:
+        raw = handle.read()
+    for encoding in encodings:
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    print(f"[面に分解] ★{label or os.path.basename(path)} の文字コードが分かりません"
+          f"（{' / '.join(encodings)} のどれでもありません）。"
+          f"読めない文字を置き換えて続けます。**画層名が崩れるかもしれません**")
+    return raw.decode(encodings[0], errors="replace")
+
 
 def find_accoreconsole(path=None):
     """`accoreconsole.exe` を探す。→ 場所（見つからなければ None）"""
@@ -136,22 +170,24 @@ def _run_autocad(source, dump, accore, timeout=1800, verbose=True):
 def read_dump(path):
     """AutoCAD が書いた辺の一覧を読む。→ (グループ→辺, 落ちたもの)"""
     groups, dropped = {}, []
-    with io.open(path, encoding="utf-8", errors="replace") as handle:
-        for line in handle:
-            parts = [p.strip() for p in line.strip().split(",")]
-            if not parts or parts[0] == "END":
-                continue
-            if parts[0] == "X":
-                dropped.append((parts[2] if len(parts) > 2 else "",
-                                parts[3] if len(parts) > 3 else "?"))
-                continue
-            if parts[0] != "L" or len(parts) < 9:
-                continue
-            gid, layer = int(parts[1]), parts[2]
-            first = tuple(float(v) for v in parts[3:6])
-            second = tuple(float(v) for v in parts[6:9])
-            groups.setdefault(gid, {"layer": layer, "edges": []})
-            groups[gid]["edges"].append((first, second))
+    # ★**CP932 を先に試す**（accoreconsole はシステムのコードページで書く）。
+    #   UTF-8 決め打ちだと日本語の画層名が壊れる（不具合報告 ⑤。`DUMP_ENCODINGS`）
+    text = read_text(path, DUMP_ENCODINGS, label="AutoCAD が書いた辺の一覧")
+    for line in text.splitlines():
+        parts = [p.strip() for p in line.strip().split(",")]
+        if not parts or parts[0] == "END":
+            continue
+        if parts[0] == "X":
+            dropped.append((parts[2] if len(parts) > 2 else "",
+                            parts[3] if len(parts) > 3 else "?"))
+            continue
+        if parts[0] != "L" or len(parts) < 9:
+            continue
+        gid, layer = int(parts[1]), parts[2]
+        first = tuple(float(v) for v in parts[3:6])
+        second = tuple(float(v) for v in parts[6:9])
+        groups.setdefault(gid, {"layer": layer, "edges": []})
+        groups[gid]["edges"].append((first, second))
     return groups, dropped
 
 
@@ -253,8 +289,7 @@ def write_faces_dxf(path, polygons, insunits=4):
 def _insunits_of(dxf_path):
     """元の DXF の `$INSUNITS`（無ければ 4 ＝ mm とみなす）。"""
     try:
-        with io.open(dxf_path, encoding="utf-8", errors="replace") as handle:
-            text = handle.read(200000)
+        text = read_text(dxf_path, DXF_ENCODINGS, label="元の DXF")[:200000]
     except OSError:
         return 4
     match = re.search(r"\$INSUNITS\s*\n\s*70\s*\n\s*(\d+)", text)

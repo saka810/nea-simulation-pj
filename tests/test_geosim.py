@@ -2888,6 +2888,47 @@ def test_condition_table():
           (legacy, None) not in ct.discover(folder),
           str([os.path.basename(f) for f, _ in ct.discover(folder)]))
 
+    # ---- ★「作成」は選んだプロジェクトフォルダに作る（不具合報告 ⑥）----
+    #
+    # 2026-09-06 ユーザー要望「条件表の作成は、選択したプロジェクトフォルダ内に
+    # してほしい」。それまでは `Project.condition_path`（＝画面の「条件表（xlsx）」の欄）
+    # を対象にしていたので、**欄に前の案件の表が残っていると、新しいプロジェクトには
+    # 何も作られず、その別案件の表が `update()` で書き換えられていた**。
+    # `update()` は材料番号と安全率は守るが**面数・面積・参考の式は書き直す**ので、
+    # 気づかないまま他案件の入力ファイルが変わってしまう。
+    other = tempfile.mkdtemp(prefix="geosim_other_")
+    fresh = tempfile.mkdtemp(prefix="geosim_fresh_")
+    try:
+        shutil.copy(TEST_DXF, os.path.join(fresh, "新案件.dxf"))
+        elsewhere = pj.Project(other, dxf=os.path.join(fresh, "新案件.dxf"))
+        model_o = rd.read_model(elsewhere.dxf_path, verbose=False)
+        outside = ct.create(elsewhere, model_o, verbose=False)
+        before = os.path.getmtime(outside)
+
+        # 欄が**別フォルダ**の表を指している状態で「作成」を押す
+        target = pj.Project(fresh, dxf="新案件.dxf", condition_csv=outside)
+        check("欄は別フォルダの表を指している",
+              os.path.dirname(os.path.abspath(target.condition_path))
+              == os.path.abspath(other), target.condition_path)
+        made = ct.create(target, rd.read_model(target.dxf_path, verbose=False),
+                         verbose=False)
+        check("★「作成」は選んだプロジェクトフォルダの中に作る",
+              os.path.dirname(os.path.abspath(made)) == os.path.abspath(fresh),
+              made)
+        check("  ファイル名は既定名（条件表.xlsx）",
+              os.path.basename(made) == ct.CONDITION_BOOK, os.path.basename(made))
+        check("★別フォルダの表は書き換えない（他案件を壊さない）",
+              os.path.getmtime(outside) == before)
+        check("  2 回目は同じ表を更新する（作り直さない）",
+              os.path.abspath(ct.create(
+                  target, rd.read_model(target.dxf_path, verbose=False),
+                  verbose=False)) == os.path.abspath(made))
+        check("  計算のときは欄で選んだ表をそのまま更新する（既定は変えない）",
+              "file_name" in ct.update.__code__.co_varnames)
+    finally:
+        shutil.rmtree(other, ignore_errors=True)
+        shutil.rmtree(fresh, ignore_errors=True)
+
     shutil.rmtree(folder, ignore_errors=True)
 
 
@@ -3174,6 +3215,24 @@ def test_conditions_batch():
                                          make_figures=False)
     check("2 条件とも回る", len(outcome["conditions"]) == 2,
           str(len(outcome["conditions"])))
+
+    # ★★**一括実行のあとも `project.json` の条件は変わらない**
+    #   （2026-09-06 不具合報告 WIN240377 の ③）。
+    #   条件ごとの複製（`sub`）は `folder` が同じなので、`run()` の中の
+    #   `save()` が **最後に回した条件で project.json を上書きしていた**。
+    #   次に単発で回すと、選んでいたつもりの条件と違うものが使われる。
+    import json as _json
+    saved = _json.load(open(project.path("project.json"), encoding="utf-8"))
+    check("★一括実行しても project.json の条件シートが書き換わらない",
+          saved["condition_sheet"] == "",
+          f"condition_sheet = {saved['condition_sheet']!r}"
+          f"（最後の条件 {found[-1][1]!r} になっていたら不具合）")
+    check("  条件表の指定も勝手に変わらない",
+          saved["condition_csv"] in ("", None), repr(saved["condition_csv"]))
+    check("  音源だけは DXF から取った値が残る",
+          saved["source"] is not None, str(saved["source"]))
+    check("設定を書かせない切り替えがある（`save_settings`）",
+          "save_settings" in run_project.run.__code__.co_varnames)
 
     results = project.path(pj.RESULT_DIR)
     names = sorted(os.listdir(results))
@@ -3971,6 +4030,63 @@ def test_ui_2026_08_24():
     check("真上・真下に重なる点は動かさない",
           abs(editor2.head_azimuth[0] - 123.0) < 1e-9,
           f"{editor2.head_azimuth[0]:.1f}°")
+
+    # ---- ②b レイヤの一括表示（2026-09-06 ユーザー要望「全選択全解除ほしい」）----
+    #
+    # 実案件（階段教室）は画層が 22 種あり、1 つずつ切り替えると
+    # 「1 つだけ見る」「全部戻す」に 22 回のクリックが要る。
+    # ★数字キーは 1〜9 までしか割り当てられない（VTK のキーは 1 文字）ので、
+    #   10 個目以降は左パネルの「レイヤ番号」の欄で指す。
+    class FakeRepresentation:
+        def __init__(self):
+            self.state = 1
+
+        def SetState(self, value):
+            self.state = int(value)
+
+    class FakeBox:
+        def __init__(self):
+            self.rep = FakeRepresentation()
+
+        def GetRepresentation(self):
+            return self.rep
+
+    editor3 = fe.FaceEditor(model, head_azimuth=[0.0])
+    editor3.layers = ["床", "壁", "天井", "反射板"]
+    shown, boxes = {}, []
+    for name in editor3.layers:
+        shown[name] = True
+        box = FakeBox()
+
+        def callback(flag, name=name):
+            shown[name] = bool(flag)
+        boxes.append((box, callback))
+    editor3.layer_boxes = boxes
+
+    editor3._show_all_layers(False)
+    check("★レイヤを全非表示にできる", not any(shown.values()), str(shown))
+    check("  チェックボックスの見た目も合う（コールバックだけでは変わらない）",
+          all(b.rep.state == 0 for b, _c in boxes))
+    editor3._show_all_layers(True)
+    check("★レイヤを全表示にできる", all(shown.values()), str(shown))
+    check("  見た目も戻る", all(b.rep.state == 1 for b, _c in boxes))
+
+    editor3._set_layer_pick(3)
+    check("「レイヤ番号」は 1 始まりで受けて 0 始まりで持つ",
+          editor3.layer_index == 2, str(editor3.layer_index))
+    editor3._show_only_layer()
+    check("★その番号のレイヤだけ表示できる（1 つだけ見る使い方）",
+          shown == {"床": False, "壁": False, "天井": True, "反射板": False},
+          str(shown))
+    editor3._set_layer_pick(99)
+    check("範囲外の番号は端で止まる（落ちない）",
+          editor3.layer_index == len(editor3.layers) - 1,
+          str(editor3.layer_index))
+    editor3._set_layer_pick(0)
+    check("0 以下でも端で止まる", editor3.layer_index == 0)
+    editor3.layer_boxes = []
+    editor3._show_all_layers(True)      # 空でも落ちない
+    check("レイヤが無くても落ちない", True)
 
     # ---- ③ 動画の長さと再生速度（ユーザー指摘「反映されていない」）----
     class FakeAnimation:
@@ -4863,6 +4979,54 @@ def test_dxf_faces():
               and len(groups[1]["edges"]) == 2)
         check("★直線でない辺は落とさずに数える（円弧は面にできない）",
               dropped == [("天井", "ARC")], f"{dropped}")
+
+    # ---- ⑧ ★日本語の画層名が壊れない（2026-09-06 不具合報告 ⑤）----
+    #
+    # `accoreconsole` は**システムのコードページ**で書き出す（日本語 Windows は CP932）。
+    # UTF-8 決め打ちで読んでいたため、実案件（階段教室）で
+    # **22 画層すべての日本語名が U+FFFD になり、化け方が同じ 2 組が統合された**
+    # （`PHP_階段裏`＋`PHP_階段下`、`開口_2F小`＋`開口_2F大`）。
+    # 画層名は吸音材の割り当てに使うので、崩れると条件表が引けない。
+    names = ["床_1F", "天井ボード", "反射板", "開口_研修",
+             "PHP_階段裏", "PHP_階段下", "開口_2F小", "開口_2F大"]
+    with tempfile.TemporaryDirectory() as folder:
+        dump = os.path.join(folder, "edges_cp932.txt")
+        body = "".join(f"L,{k},{n},0,0,0,1000,0,0\n"
+                       for k, n in enumerate(names))
+        io.open(dump, "wb").write(body.encode("cp932"))
+        groups, _dropped = df.read_dump(dump)
+        got = [groups[k]["layer"] for k in sorted(groups)]
+        check("★CP932 で書かれた画層名を壊さずに読む（accoreconsole の出力）",
+              got == names, f"{got}")
+        check("  化け方が同じ画層が統合されない（22 → 20 に減っていた）",
+              len({g['layer'] for g in groups.values()}) == len(names),
+              f"{len({g['layer'] for g in groups.values()})} / {len(names)} 種")
+
+        # UTF-8 で書かれていても読める（両方試す並びにしてある）
+        utf8_dump = os.path.join(folder, "edges_utf8.txt")
+        io.open(utf8_dump, "wb").write(body.encode("utf-8"))
+        groups8, _ = df.read_dump(utf8_dump)
+        check("  UTF-8 で書かれていても読める",
+              [groups8[k]["layer"] for k in sorted(groups8)] == names)
+        check("  試す順は CP932 → UTF-8（accoreconsole が前提）",
+              df.DUMP_ENCODINGS == ("cp932", "utf-8"), str(df.DUMP_ENCODINGS))
+
+        # ★どちらでも読めないときは、黙って壊さず理由を告げて続ける
+        broken = os.path.join(folder, "edges_broken.txt")
+        io.open(broken, "wb").write(b"L,1,\xff\xfe\xfd,0,0,0,1,0,0\n")
+        groups_b, _ = df.read_dump(broken)
+        check("  読めない文字コードでも落ちない（置き換えて続ける）",
+              len(groups_b) == 1)
+
+        # 元の DXF 側は UTF-8 を先に試す（`$DWGCODEPAGE ANSI_932` でも中身は UTF-8）
+        check("元の DXF は UTF-8 を先に試す",
+              df.DXF_ENCODINGS == ("utf-8", "cp932"), str(df.DXF_ENCODINGS))
+        cp932_dxf = os.path.join(folder, "unit.dxf")
+        io.open(cp932_dxf, "wb").write(
+            "0\nSECTION\n2\nHEADER\n9\n$INSUNITS\n70\n4\n0\nENDSEC\n"
+            "9\n注記\n".encode("cp932"))
+        check("  CP932 の DXF からも $INSUNITS を読める",
+              df._insunits_of(cp932_dxf) == 4)
 
     check("accoreconsole を探せる（無い端末では None）",
           df.find_accoreconsole() is None

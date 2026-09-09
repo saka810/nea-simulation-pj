@@ -70,7 +70,7 @@ def _stem_is_named(project):
 
 
 def run(project, verbose=True, make_figures=True, progress=None,
-        reuse_paths=True):
+        reuse_paths=True, save_settings=True):
     """プロジェクトの条件で計算し、結果 CSV と図を書き出す。
 
     受音点が複数あるときは、**音線追跡を 1 回で済ませて**受音判定だけ点ごとに行う
@@ -79,7 +79,8 @@ def run(project, verbose=True, make_figures=True, progress=None,
     ファイル名の頭には対象室＋条件名（`project.name`）が付く。
     """
     project.ensure_dirs()
-    project.save()      # 実行した条件を必ず残す（あとで再現できるように）
+    if save_settings:
+        project.save()  # 実行した条件を必ず残す（あとで再現できるように）
     _freeze_condition_name(project, verbose=verbose)
 
     dxf = project.dxf_path
@@ -94,7 +95,8 @@ def run(project, verbose=True, make_figures=True, progress=None,
                           verbose=verbose, make_figures=make_figures,
                           write_back=False,
                           head_azimuth=project.head_azimuth_for(0),
-                          reuse_paths=reuse_paths, progress=progress)
+                          reuse_paths=reuse_paths, progress=progress,
+                          save_settings=save_settings)
         _write_points(project, receivers, result.get("model"), verbose=verbose)
         _write_summaries(project, verbose=verbose)
         return result
@@ -112,7 +114,7 @@ def run(project, verbose=True, make_figures=True, progress=None,
             results.append(_run_one(sub, point, verbose=verbose,
                                     make_figures=make_figures, write_back=False,
                                     head_azimuth=project.head_azimuth_for(k),
-                                    reuse_paths=True,
+                                    reuse_paths=True, save_settings=save_settings,
                                     statistical_result=shared_statistical,
                                     progress=_prefixed(progress,
                                                        f"受音点{k + 1}/{len(receivers)} ")))
@@ -145,7 +147,7 @@ def run(project, verbose=True, make_figures=True, progress=None,
                                 make_figures=make_figures, write_back=False,
                                 head_azimuth=project.head_azimuth_for(k),
                                 traced_history=None if traced is None else traced[k],
-                                reuse_paths=False,
+                                reuse_paths=False, save_settings=save_settings,
                                 statistical_result=shared_statistical,
                                 progress=_prefixed(progress,
                                                    f"受音点{k + 1}/{len(receivers)} ")))
@@ -277,9 +279,21 @@ def run_conditions(project, conditions=None, verbose=True, make_figures=True,
                   f"{sub.file_prefix!r}")
             print("=" * 70)
         stage = _prefixed(progress, f"条件{i + 1}/{len(conditions)} ")
+        # ★★**条件ごとの複製から `project.json` を書かせない**
+        #   （2026-09-06 不具合報告 WIN240377 の ③）。
+        #   `sub` は `folder` が同じなので、`run()` の中の `save()` が
+        #   **その条件の設定で project.json を上書きし、最後の条件が残っていた**。
+        #   次に単発で回すと、選んでいたつもりの条件と違うものが使われる。
+        #   設定はループのあとに**利用者が選んでいた条件のまま**1 回だけ書く
         results.append(run(sub, verbose=verbose, make_figures=make_figures,
-                           progress=stage))
+                           progress=stage, save_settings=False))
         done.append((file_name, sheet))
+
+    # 設定を 1 回だけ残す。★条件は**呼ばれたときのまま**（一括で回した最後の条件に
+    #   すり替えない）。音源だけは DXF から取った値を書き戻しておく
+    if results and results[0].get("soundsource_point") is not None:
+        project.source = np.asarray(results[0]["soundsource_point"]).tolist()
+    project.save()
 
     # 条件を横に並べた比較表。**全条件が終わってから**でないと作れない
     comparison = None
@@ -650,7 +664,8 @@ def _sub_project(project, index):
 
 def _run_one(project, receiver, verbose=True, make_figures=True,
              write_back=True, head_azimuth=None, traced_history=None,
-             reuse_paths=True, statistical_result=None, progress=None):
+             reuse_paths=True, statistical_result=None, progress=None,
+             save_settings=True):
     project.ensure_dirs()
     # 前回の結果を消してから回す。条件を変えたときに古いファイルが残っていると、
     # 今回の条件の値だと思って読んでしまう。
@@ -740,7 +755,8 @@ def _run_one(project, receiver, verbose=True, make_figures=True,
     project.source = results["soundsource_point"].tolist()
     if write_back:
         project.receiver = results["receiver_point"].tolist()
-    project.save()
+    if save_settings:
+        project.save()
     return results
 
 
