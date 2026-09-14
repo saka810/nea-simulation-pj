@@ -311,7 +311,8 @@ COHERENT_LINES = 129
 
 def coherent_band_levels(times, energies, distances=None, atmosphere=None,
                          frequencies=None, band_width="1/1",
-                         lines=COHERENT_LINES, source_power_db=None):
+                         lines=COHERENT_LINES, source_power_db=None,
+                         subset=None):
     """**位相ごと重ねた**バンド別の音圧レベル [dB]（複素和）。
 
         p(f) = Σ_n √(A_n · e^{-m d_n} / 4π) / d_n · e^{-j 2π f d_n / c}
@@ -322,6 +323,17 @@ def coherent_band_levels(times, energies, distances=None, atmosphere=None,
 
     ★**反射の位相ずれは 0**（＝剛な面では厳密、吸音面では仮定）。
       材料の位相情報が無い段階では、山谷の位置ではなく**振れ幅の目安**として見る。
+
+    ★**音源パワーレベルは帯域ごとに持つ**（2026-09-05 に修正）。
+      それまでは `np.mean(source_power_db)` で**1 つの数に潰していた**ので、
+      PWL に傾きがあると帯域別のレベルが丸ごと狂った
+      （`[80, 100] dB` の 2 帯域を入れると両方 79.1 dB になり、
+      エネルギー和の `[69.1, 89.1] dB` に対して ±10 dB ずれた）。
+      配列にするのは `band_levels()` と同じ `_power_levels()`。
+
+    引数:
+        subset : (N,) の bool | None
+            足し合わせるパルスを絞る（内訳を出すのに使う）。None なら全部。
     """
     if atmosphere is None:
         atmosphere = Atmosphere()
@@ -334,14 +346,21 @@ def coherent_band_levels(times, energies, distances=None, atmosphere=None,
         frequencies = ab.octave_bands(energies.shape[1])
     frequencies = np.asarray(frequencies, dtype=float)
 
+    if subset is not None:
+        subset = np.asarray(subset, dtype=bool)
+        distances = distances[subset]
+        energies = energies[subset]
+
     velocity = atmosphere.sound_velocity
     m = atmosphere.absorption_coefficient(frequencies)
     lower, upper = ab.band_edges(frequencies, band_width)
-    power = 0.0 if source_power_db is None else float(np.mean(
-        np.atleast_1d(np.asarray(source_power_db, dtype=float))))
+    # ★帯域ごとの PWL をそのまま使う（平均へ潰さない）
+    power = _power_levels(source_power_db, len(frequencies))
     impedance = 10.0 * np.log10(atmosphere.density * velocity / 400.0)
 
-    levels = np.empty(len(frequencies))
+    levels = np.full(len(frequencies), -np.inf)
+    if not len(distances):
+        return levels
     for band in range(len(frequencies)):
         air = np.exp(-m[band] * distances)
         amplitude = np.sqrt(np.maximum(energies[:, band], 0.0) * air
@@ -349,9 +368,71 @@ def coherent_band_levels(times, energies, distances=None, atmosphere=None,
         line = np.linspace(lower[band], upper[band], lines)
         wave = 2.0 * np.pi * line / velocity
         pressure = np.exp(-1j * wave[:, None] * distances[None, :]) @ amplitude
-        levels[band] = (power + 10.0 * np.log10(float(np.mean(
-            np.abs(pressure) ** 2)) + 1.0e-300) + impedance)
+        mean_square = float(np.mean(np.abs(pressure) ** 2))
+        levels[band] = (-np.inf if mean_square <= 0.0
+                        else power[band] + 10.0 * np.log10(mean_square) + impedance)
     return levels
+
+
+def coherent_levels(times, energies, distances=None, atmosphere=None,
+                    frequencies=None, band_width="1/1", lines=COHERENT_LINES,
+                    source_power_db=None, early_limit=None):
+    """複素和で **`band_levels()` と同じ内訳**を出す（2026-09-05 に追加）。
+
+    戻り値は `band_levels()` と同じ鍵を持つ dict:
+        'levels' / 'direct' / 'reflected' / 'early' / 'late' /
+        'a_weighted' / 'overall' / 'overall_a'
+
+    ★**総合値・A 特性・内訳まで同じ足し方で出し直す**ためのもの。
+      それまでは `procedure` が `levels` だけ複素和に差し替えていたので、
+      **1 つの結果の中でエネルギー和と複素和が混ざっていた**。
+
+    ★総合値（帯域合成）は**バンドごとの `|p|²` を足す**。
+      バンドは重ならない周波数を見ているので、ここは位相を持たせずに足すのが正しい。
+    """
+    times = np.atleast_1d(np.asarray(times, dtype=float))
+    energies = np.atleast_2d(np.asarray(energies, dtype=float))
+    if atmosphere is None:
+        atmosphere = Atmosphere()
+    if frequencies is None:
+        frequencies = ab.octave_bands(energies.shape[1])
+    frequencies = np.asarray(frequencies, dtype=float)
+
+    def levels_of(subset):
+        return coherent_band_levels(times, energies, distances, atmosphere,
+                                    frequencies, band_width=band_width,
+                                    lines=lines, source_power_db=source_power_db,
+                                    subset=subset)
+
+    # 区切り方は `band_levels()` とそろえる（直接音＝いちばん早く届くパルス）
+    direct_index = int(np.argmin(times))
+    limit = float(times[direct_index]) + (0.05 if early_limit is None
+                                          else early_limit)
+    direct_mask = np.zeros(len(times), dtype=bool)
+    direct_mask[direct_index] = True
+
+    levels = levels_of(None)
+    weighted = levels + a_weighting(frequencies)
+    return {
+        "frequencies": frequencies,
+        "levels": levels,
+        "direct": levels_of(direct_mask),
+        "reflected": levels_of(~direct_mask),
+        "early": levels_of(times <= limit),
+        "late": levels_of(times > limit),
+        "a_weighted": weighted,
+        "overall": _combine_levels(levels),
+        "overall_a": _combine_levels(weighted),
+    }
+
+
+def _combine_levels(values):
+    """帯域を合成した値 [dB]。`band_levels()` の `combine()` と同じ足し方。"""
+    values = np.asarray(values, dtype=float)
+    finite = values[np.isfinite(values)]
+    if not len(finite):
+        return float("-inf")
+    return float(10.0 * np.log10(np.sum(10.0 ** (finite / 10.0))))
 
 
 def write_levels(filename, result):
@@ -366,8 +447,11 @@ def write_levels(filename, result):
         ("内訳", "反射音_dB", None, result["reflected"]),
         ("内訳", "初期_50ms_dB", None, result["early"]),
         ("内訳", "後期_dB", None, result["late"]),
-        ("参考", "音源パワーレベル_dB", result["source_distance"],
-         result["source_power"]),
+        # ★3 列目は「周波数に依らない値」なので、音源距離は**独立した行**にする
+        #   （2026-09-05。以前は音源パワーレベルの行の 3 列目に距離が入っていて、
+        #   項目の名前と値が食い違っていた）
+        ("参考", "音源パワーレベル_dB", None, result["source_power"]),
+        ("参考", "音源距離_m", result["source_distance"], None),
     ]
     # ★複素和（位相を含む）を出しているときは、区分を分けて一緒に入れる
     if result.get("coherent") is not None:

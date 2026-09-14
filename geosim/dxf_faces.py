@@ -9,14 +9,17 @@
 AutoCAD の中で `EXPLODE` すると、REGION は**輪郭の LINE**に、
 3DSOLID は**面の REGION**に分解される。それを拾って輪郭の順に並べ直し、
 **閉じた 3D ポリライン**として DXF に書き出す（本ツールが読める形）。
+穴のある面だけは三角形に割って **3DFACE** で書く（下記）。
 
 決めごと:
   ・**元のファイルは触らない**。作業は控えに対して行い、`<名前>_faces.dxf` を作る
   ・**レイヤ名は保つ**（吸音材の割り当てに使うので、これが崩れると意味が無い）
   ・★**円弧・スプラインが混じったら黙って捨てず、数えて知らせる**
     （直線だけで囲まれた面しか作れない）
-  ・★**穴のある面（輪郭が 2 つ以上）も知らせる**。外周だけ使うと開口が
-    塞がってしまうので、勝手に決めない
+  ・★★**穴のある面（輪郭が 2 つ以上）は穴を開けたまま三角形に割る**
+    （2026-09-09。それまでは外周だけを面にしていて**開口が塞がっていた**）。
+    穴を橋でつないで（キーホール法）耳刈りし、**3DFACE** で書く。
+    ★面積が「外周 − 穴」と合わなければ穴を開けず、外周だけに戻して知らせる
   ・座標は**元の単位のまま**（`$INSUNITS` も引き継ぐ）
 """
 import io
@@ -35,6 +38,40 @@ PLANE_TOLERANCE = 1.0
 
 # accoreconsole を探す場所
 ACCORE_GLOB = r"C:\Program Files\Autodesk\AutoCAD *\accoreconsole.exe"
+
+# ★★**`accoreconsole` はシステムのコードページで書き出す**（日本語 Windows なら CP932）。
+#   2026-09-06 の不具合報告 ⑤ で実案件を踏んだ：UTF-8 だけで読んでいたので
+#   **日本語の画層名が全部 U+FFFD に置き換わり、そのまま出力 DXF に焼き付いていた**。
+#   画層名は吸音材の割り当てに使うので、崩れると条件表が引けない。
+#   さらに悪いのは**化け方が同じ画層が 1 つにまとめられる**ことで、
+#   実案件（階段教室）では 22 画層が 20 に減った
+#   （`PHP_階段裏`＋`PHP_階段下`、`開口_2F小`＋`開口_2F大` が統合された）。
+#   ★`errors="replace"` は**最後の手段**にする（黙って壊すのを避けるため）。
+DUMP_ENCODINGS = ("cp932", "utf-8")
+
+# 元の DXF を読むときの順。こちらは UTF-8 が普通
+# （`$DWGCODEPAGE ANSI_932` でも中身は UTF-8 のことが多い）。
+# `read_dxffile` と同じ並びにしてある
+DXF_ENCODINGS = ("utf-8", "cp932")
+
+
+def read_text(path, encodings=DUMP_ENCODINGS, label=""):
+    """テキストを、順に試して読めた文字コードで読む。
+
+    どれでも読めなければ**最後の手段**として `errors="replace"` に落とし、
+    ★黙って壊さずに理由を告げる（画層名が崩れると吸音材が引けなくなるため）。
+    """
+    with io.open(path, "rb") as handle:
+        raw = handle.read()
+    for encoding in encodings:
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    print(f"[面に分解] ★{label or os.path.basename(path)} の文字コードが分かりません"
+          f"（{' / '.join(encodings)} のどれでもありません）。"
+          f"読めない文字を置き換えて続けます。**画層名が崩れるかもしれません**")
+    return raw.decode(encodings[0], errors="replace")
 
 
 def find_accoreconsole(path=None):
@@ -136,22 +173,24 @@ def _run_autocad(source, dump, accore, timeout=1800, verbose=True):
 def read_dump(path):
     """AutoCAD が書いた辺の一覧を読む。→ (グループ→辺, 落ちたもの)"""
     groups, dropped = {}, []
-    with io.open(path, encoding="utf-8", errors="replace") as handle:
-        for line in handle:
-            parts = [p.strip() for p in line.strip().split(",")]
-            if not parts or parts[0] == "END":
-                continue
-            if parts[0] == "X":
-                dropped.append((parts[2] if len(parts) > 2 else "",
-                                parts[3] if len(parts) > 3 else "?"))
-                continue
-            if parts[0] != "L" or len(parts) < 9:
-                continue
-            gid, layer = int(parts[1]), parts[2]
-            first = tuple(float(v) for v in parts[3:6])
-            second = tuple(float(v) for v in parts[6:9])
-            groups.setdefault(gid, {"layer": layer, "edges": []})
-            groups[gid]["edges"].append((first, second))
+    # ★**CP932 を先に試す**（accoreconsole はシステムのコードページで書く）。
+    #   UTF-8 決め打ちだと日本語の画層名が壊れる（不具合報告 ⑤。`DUMP_ENCODINGS`）
+    text = read_text(path, DUMP_ENCODINGS, label="AutoCAD が書いた辺の一覧")
+    for line in text.splitlines():
+        parts = [p.strip() for p in line.strip().split(",")]
+        if not parts or parts[0] == "END":
+            continue
+        if parts[0] == "X":
+            dropped.append((parts[2] if len(parts) > 2 else "",
+                            parts[3] if len(parts) > 3 else "?"))
+            continue
+        if parts[0] != "L" or len(parts) < 9:
+            continue
+        gid, layer = int(parts[1]), parts[2]
+        first = tuple(float(v) for v in parts[3:6])
+        second = tuple(float(v) for v in parts[6:9])
+        groups.setdefault(gid, {"layer": layer, "edges": []})
+        groups[gid]["edges"].append((first, second))
     return groups, dropped
 
 
@@ -231,13 +270,28 @@ def _tables(layers):
     return "".join(out)
 
 
-def write_faces_dxf(path, polygons, insunits=4):
-    """輪を**閉じた 3D ポリライン**として書く（本ツールが読める形）。"""
-    layers = sorted({layer for layer, _points in polygons}) or ["0"]
+def write_faces_dxf(path, polygons, insunits=4, triangles=None):
+    """輪を**閉じた 3D ポリライン**として書く（本ツールが読める形）。
+
+    `triangles` は [(レイヤ, (点, 点, 点)), …]。**穴のある面**はポリライン 1 本では
+    表せないので、三角形に割って **3DFACE** で書く（2026-09-09。`read_dxffile` は
+    3DFACE も読めるし、読み込み側の**同一平面パッチ**が 1 枚にまとめ直す）。
+    """
+    triangles = list(triangles or [])
+    layers = sorted({layer for layer, _points in polygons}
+                    | {layer for layer, _corners in triangles}) or ["0"]
     with io.open(path, "w", encoding="utf-8", newline="\n") as handle:
         handle.write(_header(insunits))
         handle.write(_tables(layers))
         handle.write("0\nSECTION\n2\nENTITIES\n")
+        for layer, corners in triangles:
+            # 3DFACE は 4 隅を持つ。三角形なので 4 点目は 3 点目と同じにする
+            first, second, third = corners
+            handle.write("0\n3DFACE\n8\n%s\n" % layer)
+            for index, point in enumerate((first, second, third, third)):
+                handle.write("%d\n%.6f\n%d\n%.6f\n%d\n%.6f\n"
+                             % (10 + index, point[0], 20 + index, point[1],
+                                30 + index, point[2]))
         for layer, points in polygons:
             # 70 = 1(閉じている) + 8(3D ポリライン)
             handle.write("0\nPOLYLINE\n8\n%s\n66\n1\n70\n9\n"
@@ -253,12 +307,266 @@ def write_faces_dxf(path, polygons, insunits=4):
 def _insunits_of(dxf_path):
     """元の DXF の `$INSUNITS`（無ければ 4 ＝ mm とみなす）。"""
     try:
-        with io.open(dxf_path, encoding="utf-8", errors="replace") as handle:
-            text = handle.read(200000)
+        text = read_text(dxf_path, DXF_ENCODINGS, label="元の DXF")[:200000]
     except OSError:
         return 4
     match = re.search(r"\$INSUNITS\s*\n\s*70\s*\n\s*(\d+)", text)
     return int(match.group(1)) if match else 4
+
+
+# ---- 穴のある面（輪が 2 つ以上）--------------------------------------------
+#
+# ★★2026-09-09 ユーザー指摘「元々ドーナッツ状（中が空いている）の床が、
+#   一面の床になってしまっています」。実案件（階段教室）の `床_1F` が
+#   **外周 367.48 m² ＋ 穴 102.27 m²** で、本来 265.22 m² のドーナツなのに
+#   外周だけを面にしていたため**2 層吹き抜けが幻の床で塞がっていた**。
+#
+#   それまでは「輪はいちばん長いものだけ使う」と割り切って**数えて知らせる**
+#   だけだった（書き出す形が「閉じた 3D ポリライン 1 本」で、1 本のポリラインでは
+#   穴を表せないため）。ここで**穴を橋でつないで三角形に割り、3DFACE で書く**
+#   ようにした（`read_dxffile` は 3DFACE も読める）。
+#
+#   ★三角形で書いても、読み込み側の**同一平面パッチ**が 1 枚にまとめ直すので、
+#     面の確認画面では元どおり「1 枚の床」として見える。
+#   ★★**面積が「外周 − 穴」と合わなければ穴を開けない**（外周だけに戻して知らせる）。
+#     黙って変な形の床を作るほうが危ないため。
+
+# 橋（キーホール）の線が他の辺と交わっていないとみなす許容（図面の単位）
+BRIDGE_TOLERANCE = 1.0e-6
+
+# 三角形に割ったあとの面積が合っているかのしきい値（相対）
+AREA_TOLERANCE = 1.0e-6
+
+
+def loop_normal(points):
+    """輪の法線（ニューウェル法）。→ 単位ベクトル（決まらなければ None）"""
+    normal = [0.0, 0.0, 0.0]
+    count = len(points)
+    for index in range(count):
+        current, following = points[index], points[(index + 1) % count]
+        normal[0] += (current[1] - following[1]) * (current[2] + following[2])
+        normal[1] += (current[2] - following[2]) * (current[0] + following[0])
+        normal[2] += (current[0] - following[0]) * (current[1] + following[1])
+    size = math.sqrt(sum(c * c for c in normal))
+    if size < 1.0e-12:
+        return None
+    return [c / size for c in normal]
+
+
+def _basis(normal):
+    """法線に垂直な 2 本の軸（面の中で 2 次元に落とすため）。"""
+    # いちばん寝ている軸を種にすると、外積が縮退しない
+    seed = [0.0, 0.0, 0.0]
+    seed[min(range(3), key=lambda k: abs(normal[k]))] = 1.0
+    u = [seed[1] * normal[2] - seed[2] * normal[1],
+         seed[2] * normal[0] - seed[0] * normal[2],
+         seed[0] * normal[1] - seed[1] * normal[0]]
+    size = math.sqrt(sum(c * c for c in u))
+    u = [c / size for c in u]
+    v = [normal[1] * u[2] - normal[2] * u[1],
+         normal[2] * u[0] - normal[0] * u[2],
+         normal[0] * u[1] - normal[1] * u[0]]
+    return u, v
+
+
+def _flatten(points, u, v):
+    """面の中の 2 次元座標にする。"""
+    return [(sum(p[k] * u[k] for k in range(3)),
+             sum(p[k] * v[k] for k in range(3))) for p in points]
+
+
+def signed_area_2d(points):
+    """2 次元の輪の符号付き面積（反時計回りなら正）。"""
+    total = 0.0
+    for index in range(len(points)):
+        x1, y1 = points[index]
+        x2, y2 = points[(index + 1) % len(points)]
+        total += x1 * y2 - x2 * y1
+    return total / 2.0
+
+
+def _same2d(a, b, tolerance=JOIN_TOLERANCE):
+    return abs(a[0] - b[0]) <= tolerance and abs(a[1] - b[1]) <= tolerance
+
+
+def _crosses(a, b, c, d):
+    """線分 ab と cd が**内部で**交わるか（端点で触れるだけなら False）。"""
+    def side(p, q, r):
+        return ((q[0] - p[0]) * (r[1] - p[1])
+                - (q[1] - p[1]) * (r[0] - p[0]))
+
+    d1, d2 = side(a, b, c), side(a, b, d)
+    d3, d4 = side(c, d, a), side(c, d, b)
+    straddle_first = ((d1 > BRIDGE_TOLERANCE and d2 < -BRIDGE_TOLERANCE)
+                      or (d1 < -BRIDGE_TOLERANCE and d2 > BRIDGE_TOLERANCE))
+    straddle_second = ((d3 > BRIDGE_TOLERANCE and d4 < -BRIDGE_TOLERANCE)
+                       or (d3 < -BRIDGE_TOLERANCE and d4 > BRIDGE_TOLERANCE))
+    return straddle_first and straddle_second
+
+
+def _inside_2d(point, ring):
+    """2 次元の点が輪の内側か（交差数。境界は数に入れない）。"""
+    inside = False
+    for index in range(len(ring)):
+        x1, y1 = ring[index]
+        x2, y2 = ring[(index + 1) % len(ring)]
+        if (y1 > point[1]) != (y2 > point[1]):
+            crossing = x1 + (point[1] - y1) * (x2 - x1) / (y2 - y1)
+            if point[0] < crossing:
+                inside = not inside
+    return inside
+
+
+def bridge_holes(outer, holes):
+    """穴を**橋（キーホール）でつないで 1 つの輪にする**。→ 2 次元の点の並び
+
+    引数・戻り値とも**面の中の 2 次元座標**。外周は反時計回り、穴は時計回りに
+    揃えてから `outer[:i+1] + hole[j:] + hole[:j+1] + outer[i:]` の形でつなぐ
+    （教科書どおりのキーホール法。橋の両端は 2 度使われる）。
+
+    ★橋の選び方は**総当たりでいちばん短いもの**。実案件は外周 13 点・穴 4 点なので
+      総当たりでも一瞬で、視線判定の取りこぼしが無い。
+      橋が他の辺と交わるもの、リングの外へ出るものは弾く。
+    """
+    ring = list(outer)
+    if signed_area_2d(ring) < 0.0:
+        ring.reverse()
+    loops = []
+    for hole in holes:
+        loop = list(hole)
+        if signed_area_2d(loop) > 0.0:       # 穴は外周と逆向きに揃える
+            loop.reverse()
+        loops.append(loop)
+
+    for loop in loops:
+        edges = [(ring[k], ring[(k + 1) % len(ring)]) for k in range(len(ring))]
+        for other in loops:
+            edges += [(other[k], other[(k + 1) % len(other)])
+                      for k in range(len(other))]
+        best = None
+        for i, outer_point in enumerate(ring):
+            for j, hole_point in enumerate(loop):
+                if _same2d(outer_point, hole_point):
+                    continue
+                length = ((outer_point[0] - hole_point[0]) ** 2
+                          + (outer_point[1] - hole_point[1]) ** 2)
+                if best is not None and length >= best[0]:
+                    continue
+                if any(_crosses(outer_point, hole_point, a, b) for a, b in edges):
+                    continue
+                # 橋の中点がリングの中（外周の内側・どの穴の外側）にあること
+                middle = ((outer_point[0] + hole_point[0]) / 2.0,
+                          (outer_point[1] + hole_point[1]) / 2.0)
+                if not _inside_2d(middle, ring):
+                    continue
+                if any(_inside_2d(middle, other) for other in loops):
+                    continue
+                best = (length, i, j)
+        if best is None:
+            return None                     # つなげない（外周だけに戻して知らせる）
+        _length, i, j = best
+        ring = ring[:i + 1] + loop[j:] + loop[:j + 1] + ring[i:]
+    return ring
+
+
+def _convex_2d(a, b, c):
+    return ((b[0] - a[0]) * (c[1] - a[1])
+            - (b[1] - a[1]) * (c[0] - a[0])) > BRIDGE_TOLERANCE
+
+
+def _in_triangle_2d(point, a, b, c):
+    """点が三角形 abc の中か。★**角と重なる点は「中に無い」とみなす**。
+
+    キーホール法は橋の両端を**2 度使う**（同じ座標の点が 2 つある）ので、
+    素直に判定すると常に「中にある」ことになり、耳が 1 つも見つからなくなる。
+    """
+    if _same2d(point, a) or _same2d(point, b) or _same2d(point, c):
+        return False
+    d1 = (b[0] - a[0]) * (point[1] - a[1]) - (b[1] - a[1]) * (point[0] - a[0])
+    d2 = (c[0] - b[0]) * (point[1] - b[1]) - (c[1] - b[1]) * (point[0] - b[0])
+    d3 = (a[0] - c[0]) * (point[1] - c[1]) - (a[1] - c[1]) * (point[0] - c[0])
+    return ((d1 >= -BRIDGE_TOLERANCE and d2 >= -BRIDGE_TOLERANCE
+             and d3 >= -BRIDGE_TOLERANCE)
+            or (d1 <= BRIDGE_TOLERANCE and d2 <= BRIDGE_TOLERANCE
+                and d3 <= BRIDGE_TOLERANCE))
+
+
+def ear_clip_2d(ring):
+    """2 次元の輪を耳刈り法で三角形に割る。→ [(添字, 添字, 添字), …] | None
+
+    反時計回りの輪を前提にする（`bridge_holes` がそう揃えて返す）。
+    """
+    order = list(range(len(ring)))
+    triangles = []
+    guard = 0
+    while len(order) > 3 and guard <= len(ring) * len(ring) + 10:
+        guard += 1
+        cut = None
+        for m in range(len(order)):
+            i, j, k = order[m - 1], order[m], order[(m + 1) % len(order)]
+            if not _convex_2d(ring[i], ring[j], ring[k]):
+                continue
+            if any(_in_triangle_2d(ring[q], ring[i], ring[j], ring[k])
+                   for q in order if q not in (i, j, k)):
+                continue
+            cut = (m, i, j, k)
+            break
+        if cut is None:
+            return None
+        m, i, j, k = cut
+        triangles.append((i, j, k))
+        order.pop(m)
+    if len(order) != 3:
+        return None
+    triangles.append(tuple(order))
+    return triangles
+
+
+def triangles_with_holes(loops):
+    """穴のある面を三角形に割る。→ [(点, 点, 点), …] | None
+
+    `loops` は**いちばん長いものを外周**とみなす（`convert` がそう並べて渡す）。
+    ★面積が「外周 − 穴」と合わなければ `None` を返す
+      （黙って変な形の面を作らないため）。
+    """
+    outer, holes = loops[0], loops[1:]
+    normal = loop_normal(outer)
+    if normal is None:
+        return None
+    u, v = _basis(normal)
+    flat_outer = _flatten(outer, u, v)
+    flat_holes = [_flatten(hole, u, v) for hole in holes]
+
+    ring = bridge_holes(flat_outer, flat_holes)
+    if ring is None:
+        return None
+    order = ear_clip_2d(ring)
+    if order is None:
+        return None
+
+    # 2 次元に落とす前の座標に戻すための対応表
+    lookup = {}
+    for flat, points in [(flat_outer, outer)] + list(zip(flat_holes, holes)):
+        for flat_point, point in zip(flat, points):
+            lookup[(round(flat_point[0], 6), round(flat_point[1], 6))] = point
+
+    want = abs(signed_area_2d(flat_outer))
+    for hole in flat_holes:
+        want -= abs(signed_area_2d(hole))
+
+    triangles, got = [], 0.0
+    for i, j, k in order:
+        corners = []
+        for index in (i, j, k):
+            key = (round(ring[index][0], 6), round(ring[index][1], 6))
+            if key not in lookup:
+                return None
+            corners.append(lookup[key])
+        got += abs(signed_area_2d([ring[i], ring[j], ring[k]]))
+        triangles.append(tuple(corners))
+    if want <= 0.0 or abs(got - want) > AREA_TOLERANCE * max(want, 1.0):
+        return None
+    return triangles
 
 
 # ---- 入り口 -----------------------------------------------------------------
@@ -290,6 +598,8 @@ def convert(dxf_path, out_path=None, accore=None, verbose=True, keep=False):
 
         polygons, holes, open_chains, small = [], 0, 0, 0
         twisted = []
+        triangles = []          # 穴のある面（3DFACE で書く）
+        holed, unfilled = 0, []
         for gid in sorted(groups):
             layer = groups[gid]["layer"]
             loops = loops_from_edges(groups[gid]["edges"])
@@ -297,10 +607,20 @@ def convert(dxf_path, out_path=None, accore=None, verbose=True, keep=False):
             if not closed:
                 open_chains += 1
                 continue
+            # ★輪はいちばん長いものを外周とみなす（穴より外周のほうが点が多い）
+            closed.sort(key=len, reverse=True)
             if len(closed) > 1:
                 holes += 1
-            # 輪が複数なら**いちばん長いもの**を面にする（残りは知らせる）
-            closed.sort(key=len, reverse=True)
+                # ★★**穴を開けたまま三角形に割る**（2026-09-09。それまでは
+                #   外周だけを面にしていて、ドーナツ状の床が塞がっていた）
+                parts = triangles_with_holes(closed)
+                if parts:
+                    holed += 1
+                    for part in parts:
+                        triangles.append((layer, part))
+                    continue
+                # 割れなかったら外周だけに戻す。★黙って落とさず知らせる
+                unfilled.append(layer)
             points = closed[0]
             if len(points) < 3:
                 small += 1
@@ -311,11 +631,17 @@ def convert(dxf_path, out_path=None, accore=None, verbose=True, keep=False):
             polygons.append((layer, points))
 
         if verbose:
-            print(f"[面に分解] ACIS {len(groups)} 面 → 輪郭 {len(polygons)} 枚")
-            if holes:
-                print(f"[面に分解] ★輪郭が 2 つ以上の面が {holes} 枚あります"
-                      "（穴あき）。**外周だけ**を面にしたので、"
-                      "開口が塞がっているかもしれません")
+            print(f"[面に分解] ACIS {len(groups)} 面 → 輪郭 {len(polygons)} 枚"
+                  + (f" ＋ 穴のある面 {holed} 枚（三角形 {len(triangles)} 枚）"
+                     if holed else ""))
+            if holed:
+                print(f"[面に分解] ★穴のある面 {holed} 枚は**穴を開けたまま**"
+                      f"三角形に割りました（開口は塞いでいません）")
+            if unfilled:
+                print(f"[面に分解] ★★穴を開けられなかった面が {len(unfilled)} 枚"
+                      f"あります（{' / '.join(sorted(set(unfilled)))}）。"
+                      f"**外周だけ**を面にしたので、開口が塞がっています。"
+                      f"CAD 側で面を分けて書き出してください")
             if open_chains:
                 print(f"[面に分解] ★閉じなかった輪郭が {open_chains} 枚"
                       "（辺が足りない）。この面は落としました")
@@ -330,7 +656,8 @@ def convert(dxf_path, out_path=None, accore=None, verbose=True, keep=False):
                 print(f"[面に分解] ★直線でない辺・面がありました: {kinds}"
                       "（円弧やスプラインは面にできません）")
 
-        write_faces_dxf(out_path, polygons, insunits=_insunits_of(dxf_path))
+        write_faces_dxf(out_path, polygons, insunits=_insunits_of(dxf_path),
+                        triangles=triangles)
         if verbose:
             print(f"[面に分解] 書き出しました: {out_path}")
         return out_path

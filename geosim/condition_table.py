@@ -545,14 +545,27 @@ def create(project, model, library=None, sheet=FIRST_SHEET, verbose=True):
 
     設定画面の「条件表を作成」から呼ぶ。「吸音率」シート（1000 材料の枠）と
     条件シート（30 レイヤの枠）を作る。**既にあるファイルは書き直さず更新する**。
+
+    ★★**作る場所はプロジェクトフォルダの直下に固定する**
+      （2026-09-06 ユーザー要望「条件表の作成は、選択したプロジェクトフォルダ内に
+      してほしい」。不具合報告 WIN240377 の ⑥）。
+
+      それまでは `path(project)` ＝ `Project.condition_path` を使っていたので、
+      設定画面の「条件表（xlsx）」の欄に**別の案件の条件表が残っている**と、
+      「作成」を押しても新しいプロジェクトには何も作られず、
+      **その別案件のファイルが `update()` で書き換えられていた**。
+      `update()` は材料番号と安全率は守るが**面数・面積・参考の式は書き直す**ので、
+      気づかないまま他案件の入力ファイルが変わってしまう（実害あり）。
+
+      ★「参照…」で選んだ既存の表を使うのは**読むとき**の話。
+        「作成」は別の操作なので、欄の指定には従わない。
     """
-    file_name = path(project)
-    if not is_book(file_name):
-        # 既定は xlsx。CSV を指定されている場合はその隣に xlsx を作る
-        file_name = os.path.join(os.path.dirname(file_name) or project.folder,
-                                 CONDITION_BOOK)
+    file_name = os.path.join(project.folder, CONDITION_BOOK)
     if os.path.exists(file_name):
-        return update(project, model, library, verbose=verbose)
+        # ★ここで `update()` に回すのは**プロジェクト直下の表**だけ
+        #   （欄が指す別フォルダの表には触らない）
+        return update(project, model, library, verbose=verbose,
+                      file_name=file_name)
     _new_book(file_name, project, model, library, sheet)
     if verbose:
         print(f"[条件表] 作りました（「{ABSORPTION_SHEET}」{MATERIAL_SLOTS} 枠 ＋ "
@@ -560,14 +573,21 @@ def create(project, model, library=None, sheet=FIRST_SHEET, verbose=True):
     return file_name
 
 
-def update(project, model, library=None, assignment=None, verbose=True):
+def update(project, model, library=None, assignment=None, verbose=True,
+           file_name=None):
     """条件表を更新する。**xlsx は「その場で直す」（書き直さない）。**
 
     ★利用者が作った体裁（列幅・書式・番号の式・増やした列）を壊さないため、
     見出しの文字から列を探し、**面数・面積・参考の式だけ**を書き換える。
     材料番号と安全率は絶対に上書きしない。
+
+    `file_name` を渡せばその表を対象にする（`create()` が
+    **プロジェクト直下に限る**ために使う。不具合報告 ⑥）。
+    省略すれば従来どおり `Project.condition_path`——計算のときは
+    「参照…」で選んだ表をそのまま更新するのが正しいので、既定は変えない。
     """
-    file_name = path(project)
+    if file_name is None:
+        file_name = path(project)
     if not is_book(file_name):
         previous, _ = read(file_name)
         if assignment is None:

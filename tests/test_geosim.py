@@ -471,14 +471,342 @@ def test_reverberation():
     measures = rv.decay_measures(t, ir, verbose=False)["measures"]
     check("EDT / T20 / T30 が揃って出る",
           set(measures) == {"EDT", "T20", "T30"}, str(sorted(measures)))
+
+    # ★1 つの雑音実現だけで見ない（2026-09-05）。
+    #   評価区間が短いほど BT 積が小さく、実現ごとに数 % 〜十数 % ぶれる。
+    #   EDT（0〜-10 dB）はとくにばらつくので、**実現を変えて平均**して偏りを見る。
+    #   これは推定量の性質（ISO 3382 でも BT 積が小さい条件は不確かさが増すとされる）
+    #   であって実装の誤りではない。1 実現の閾値を通すだけの試験は運任せになる
+    tolerance = {"EDT": 0.06, "T20": 0.03, "T30": 0.02}
     for name in ("EDT", "T20", "T30"):
-        err = np.abs(measures[name] - 0.5) / 0.5
+        gathered = []
+        for seed in range(8):
+            noise = np.random.default_rng(seed).standard_normal(nn)
+            gathered.append(rv.decay_measures(t, noise * np.exp(-t / tau),
+                                              verbose=False)["measures"][name])
+        mean = float(np.nanmean(np.array(gathered)))
         # 指数減衰なら EDT も T20 も T30 も同じ値になるはず
-        check(f"{name} が理論 T60 = 0.5 s を再現", np.nanmedian(err) < 0.06,
-              f"中央値 {np.nanmedian(err) * 100:.2f} % "
-              f"（{np.nanmin(measures[name]):.3f}〜{np.nanmax(measures[name]):.3f} s）")
+        check(f"{name} が理論 T60 = 0.5 s を再現（8 実現 × 8 バンドの平均）",
+              abs(mean / 0.5 - 1.0) < tolerance[name],
+              f"平均 {mean:.4f} s / 理論 0.5000 s（誤差 {(mean / 0.5 - 1) * 100:+.2f} %、"
+              f"許容 {tolerance[name] * 100:.0f} %）")
     check("直線減衰なら曲率がほぼ 0",
           np.nanmedian(np.abs(rv.decay_measures(t, ir, verbose=False)["curvature"])) < 10.0)
+
+
+# ------------------------------------------- 減衰曲線の読み取り（ISO 3382 準拠）
+def test_iso3382_decay():
+    print("\n[9b] 減衰曲線の読み取り（ISO 3382 の最小二乗回帰）")
+    fs = 44100.0
+    dt = 1.0 / fs
+
+    # ---- 雑音のない理想の減衰曲線。回帰は解析解と厳密に一致するはず ----
+    for want in (0.3, 0.8, 2.0):
+        n = int(fs * want * 1.5)
+        t = dt * np.arange(n)
+        decay = -60.0 * t / want                      # まっすぐ 60 dB/T で下がる
+        got, info = rv._decay_time(decay, dt, -5.0, -35.0, detail=True)
+        check(f"直線の減衰曲線から T30 = {want} s を厳密に再現",
+              abs(got - want) < 1e-9,
+              f"{got:.9f} s / 傾き {info['slope_db_per_s']:.4f} dB/s / "
+              f"r2 = {info['r2']:.6f}")
+        check(f"  適合の情報が揃う（区間 {info['range_db']}）",
+              info["samples"] > 100 and info["xi"] < 1e-6 and info["fit"] == "least_squares",
+              f"点数 {info['samples']} / ξ = {info['xi']:.3e}")
+
+    # ---- 2 点法は参照実装として残っている（元コード 134 行）----
+    n = int(fs * 1.5)
+    t = dt * np.arange(n)
+    decay = -60.0 * t / 1.0
+    crossing = rv._decay_time(decay, dt, -5.0, -35.0, fit="crossing")
+    check("★2 点法（fit='crossing'）が参照実装として残っている",
+          abs(crossing - 1.0) < 1e-3, f"{crossing:.6f} s")
+    check("直線なら回帰と 2 点法は一致する",
+          abs(crossing - rv._decay_time(decay, dt, -5.0, -35.0)) < 1e-3)
+    check("既定は ISO 3382 の最小二乗回帰",
+          rv.DEFAULT_DECAY_FIT == "least_squares", rv.DEFAULT_DECAY_FIT)
+    try:
+        rv._decay_time(decay, dt, -5.0, -35.0, fit="unknown")
+        ok = False
+    except ValueError:
+        ok = True
+    check("知らない読み取り方は理由を告げて止まる", ok)
+
+    # ---- 曲がった減衰（非拡散室で普通に起きる）では両者がずれる ----
+    # 二重勾配：速い減衰と遅い減衰の和。エネルギーで作って dB に直す
+    t2 = dt * np.arange(int(fs * 4.0))
+    fast = 10.0 ** (-60.0 * t2 / 0.4 / 10.0)
+    slow = 0.02 * 10.0 ** (-60.0 * t2 / 1.6 / 10.0)
+    bent = 10.0 * np.log10(fast + slow)
+    lsq = rv._decay_time(bent, dt, -5.0, -35.0)
+    two = rv._decay_time(bent, dt, -5.0, -35.0, fit="crossing")
+    check("★二重勾配では回帰と 2 点法が食い違う（規格が回帰を求める理由）",
+          abs(lsq / two - 1.0) > 0.02,
+          f"回帰 {lsq:.4f} s / 2 点法 {two:.4f} s（差 {(lsq / two - 1) * 100:+.1f} %）")
+    _, info = rv._decay_time(bent, dt, -5.0, -35.0, detail=True)
+    check("★曲がっていれば非線形性 ξ が大きく出る（ISO 3382-2）",
+          info["xi"] > rv.NONLINEARITY_LIMIT,
+          f"ξ = {info['xi']:.1f} / r2 = {info['r2']:.4f}（限度 {rv.NONLINEARITY_LIMIT}）")
+    straight = rv._decay_time(decay, dt, -5.0, -35.0, detail=True)[1]
+    check("まっすぐなら ξ はほぼ 0", straight["xi"] < 1e-6,
+          f"ξ = {straight['xi']:.3e}")
+
+    # ---- 曲率は ISO の C = (T30/T20 - 1)×100 ----
+    t20 = rv._decay_time(bent, dt, -5.0, -25.0)
+    t30 = rv._decay_time(bent, dt, -5.0, -35.0)
+    check("★曲率 C = (T30/T20 - 1)×100（ISO 3382 の定義）",
+          abs(rv.curvature_percent(bent, dt) - (t30 / t20 - 1.0) * 100.0) < 1e-9,
+          f"C = {rv.curvature_percent(bent, dt):+.2f} %")
+    check("まっすぐなら曲率はほぼ 0", abs(rv.curvature_percent(decay, dt)) < 1e-6,
+          f"{rv.curvature_percent(decay, dt):+.3e} %")
+    # ★曲率は「どの区間で残響時間を読んだか」に依らない。
+    #   2026-09-05 より前は評価区間を半分にした値との食い違いを曲率と呼んでいたので、
+    #   db_max / db_min を変えると曲率まで変わっていた
+    rng0 = np.random.default_rng(5)
+    nn0 = 2 ** 16
+    tt0 = dt * np.arange(nn0)
+    ir0 = rng0.standard_normal(nn0) * np.exp(-tt0 / (0.4 / 6.907755))
+    c30 = rv.decay_curves(tt0, ir0, verbose=False)["curvature"]
+    c20 = rv.decay_curves(tt0, ir0, db_max=-5.0, db_min=-25.0,
+                          verbose=False)["curvature"]
+    check("★曲率は残響時間を読んだ区間に依らない（曲線そのものの性質）",
+          np.allclose(c30, c20, equal_nan=True),
+          f"T30 の呼び出し {np.round(c30, 2)} / T20 の呼び出し {np.round(c20, 2)}")
+
+    # ---- 減衰していない／届かない曲線は NaN（黙って変な値を返さない）----
+    check("評価区間に届かなければ NaN",
+          np.isnan(rv._decay_time(-2.0 * np.ones(1000), dt, -5.0, -35.0)))
+    rising = np.linspace(0.0, -40.0, 1000)
+    rising[500:] = -40.0 + np.linspace(0.0, 5.0, 500)   # 途中から上がる
+    check("減衰が単調でなくても落ちない（値か NaN を返す）",
+          np.isfinite(rv._decay_time(rising, dt, -5.0, -35.0))
+          or np.isnan(rv._decay_time(rising, dt, -5.0, -35.0)))
+
+    # ---- ISO 3382 の余裕（評価区間の下端よりさらに 10 dB）----
+    check("余裕は 10 dB（T30 なら -45 dB まで見えていること）",
+          rv.DECAY_MARGIN_DB == 10.0, f"{rv.DECAY_MARGIN_DB} dB")
+    shallow = -60.0 * t / 1.0
+    shallow = np.maximum(shallow, -38.0)               # -38 dB で床に当たる
+    check("減衰の底が分かる（余裕の判定に使う）",
+          abs(rv._decay_floor_db(shallow) + 38.0) < 1e-9,
+          f"{rv._decay_floor_db(shallow):.2f} dB")
+
+    # ---- 出力に適合の質が載る ----
+    rng = np.random.default_rng(0)
+    nn = 2 ** 17
+    tt = dt * np.arange(nn)
+    ir = rng.standard_normal(nn) * np.exp(-tt / (0.5 / 6.907755))
+    result = rv.decay_measures(tt, ir, verbose=False)
+    check("結果に非線形性 ξ が指標ごとに入る",
+          set(result["nonlinearity"]) == {"EDT", "T20", "T30"},
+          str(sorted(result["nonlinearity"])))
+    check("結果に減衰の底が入る", np.all(result["floor_db"] < -35.0),
+          f"{np.round(result['floor_db'], 1)}")
+    check("結果に使った読み取り方が入る", result["fit_method"] == "least_squares")
+    info = result["fit"]["T30"][3]
+    check("適合の情報に使った区間（dB と秒）が入る",
+          info["range_db"] == (-5.0, -35.0) and info["range_s"][1] > info["range_s"][0],
+          f"{info['range_db']} dB / {info['range_s'][0]:.3f}〜{info['range_s'][1]:.3f} s")
+
+    import tempfile
+    import table as tb
+    with tempfile.TemporaryDirectory() as folder:
+        path = os.path.join(folder, "rt.csv")
+        rv.write_decay_measures(path, result)
+        freq, rows = tb.read_frequency_table(path)
+        check("CSV に ξ・曲率・減衰の底が載る",
+              {"T30_s", "T30_xi", "curvature_percent", "decay_floor_db"} <= set(rows),
+              str(sorted(rows)))
+        check("まとめ表が拾う行名は変わっていない（summary.py の互換）",
+              {"EDT_s", "T20_s", "T30_s"} <= set(rows))
+
+    # ---- 明瞭度の起点は「ピークより 20 dB 低い点」（ISO 3382-1）----
+    energy = np.zeros(1000)
+    energy[100] = 0.001          # 立ち上がり（ピークの -30 dB）
+    energy[150] = 0.02           # ピークの -17 dB → ここが起点
+    energy[200] = 1.0            # ピーク
+    check("★起点はピークより 20 dB 低いレベルを最初に超える点（ISO 3382-1）",
+          rv._onset_index(energy) == 150, f"添字 {rv._onset_index(energy)}")
+    check("  ピーク以降の同じレベルは拾わない",
+          rv._onset_index(np.concatenate([energy, energy])) == 150)
+    check("  しきい値は -20 dB", rv.ONSET_THRESHOLD_DB == -20.0)
+    check("全部 0 なら先頭を返す（落ちない）", rv._onset_index(np.zeros(10)) == 0)
+
+    # 直接音より強い初期反射があっても、起点は直接音のまま
+    n = int(fs * 0.5)
+    pulse = np.zeros(n)
+    pulse[int(fs * 0.010)] = 1.0        # 直接音
+    pulse[int(fs * 0.030)] = 3.0        # 強い初期反射（直接音より大きい）
+    onset = rv._onset_index(pulse ** 2)
+    check("★強い初期反射があっても起点は直接音（argmax だと反射へ飛ぶ）",
+          onset == int(fs * 0.010),
+          f"起点 {onset / fs * 1000:.1f} ms / argmax は "
+          f"{int(np.argmax(pulse ** 2)) / fs * 1000:.1f} ms")
+
+
+# ------------------------------------------------ 第2段の修正（2026-09-05）
+def test_fixes_2026_09_05():
+    print("\n[9c] 結果を誤らせていた箇所の修正（評価レポート 第2段）")
+    import frequency_response as fr
+    import sound_level as sl
+    from atmosphere import Atmosphere
+
+    # ---- ① 受音球は「基点から壁までの線分」と球の交差で見る ----
+    direction = np.array([[1.0, 0.0, 0.0]])
+    origin = np.zeros((1, 3))
+    wall = np.array([1.0])
+    # 壁 1.0 m・球の中心 1.1 m・半径 0.2 m → 線分は 0.9〜1.0 m で球の中にいる
+    check("★垂足が壁より先でも、線分が球を通れば受音",
+          bool(rs.inside_sphere_batch(0.2, direction, origin,
+                                      np.array([1.1, 0.0, 0.0]), wall)[0]))
+    check("  従来のやり方（method='foot'）では落としていた",
+          not bool(rs.inside_sphere_batch(0.2, direction, origin,
+                                          np.array([1.1, 0.0, 0.0]), wall,
+                                          method="foot")[0]))
+    check("★垂足が基点より後ろでも、基点が球の中なら受音",
+          bool(rs.inside_sphere_batch(0.2, direction, origin,
+                                      np.array([-0.1, 0.0, 0.0]), wall)[0]))
+    check("本当に届かなければ受音しない",
+          not bool(rs.inside_sphere_batch(0.2, direction, origin,
+                                          np.array([1.5, 0.0, 0.0]), wall)[0]))
+    check("接するときは受音（等号を含む）",
+          bool(rs.inside_sphere_batch(0.2, direction, origin,
+                                      np.array([0.5, 0.2, 0.0]), wall)[0]))
+    check("壁に当たらない（inf）音線でも判定できる",
+          bool(rs.inside_sphere_batch(0.2, direction, origin,
+                                      np.array([50.0, 0.0, 0.0]),
+                                      np.array([np.inf]))[0]))
+
+    rng = np.random.default_rng(11)
+    dirs = rng.standard_normal((400, 3))
+    dirs /= np.linalg.norm(dirs, axis=1, keepdims=True)
+    orgs = rng.standard_normal((400, 3))
+    rec = rng.standard_normal(3)
+    walls = rng.uniform(0.1, 3.0, 400)
+    for method in ("segment", "foot"):
+        batch = rs.inside_sphere_batch(0.5, dirs, orgs, rec, walls, method=method)
+        one = np.array([rs.inside_sphere(0.5, dirs[i], orgs[i], rec, walls[i],
+                                         method=method) for i in range(400)])
+        check(f"受音判定（{method}）が scalar 版と完全一致",
+              np.array_equal(batch, one), f"受音 {int(batch.sum())} 本")
+    segment = rs.inside_sphere_batch(0.5, dirs, orgs, rec, walls)
+    foot = rs.inside_sphere_batch(0.5, dirs, orgs, rec, walls, method="foot")
+    check("★取りこぼしが減るだけ（以前拾えたものは必ず拾う）",
+          bool(np.all(segment[foot])),
+          f"線分 {int(segment.sum())} 本 / 垂足 {int(foot.sum())} 本")
+    try:
+        rs.inside_sphere_batch(0.5, dirs, orgs, rec, walls, method="unknown")
+        ok = False
+    except ValueError:
+        ok = True
+    check("知らない判定の仕方は理由を告げて止まる", ok)
+
+    # ---- ② 複素和が帯域別の音源パワーレベルを保つ ----
+    air = Atmosphere()
+    times = np.array([1.0 / air.sound_velocity])
+    energies = np.ones((1, 2))
+    distances = np.array([1.0])
+    bands = np.array([500.0, 1000.0])
+    power = [80.0, 100.0]
+    energy = sl.band_levels(times, energies, distances, air, bands,
+                            source_power_db=power, verbose=False)["levels"]
+    coherent = sl.coherent_band_levels(times, energies, distances, air, bands,
+                                       source_power_db=power)
+    check("★経路 1 本ならエネルギー和と複素和は一致する",
+          np.allclose(coherent, energy, atol=1e-9),
+          f"複素 {np.round(coherent, 3)} / エネルギー {np.round(energy, 3)}")
+    # PWL だけの効きを見る（空気吸収は帯域ごとに違うので、その差を引いて比べる）
+    base = sl.coherent_band_levels(times, energies, distances, air, bands,
+                                   source_power_db=None)
+    check("★帯域別 PWL がそのまま乗る（平均へ潰さない）",
+          np.allclose(coherent - base, power, atol=1e-9),
+          f"乗った量 {np.round(coherent - base, 3)} / 与えた PWL {power}")
+    check("  以前は平均へ潰していた（80/100 → 両方 90 相当）",
+          abs((coherent[1] - coherent[0])
+              - (energy[1] - energy[0])) < 1e-9,
+          f"複素の差 {coherent[1] - coherent[0]:.3f} / "
+          f"エネルギーの差 {energy[1] - energy[0]:.3f} dB")
+    flat = sl.coherent_band_levels(times, energies, distances, air, bands,
+                                   source_power_db=90.0)
+    check("  1 つだけ渡せば全帯域に同じ値が乗る",
+          np.allclose(flat - base, 90.0, atol=1e-9),
+          f"{np.round(flat - base, 3)}")
+
+    # ---- ③ 複素和のときは総合値・A 特性・内訳も同じ足し方 ----
+    two_t = np.array([3.0, 4.0]) / air.sound_velocity
+    two_d = np.array([3.0, 4.0])
+    two_e = np.ones((2, 2))
+    full = sl.coherent_levels(two_t, two_e, two_d, air, bands,
+                              source_power_db=power)
+    check("複素和でも内訳と総合値が揃う",
+          {"levels", "direct", "reflected", "early", "late",
+           "a_weighted", "overall", "overall_a"} <= set(full),
+          str(sorted(full)))
+    check("★総合値はその複素和のバンドから作られる",
+          abs(full["overall"] - 10.0 * np.log10(
+              np.sum(10.0 ** (full["levels"] / 10.0)))) < 1e-9,
+          f"{full['overall']:.3f} dB")
+    check("A 特性は複素和のレベル + A 補正",
+          np.allclose(full["a_weighted"],
+                      full["levels"] + sl.a_weighting(bands)))
+    single_energy = sl.band_levels(two_t[:1], two_e[:1], two_d[:1], air, bands,
+                                   source_power_db=power, verbose=False)["levels"]
+    check("★直接音は 1 本なのでエネルギー和と一致する",
+          np.allclose(full["direct"], single_energy, atol=1e-9),
+          f"複素 {np.round(full['direct'], 3)} / エネルギー {np.round(single_energy, 3)}")
+    both = sl.band_levels(two_t, two_e, two_d, air, bands,
+                          source_power_db=power, verbose=False)["levels"]
+    check("同じ大きさ 2 本なら複素和はエネルギー和 +3.01 dB を超えない",
+          bool(np.all(full["levels"] <= both + 3.011)),
+          f"複素 {np.round(full['levels'], 2)} / エネルギー {np.round(both, 2)}")
+
+    # ---- ④ 固有周波数の次数を寸法と上限周波数から決める ----
+    size, velocity = (20.0, 5.0, 3.0), 343.0
+    auto = fr.modal_frequencies(size, velocity, 250.0)
+    fixed = fr.modal_frequencies(size, velocity, 250.0, orders=12)
+    def has(modes, order):
+        return any((m[1], m[2], m[3]) == order for m in modes)
+    check("★長い室で取りこぼしていた高次の軸モードが入る",
+          has(auto, (20, 0, 0)) and not has(fixed, (20, 0, 0)),
+          f"自動 {len(auto)} 個 / 12 次固定 {len(fixed)} 個")
+    check("  必要な次数は floor(2 L f / c)",
+          max(m[1] for m in auto) == int(2 * 20.0 * 250.0 / velocity),
+          f"x 方向の最大次数 {max(m[1] for m in auto)}")
+    check("  上限周波数を超えるモードは入らない",
+          max(m[0] for m in auto) <= 250.0 + 1e-9)
+    check("  下限より低いモードは入らない",
+          min(m[0] for m in fr.modal_frequencies(size, velocity, 250.0, low=100.0))
+          >= 100.0)
+    check("orders を渡せば従来どおり頭打ちにできる（互換）",
+          max(m[1] for m in fixed) <= 12)
+    check("★最低次は (1,0,0) で c/(2L)",
+          abs(auto[0][0] - velocity / (2 * 20.0)) < 1e-9,
+          f"{auto[0][0]:.3f} Hz / 理論 {velocity / 40.0:.3f} Hz")
+    check("寸法が 0 なら空を返す（落ちない）",
+          fr.modal_frequencies((0.0, 5.0, 3.0), velocity, 250.0) == [])
+
+    # ---- ⑤ 気圧の単位は kPa。Pa を渡したら止める ----
+    check("既定は 101.325 kPa", abs(Atmosphere().pressure - 101.325) < 1e-9)
+    for bad, why in ((101325.0, "Pa で渡した"), (0.0, "0"), (500.0, "範囲外")):
+        try:
+            Atmosphere(pressure=bad)
+            ok, message = False, ""
+        except ValueError as error:
+            ok, message = True, str(error)
+        check(f"★気圧 {bad:g}（{why}）は理由を告げて止まる", ok, message[:60])
+    check("  Pa と分かるときは換算値を教える",
+          "101.325 kPa です" in _pressure_error(101325.0))
+    check("妥当な範囲は通る",
+          abs(Atmosphere(pressure=95.0).pressure - 95.0) < 1e-9)
+
+
+def _pressure_error(value):
+    from atmosphere import Atmosphere
+    try:
+        Atmosphere(pressure=value)
+    except ValueError as error:
+        return str(error)
+    return ""
 
 
 # ---------------------------------------------------------------- 統計残響式
@@ -1424,17 +1752,23 @@ def test_redraw():
 
     # ★置き場の約束（2026-08-21 に変更）。受音点ごとは `結果/recN/` `図/recN/`、
     #   受音点に依らないもの（統計残響式・材料別面積・音線軌跡）は `結果/` 直下
+    #
+    # ★名前に `現状` が入るのは 2026-09-06 の判断（不具合報告 WIN240377 の ②）。
+    #   条件シートを選ばなくても、計算は条件表の先頭シート（`現状`）の材料を使うので、
+    #   その名前を結果に残す。`_経路.npz` は条件に依らないので付かない
     rec1_results = project.path(pj.RESULT_DIR, pj.RECEIVER_DIR % 1)
     rec1_figures = project.path(pj.FIGURE_DIR, pj.RECEIVER_DIR % 1)
     check("受音点ごとの結果は 結果/rec1/ に入る",
-          os.path.isfile(os.path.join(rec1_results, "研修室_条件A_rt.csv")),
+          os.path.isfile(os.path.join(rec1_results, "研修室_条件A_現状_rt.csv")),
           str(sorted(os.listdir(rec1_results))))
     check("受音点に依らない結果は 結果/ 直下に入る",
-          os.path.isfile(project.path(pj.RESULT_DIR, "研修室_条件A_吸音率と理論値.csv")),
+          os.path.isfile(project.path(pj.RESULT_DIR,
+                                      "研修室_条件A_現状_吸音率と理論値.csv")),
           str(sorted(os.listdir(project.path(pj.RESULT_DIR)))))
     check("受音点ごとの図は 図/rec1/ に入る", os.path.isdir(rec1_figures))
     check("まとめ表が作られる",
-          os.path.isfile(project.path(pj.RESULT_DIR, "研修室_条件A_まとめ_残響時間.csv")))
+          os.path.isfile(project.path(pj.RESULT_DIR,
+                                      "研修室_条件A_現状_まとめ_残響時間.csv")))
     # ★ファイル名の頭に対象室＋条件名が入る（報告書に出しても見分けが付くように）
     check("★結果ファイルすべてに対象室＋条件名が付く",
           all(n.startswith("研修室_条件A_") for n in os.listdir(rec1_results)),
@@ -1959,6 +2293,18 @@ def test_shared_trace_and_batch_backtrace():
 
 
 # -------------------------------------------- 結果ファイルの名前と室のまとめ
+def _make_condition_book(path, sheets):
+    """条件表の骨だけの xlsx を作る（シート名だけ見るテスト用）。"""
+    from openpyxl import Workbook
+    book = Workbook()
+    book.remove(book.active)
+    book.create_sheet("吸音率")           # RESERVED_SHEETS。条件には数えない
+    for name in sheets:
+        book.create_sheet(name)
+    book.save(path)
+    return path
+
+
 def test_result_naming():
     print("\n[30] 結果ファイルの名前（対象室＋条件名）と『吸音率と理論値』")
     import csv
@@ -1989,6 +2335,63 @@ def test_result_naming():
     check("図にも頭が付く",
           os.path.basename(project.figure_path("decay.png"))
           == "視聴覚室_残響改善案_decay.png")
+
+    # ---- ★条件シート未指定でも、実際に使うシート名を条件名にする ----
+    #
+    # 2026-09-06 ユーザー判断（不具合報告 WIN240377 の ②）。
+    # `condition_table.sheet_of()` は指定が無ければ**先頭シート**を使うので、
+    # 「シートを選ばずに計算」しても材料はそのシートのもの。
+    # 名前を空にすると、どの条件で計算したかが結果に残らない。
+    import condition_table as ct
+
+    named = tempfile.mkdtemp(prefix="geosim_sheet_")
+    try:
+        book_path = os.path.join(named, pj.DEFAULT_CONDITION_FILE)
+        _make_condition_book(book_path, ["現状", "改修案"])
+        blank = pj.Project(named, name="室")
+        check("★シート未指定なら条件表の先頭シート名が条件名になる",
+              blank.condition_label == "現状",
+              f"{blank.prefixed('rt.csv')}")
+        chosen = pj.Project(named, name="室")
+        chosen.condition_sheet = "改修案"
+        check("  明示したシートが優先される",
+              chosen.condition_label == "改修案", chosen.prefixed("rt.csv"))
+        check("  条件表が無ければ条件名は空のまま",
+              pj.Project(tempfile.mkdtemp(), name="室").condition_label == "",
+              "（条件を分けていないので付けない）")
+
+        # ★答えを凍結する。計算の**途中**で条件表が作られるので、
+        #   引き直すと同じ 1 回の実行の中でファイル名が変わってしまう
+        late = tempfile.mkdtemp(prefix="geosim_late_")
+        frozen = pj.Project(late, name="室")
+        check("計算の頭では条件表が無い → 条件名なし", frozen.condition_label == "")
+        _make_condition_book(os.path.join(late, pj.DEFAULT_CONDITION_FILE),
+                             ["現状"])
+        check("★途中で条件表ができても、その実行の中では名前が変わらない",
+              frozen.condition_label == "",
+              f"{frozen.prefixed('rt.csv')}（凍結）")
+        check("  次に作った Project では新しい名前になる",
+              pj.Project(late, name="室").condition_label == "現状")
+
+        # ---- 昔の名前を残さない ----
+        folder2 = os.path.join(named, "結果")
+        os.makedirs(folder2, exist_ok=True)
+        for name in ("室_まとめ_音圧レベル.csv", "まとめ_音圧レベル.csv",
+                     "室_現状_まとめ_音圧レベル.csv"):
+            with open(os.path.join(folder2, name), "w", encoding="utf-8") as f:
+                f.write("x")
+        removed = blank.drop_old_names(folder2, "まとめ_音圧レベル.csv")
+        left = sorted(os.listdir(folder2))
+        check("★昔の名前のまとめ表は消す（どちらが最新か分からなくなるため）",
+              left == ["室_現状_まとめ_音圧レベル.csv"], f"残り {left}")
+        check("  消した名前を返す", sorted(removed)
+              == ["まとめ_音圧レベル.csv", "室_まとめ_音圧レベル.csv"], str(removed))
+        check("  いま書く名前は消さない",
+              os.path.exists(os.path.join(folder2, "室_現状_まとめ_音圧レベル.csv")))
+        check("  無ければ何もしない（落ちない）",
+              blank.drop_old_names(folder2, "無い表.csv") == [])
+    finally:
+        shutil.rmtree(named, ignore_errors=True)
 
     # ---- 昔の名前も読める（頭を付ける前・1 枚にまとめる前のプロジェクト）----
     project.ensure_dirs()
@@ -2485,6 +2888,47 @@ def test_condition_table():
           (legacy, None) not in ct.discover(folder),
           str([os.path.basename(f) for f, _ in ct.discover(folder)]))
 
+    # ---- ★「作成」は選んだプロジェクトフォルダに作る（不具合報告 ⑥）----
+    #
+    # 2026-09-06 ユーザー要望「条件表の作成は、選択したプロジェクトフォルダ内に
+    # してほしい」。それまでは `Project.condition_path`（＝画面の「条件表（xlsx）」の欄）
+    # を対象にしていたので、**欄に前の案件の表が残っていると、新しいプロジェクトには
+    # 何も作られず、その別案件の表が `update()` で書き換えられていた**。
+    # `update()` は材料番号と安全率は守るが**面数・面積・参考の式は書き直す**ので、
+    # 気づかないまま他案件の入力ファイルが変わってしまう。
+    other = tempfile.mkdtemp(prefix="geosim_other_")
+    fresh = tempfile.mkdtemp(prefix="geosim_fresh_")
+    try:
+        shutil.copy(TEST_DXF, os.path.join(fresh, "新案件.dxf"))
+        elsewhere = pj.Project(other, dxf=os.path.join(fresh, "新案件.dxf"))
+        model_o = rd.read_model(elsewhere.dxf_path, verbose=False)
+        outside = ct.create(elsewhere, model_o, verbose=False)
+        before = os.path.getmtime(outside)
+
+        # 欄が**別フォルダ**の表を指している状態で「作成」を押す
+        target = pj.Project(fresh, dxf="新案件.dxf", condition_csv=outside)
+        check("欄は別フォルダの表を指している",
+              os.path.dirname(os.path.abspath(target.condition_path))
+              == os.path.abspath(other), target.condition_path)
+        made = ct.create(target, rd.read_model(target.dxf_path, verbose=False),
+                         verbose=False)
+        check("★「作成」は選んだプロジェクトフォルダの中に作る",
+              os.path.dirname(os.path.abspath(made)) == os.path.abspath(fresh),
+              made)
+        check("  ファイル名は既定名（条件表.xlsx）",
+              os.path.basename(made) == ct.CONDITION_BOOK, os.path.basename(made))
+        check("★別フォルダの表は書き換えない（他案件を壊さない）",
+              os.path.getmtime(outside) == before)
+        check("  2 回目は同じ表を更新する（作り直さない）",
+              os.path.abspath(ct.create(
+                  target, rd.read_model(target.dxf_path, verbose=False),
+                  verbose=False)) == os.path.abspath(made))
+        check("  計算のときは欄で選んだ表をそのまま更新する（既定は変えない）",
+              "file_name" in ct.update.__code__.co_varnames)
+    finally:
+        shutil.rmtree(other, ignore_errors=True)
+        shutil.rmtree(fresh, ignore_errors=True)
+
     shutil.rmtree(folder, ignore_errors=True)
 
 
@@ -2542,8 +2986,9 @@ def test_workbook():
     # ---- ★CSV は残っている（役割を分ける）----
     rec1 = project.path(pj.RESULT_DIR, pj.RECEIVER_DIR % 1)
     check("★CSV は今のまま残す（逐次読み込み・描き直しに使う）",
-          os.path.isfile(os.path.join(rec1, "エクセル室_条件A_rt.csv"))
-          and os.path.isfile(os.path.join(rec1, "エクセル室_条件A_spl.csv")),
+          os.path.isfile(os.path.join(rec1, "エクセル室_条件A_現状_rt.csv"))
+          and os.path.isfile(os.path.join(rec1,
+                                          "エクセル室_条件A_現状_spl.csv")),
           str(sorted(os.listdir(rec1))))
 
     # ---- 雛形に流し込む（体裁を残す）----
@@ -2770,6 +3215,24 @@ def test_conditions_batch():
                                          make_figures=False)
     check("2 条件とも回る", len(outcome["conditions"]) == 2,
           str(len(outcome["conditions"])))
+
+    # ★★**一括実行のあとも `project.json` の条件は変わらない**
+    #   （2026-09-06 不具合報告 WIN240377 の ③）。
+    #   条件ごとの複製（`sub`）は `folder` が同じなので、`run()` の中の
+    #   `save()` が **最後に回した条件で project.json を上書きしていた**。
+    #   次に単発で回すと、選んでいたつもりの条件と違うものが使われる。
+    import json as _json
+    saved = _json.load(open(project.path("project.json"), encoding="utf-8"))
+    check("★一括実行しても project.json の条件シートが書き換わらない",
+          saved["condition_sheet"] == "",
+          f"condition_sheet = {saved['condition_sheet']!r}"
+          f"（最後の条件 {found[-1][1]!r} になっていたら不具合）")
+    check("  条件表の指定も勝手に変わらない",
+          saved["condition_csv"] in ("", None), repr(saved["condition_csv"]))
+    check("  音源だけは DXF から取った値が残る",
+          saved["source"] is not None, str(saved["source"]))
+    check("設定を書かせない切り替えがある（`save_settings`）",
+          "save_settings" in run_project.run.__code__.co_varnames)
 
     results = project.path(pj.RESULT_DIR)
     names = sorted(os.listdir(results))
@@ -3568,6 +4031,63 @@ def test_ui_2026_08_24():
           abs(editor2.head_azimuth[0] - 123.0) < 1e-9,
           f"{editor2.head_azimuth[0]:.1f}°")
 
+    # ---- ②b レイヤの一括表示（2026-09-06 ユーザー要望「全選択全解除ほしい」）----
+    #
+    # 実案件（階段教室）は画層が 22 種あり、1 つずつ切り替えると
+    # 「1 つだけ見る」「全部戻す」に 22 回のクリックが要る。
+    # ★数字キーは 1〜9 までしか割り当てられない（VTK のキーは 1 文字）ので、
+    #   10 個目以降は左パネルの「レイヤ番号」の欄で指す。
+    class FakeRepresentation:
+        def __init__(self):
+            self.state = 1
+
+        def SetState(self, value):
+            self.state = int(value)
+
+    class FakeBox:
+        def __init__(self):
+            self.rep = FakeRepresentation()
+
+        def GetRepresentation(self):
+            return self.rep
+
+    editor3 = fe.FaceEditor(model, head_azimuth=[0.0])
+    editor3.layers = ["床", "壁", "天井", "反射板"]
+    shown, boxes = {}, []
+    for name in editor3.layers:
+        shown[name] = True
+        box = FakeBox()
+
+        def callback(flag, name=name):
+            shown[name] = bool(flag)
+        boxes.append((box, callback))
+    editor3.layer_boxes = boxes
+
+    editor3._show_all_layers(False)
+    check("★レイヤを全非表示にできる", not any(shown.values()), str(shown))
+    check("  チェックボックスの見た目も合う（コールバックだけでは変わらない）",
+          all(b.rep.state == 0 for b, _c in boxes))
+    editor3._show_all_layers(True)
+    check("★レイヤを全表示にできる", all(shown.values()), str(shown))
+    check("  見た目も戻る", all(b.rep.state == 1 for b, _c in boxes))
+
+    editor3._set_layer_pick(3)
+    check("「レイヤ番号」は 1 始まりで受けて 0 始まりで持つ",
+          editor3.layer_index == 2, str(editor3.layer_index))
+    editor3._show_only_layer()
+    check("★その番号のレイヤだけ表示できる（1 つだけ見る使い方）",
+          shown == {"床": False, "壁": False, "天井": True, "反射板": False},
+          str(shown))
+    editor3._set_layer_pick(99)
+    check("範囲外の番号は端で止まる（落ちない）",
+          editor3.layer_index == len(editor3.layers) - 1,
+          str(editor3.layer_index))
+    editor3._set_layer_pick(0)
+    check("0 以下でも端で止まる", editor3.layer_index == 0)
+    editor3.layer_boxes = []
+    editor3._show_all_layers(True)      # 空でも落ちない
+    check("レイヤが無くても落ちない", True)
+
     # ---- ③ 動画の長さと再生速度（ユーザー指摘「反映されていない」）----
     class FakeAnimation:
         def __init__(self, frames):
@@ -3941,6 +4461,54 @@ def test_hemi_anechoic():
           and iq.trace_label("rec2") == "短辺稜線方向"
           and iq.trace_label("rec3") == "長辺稜線方向"
           and iq.trace_label("rec9") == "rec9")
+
+    # ---- ⑦a まとめ表は「条件名なし」で書かれていても読める ----
+    #
+    # ★2026-09-06 の不具合報告（WIN240377）。条件を選ばずに計算すると
+    #   `run_project` は `<室>_まとめ_音圧レベル.csv` を書くのに、
+    #   `inverse_square.main()` は条件表のシートを数え上げて `condition_sheet` を
+    #   自分で立てるため、読む側だけ `<室>_<条件>_まとめ_…` を探して
+    #   **「先に計算してください」で止まっていた**。
+    #   `read_levels()` が `prefixed()` で 1 通りしか組んでいなかったのが原因で、
+    #   すぐ上の `read_points()`（`existing_result_path`）と流儀が割れていた。
+    import shutil
+    import tempfile
+
+    import project as pj_
+    import summary as sm_
+    import table as tb_
+
+    folder = tempfile.mkdtemp()
+    try:
+        shutil.copy(TEST_DXF, os.path.join(folder, "室.dxf"))
+        os.makedirs(os.path.join(folder, pj_.RESULT_DIR), exist_ok=True)
+        written = pj_.Project(folder, dxf="室.dxf")          # 条件シートなし
+        check("条件を選ばなければファイル名に条件名は付かない",
+              written.prefixed(sm_.LEVEL_FILE) == f"室_{sm_.LEVEL_FILE}",
+              written.prefixed(sm_.LEVEL_FILE))
+        tb_.write_sectioned_table(
+            os.path.join(folder, pj_.RESULT_DIR,
+                         written.prefixed(sm_.LEVEL_FILE)),
+            np.array([500.0, 1000.0]),
+            [("rec1", "Lp_dB", "2.0", np.array([80.0, 81.0]))],
+            value_label="音源距離_m")
+
+        reader = pj_.Project(folder, dxf="室.dxf")
+        reader.condition_sheet = "現状"                       # 読む側だけ条件名が立つ
+        check("★条件名なしで書かれたまとめ表を、条件名つきの側から読める",
+              iq.read_levels(reader)[0] is not None,
+              f"探す名前: {reader.name_candidates(sm_.LEVEL_FILE)}")
+        frequencies, levels = iq.read_levels(reader)
+        check("  中身も読めている（周波数と受音点）",
+              frequencies is not None and len(frequencies) == 2
+              and "rec1" in levels, str(sorted(levels)))
+        check("  条件名つきで書いた場合はそちらを優先する",
+              iq.read_levels(written)[0] is not None)
+        missing = pj_.Project(tempfile.mkdtemp(), dxf="無い.dxf")
+        check("  本当に無ければ None を返す（黙って落ちない）",
+              iq.read_levels(missing) == (None, {}))
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
     # ★半自由音場（Q=2）の理論線：逆二乗どおりに 6 dB/倍距離で落ちる
     theory = iq.free_field_levels(np.array([1.0, 2.0, 4.0]))
     check("★半自由音場の理論線は 6 dB/倍距離",
@@ -4049,13 +4617,37 @@ def test_frequency_response():
     single.time = single.distance / c
     single.energy = np.ones((1, 2))
     frequencies = np.linspace(50.0, 200.0, 61)
-    pressure = fr.response(single, frequencies, air)
-    magnitude = np.abs(pressure)
+    # 空気吸収を切れば、干渉相手がいないので大きさは周波数によらない
+    magnitude = np.abs(fr.response(single, frequencies, air,
+                                   air_absorption=False))
     check("★経路 1 本なら大きさは周波数によらず一定（干渉相手がいない）",
           np.allclose(magnitude, magnitude[0], rtol=1e-12))
     check("大きさは √(E/4π)/r",
           abs(magnitude[0] - np.sqrt(2.0 / (4 * np.pi)) / 3.0) < 1e-12,
           f"{magnitude[0]:.6f}")
+
+    # ★空気吸収（2026-09-05 に実装。それまで分岐が `pass` で ON/OFF 差 0 dB だった）
+    far = ln_.PulseList(band_number=8)
+    far.distance = np.array([100.0])
+    far.time = far.distance / c
+    far.energy = np.ones((1, 8))
+    check_f = np.array([1000.0, 4000.0, 8000.0])
+    on = np.abs(fr.response(far, check_f, air, band=7))
+    off = np.abs(fr.response(far, check_f, air, band=7, air_absorption=False))
+    got = 20.0 * np.log10(on / off)
+    # 振幅に効くのは exp(-m d / 2)。**エネルギーの exp(-m d) と 2 倍を取り違えないこと**
+    want = -air.absorption_coefficient(check_f) * 100.0 * 10.0 * np.log10(np.e)
+    check("★空気吸収が効く（ON/OFF が 0 dB ではない）",
+          np.all(np.abs(got) > 0.4),
+          f"100 m で {np.round(got, 2)} dB")
+    check("  減衰は振幅の exp(-m d / 2) と厳密に一致（ISO 9613-1）",
+          np.allclose(got, want, atol=1e-9),
+          f"実装 {np.round(got, 3)} / 規格 {np.round(want, 3)} dB")
+    check("  air_absorption=False なら掛からない",
+          np.allclose(off, np.sqrt(1.0 / (4 * np.pi)) / 100.0, rtol=1e-12))
+    check("  周波数を刻んで回しても同じ（chunk に依らない）",
+          np.allclose(fr.response(far, check_f, air, band=7, chunk=1), 
+                      fr.response(far, check_f, air, band=7)))
 
     # 経路 2 本なら、経路長差から決まる周期で山谷ができる
     pair = ln_.PulseList(band_number=1)
@@ -4339,6 +4931,98 @@ def test_dxf_faces():
     check("★穴のある面は輪が 2 つになる（数えて知らせるため）",
           len(loops) == 2, f"{[len(l) for l in loops]}")
 
+    # ---- ②b ★穴を開けたまま三角形に割る（2026-09-09 ユーザー指摘）----
+    #
+    # > 元々ドーナッツ状（中が空いている）の床が、一面の床になってしまっています
+    #
+    # 実案件（階段教室）の `床_1F` が**外周 367.48 m² ＋ 穴 102.27 m²** で、
+    # 本来 265.22 m² のドーナツなのに外周だけを面にしていたため、
+    # **2 層吹き抜けが幻の床で塞がっていた**（音線がそこで反射してしまう）。
+    # 穴を橋でつないで三角形に割り、3DFACE で書くようにした。
+    def _area3(triangles):
+        total = 0.0
+        for a, b, c in triangles:
+            u = np.asarray(b, float) - np.asarray(a, float)
+            v = np.asarray(c, float) - np.asarray(a, float)
+            total += float(np.linalg.norm(np.cross(u, v))) / 2.0
+        return total
+
+    ring_outer = [(0, 0, 0), (4, 0, 0), (4, 4, 0), (0, 4, 0)]
+    ring_hole = [(1, 1, 0), (1, 3, 0), (3, 3, 0), (3, 1, 0)]
+    parts = df.triangles_with_holes([ring_outer, ring_hole])
+    check("★ドーナツ状の面を三角形に割れる（穴を塞がない）",
+          parts is not None, f"{parts if parts is None else len(parts)} 枚")
+    check("  面積が「外周 − 穴」と一致する（16 − 4 = 12）",
+          abs(_area3(parts) - 12.0) < 1e-9, f"{_area3(parts):.6f}")
+
+    def _covers(triangles, point):
+        """その点を覆う三角形の数（重心座標で見る）。"""
+        found = 0
+        for a, b, c in triangles:
+            a, b, c = (np.asarray(p, float) for p in (a, b, c))
+            v0, v1, v2 = c - a, b - a, np.asarray(point, float) - a
+            d00, d01, d02 = v0 @ v0, v0 @ v1, v0 @ v2
+            d11, d12 = v1 @ v1, v1 @ v2
+            den = d00 * d11 - d01 * d01
+            if abs(den) < 1e-12:
+                continue
+            u = (d11 * d02 - d01 * d12) / den
+            w = (d00 * d12 - d01 * d02) / den
+            if u >= -1e-9 and w >= -1e-9 and u + w <= 1.0 + 1e-9:
+                found += 1
+        return found
+
+    check("★穴の中は覆われない（ここが塞がっていた）",
+          _covers(parts, (2.0, 2.0, 0.0)) == 0,
+          f"{_covers(parts, (2.0, 2.0, 0.0))} 枚")
+    check("  床の上は覆われる", _covers(parts, (0.5, 0.5, 0.0)) >= 1)
+
+    # 穴が 2 つでも通る（橋を 1 つずつ架ける）
+    two = df.triangles_with_holes([[(0, 0, 0), (6, 0, 0), (6, 3, 0), (0, 3, 0)],
+                                   [(1, 1, 0), (1, 2, 0), (2, 2, 0), (2, 1, 0)],
+                                   [(4, 1, 0), (4, 2, 0), (5, 2, 0), (5, 1, 0)]])
+    check("穴が 2 つでも割れる（18 − 1 − 1 = 16）",
+          two is not None and abs(_area3(two) - 16.0) < 1e-9,
+          "割れなかった" if two is None else f"{_area3(two):.6f}")
+
+    # ★鉛直な面（z が動く面）でも通る＝2 次元へ落とす軸の取り方が正しい
+    upright = df.triangles_with_holes(
+        [[(0, 0, 0), (0, 0, 4), (0, 4, 4), (0, 4, 0)],
+         [(0, 1, 1), (0, 1, 3), (0, 3, 3), (0, 3, 1)]])
+    check("★鉛直な面（壁の開口）でも割れる",
+          upright is not None and abs(_area3(upright) - 12.0) < 1e-9,
+          "割れなかった" if upright is None else f"{_area3(upright):.6f}")
+
+    # ★穴が外周の外にあるなど、筋の通らない形は None を返す（黙って作らない）
+    outside = df.triangles_with_holes([ring_outer,
+                                       [(9, 9, 0), (9, 10, 0), (10, 10, 0)]])
+    check("★筋の通らない形は None（面積が合わなければ穴を開けない）",
+          outside is None, str(outside if outside is None else len(outside)))
+
+    # ---- ②c 穴のある面は 3DFACE で書き、そのまま読み戻せる ----
+    with tempfile.TemporaryDirectory() as folder:
+        path = os.path.join(folder, "donut.dxf")
+        # mm 単位で書く（$INSUNITS=4）
+        big = [(0, 0, 0), (4000, 0, 0), (4000, 4000, 0), (0, 4000, 0)]
+        small = [(1000, 1000, 0), (1000, 3000, 0), (3000, 3000, 0), (3000, 1000, 0)]
+        made = df.triangles_with_holes([big, small])
+        df.write_faces_dxf(path, [], insunits=4,
+                           triangles=[("床_1F", t) for t in made])
+        model = rd_.read_model(path, verbose=False)
+        check("★3DFACE で書いた穴あきの面をそのまま読める",
+              len(model.mesh) == len(made), f"三角形 {len(model.mesh)} 枚")
+        check("  面積も一致（16 − 4 = 12 m2）",
+              abs(model.surface_area - 12.0) < 1e-6,
+              f"{model.surface_area:.6f} m2")
+        check("  レイヤ名が保たれる", set(model.layer_areas) == {"床_1F"},
+              str(sorted(model.layer_areas)))
+        # ★読み込み側の同一平面パッチが 1 枚にまとめ直す（画面では「1 枚の床」）
+        groups = rd_.coplanar_groups(
+            [tuple(f.vertexes) for f in model.mesh],
+            np.array([f.normal for f in model.mesh], dtype=float))
+        check("★読み込み側で同一平面パッチ 1 枚にまとまる（見た目は 1 枚の床）",
+              len(set(groups)) == 1, f"{len(set(groups))} パッチ")
+
     # ---- ③ 閉じない辺（欠けている）も落とさず返す ----
     broken = square[:3]
     loops = df.loops_from_edges(broken)
@@ -4387,6 +5071,54 @@ def test_dxf_faces():
               and len(groups[1]["edges"]) == 2)
         check("★直線でない辺は落とさずに数える（円弧は面にできない）",
               dropped == [("天井", "ARC")], f"{dropped}")
+
+    # ---- ⑧ ★日本語の画層名が壊れない（2026-09-06 不具合報告 ⑤）----
+    #
+    # `accoreconsole` は**システムのコードページ**で書き出す（日本語 Windows は CP932）。
+    # UTF-8 決め打ちで読んでいたため、実案件（階段教室）で
+    # **22 画層すべての日本語名が U+FFFD になり、化け方が同じ 2 組が統合された**
+    # （`PHP_階段裏`＋`PHP_階段下`、`開口_2F小`＋`開口_2F大`）。
+    # 画層名は吸音材の割り当てに使うので、崩れると条件表が引けない。
+    names = ["床_1F", "天井ボード", "反射板", "開口_研修",
+             "PHP_階段裏", "PHP_階段下", "開口_2F小", "開口_2F大"]
+    with tempfile.TemporaryDirectory() as folder:
+        dump = os.path.join(folder, "edges_cp932.txt")
+        body = "".join(f"L,{k},{n},0,0,0,1000,0,0\n"
+                       for k, n in enumerate(names))
+        io.open(dump, "wb").write(body.encode("cp932"))
+        groups, _dropped = df.read_dump(dump)
+        got = [groups[k]["layer"] for k in sorted(groups)]
+        check("★CP932 で書かれた画層名を壊さずに読む（accoreconsole の出力）",
+              got == names, f"{got}")
+        check("  化け方が同じ画層が統合されない（22 → 20 に減っていた）",
+              len({g['layer'] for g in groups.values()}) == len(names),
+              f"{len({g['layer'] for g in groups.values()})} / {len(names)} 種")
+
+        # UTF-8 で書かれていても読める（両方試す並びにしてある）
+        utf8_dump = os.path.join(folder, "edges_utf8.txt")
+        io.open(utf8_dump, "wb").write(body.encode("utf-8"))
+        groups8, _ = df.read_dump(utf8_dump)
+        check("  UTF-8 で書かれていても読める",
+              [groups8[k]["layer"] for k in sorted(groups8)] == names)
+        check("  試す順は CP932 → UTF-8（accoreconsole が前提）",
+              df.DUMP_ENCODINGS == ("cp932", "utf-8"), str(df.DUMP_ENCODINGS))
+
+        # ★どちらでも読めないときは、黙って壊さず理由を告げて続ける
+        broken = os.path.join(folder, "edges_broken.txt")
+        io.open(broken, "wb").write(b"L,1,\xff\xfe\xfd,0,0,0,1,0,0\n")
+        groups_b, _ = df.read_dump(broken)
+        check("  読めない文字コードでも落ちない（置き換えて続ける）",
+              len(groups_b) == 1)
+
+        # 元の DXF 側は UTF-8 を先に試す（`$DWGCODEPAGE ANSI_932` でも中身は UTF-8）
+        check("元の DXF は UTF-8 を先に試す",
+              df.DXF_ENCODINGS == ("utf-8", "cp932"), str(df.DXF_ENCODINGS))
+        cp932_dxf = os.path.join(folder, "unit.dxf")
+        io.open(cp932_dxf, "wb").write(
+            "0\nSECTION\n2\nHEADER\n9\n$INSUNITS\n70\n4\n0\nENDSEC\n"
+            "9\n注記\n".encode("cp932"))
+        check("  CP932 の DXF からも $INSUNITS を読める",
+              df._insunits_of(cp932_dxf) == 4)
 
     check("accoreconsole を探せる（無い端末では None）",
           df.find_accoreconsole() is None
@@ -4515,6 +5247,7 @@ def main():
     for fn in (test_read_dxf, test_soundray_generator, test_energy_decay,
                test_backtrace, test_image_sources, test_vectorised_geometry,
                test_atmosphere, test_absorption, test_impulse, test_reverberation,
+               test_iso3382_decay, test_fixes_2026_09_05,
                test_statistical_reverberation, test_ray_log,
                test_normals, test_check_model, test_clarity,
                test_project, test_resample, test_direction, test_modes,

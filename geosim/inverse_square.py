@@ -105,12 +105,28 @@ def read_points(project):
 
 
 def read_levels(project):
-    """`まとめ_音圧レベル.csv` から (周波数, {受音点名: Lp[バンド]})。"""
+    """`まとめ_音圧レベル.csv` から (周波数, {受音点名: Lp[バンド]})。
+
+    ★**探すのは `name_candidates()` 経由**（2026-09-06 に修正）。
+      それまでは `prefixed()` で 1 通りだけ組んでいたので、
+      **書いた名前と探す名前が食い違うと「先に計算してください」で止まっていた**。
+
+      起きるのは `project.json` の `condition_sheet` が空のとき
+      （＝条件を選ばずに計算した場合。設定画面の既定）。
+      書く側（`run_project`）は条件名なしで `<室>_まとめ_音圧レベル.csv` を作るが、
+      `main()` は条件表のシートを数え上げて `condition_sheet` を自分で立てるため、
+      読む側だけ `<室>_<条件>_まとめ_音圧レベル.csv` を探していた。
+
+      すぐ上の `read_points()` は `existing_result_path()` を使っており、
+      **同じファイルの中で流儀が割れていた**のもここで揃う。
+    """
     import summary as sm
 
-    path = os.path.join(project.folder, pj.RESULT_DIR,
-                        project.prefixed(sm.LEVEL_FILE))
-    if not os.path.exists(path):
+    folder = os.path.join(project.folder, pj.RESULT_DIR)
+    path = next((os.path.join(folder, name)
+                 for name in project.name_candidates(sm.LEVEL_FILE)
+                 if os.path.exists(os.path.join(folder, name))), None)
+    if path is None:
         return None, {}
     table = tb.read_sectioned_table(path)
     if table is None:

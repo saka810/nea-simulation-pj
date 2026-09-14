@@ -216,6 +216,10 @@ DEFAULTS = {
 }
 
 
+# `_fallback_sheet` が「まだ調べていない」ことを表す印（None は「無い」の意味に使う）
+_UNSET = object()
+
+
 class Project:
     """計算条件の入れ物。`folder` に紐づく。
 
@@ -232,6 +236,9 @@ class Project:
         # いま何番目の受音点を扱っているか（1 始まり）。**保存する条件ではない**ので
         # DEFAULTS には入れない。`結果/recN/` `図/recN/` の振り分けにだけ使う
         self.receiver_index = values.get("receiver_index")
+        # 条件シートの指定が無いときに使うシート名（`_fallback_sheet`）の控え。
+        # **保存する条件ではない**ので DEFAULTS には入れない
+        self._condition_fallback = _UNSET
 
     # ---- パス ---------------------------------------------------------
 
@@ -267,6 +274,26 @@ class Project:
         return safe_name(self.name or _stem(self.dxf)
                          or os.path.basename(self.folder))
 
+    def _fallback_sheet(self):
+        """条件シートの指定が無いときに**実際に使われる**シート名。無ければ None。
+
+        `condition_table.sheet_of()` は指定が無ければ**条件表の先頭シート**を使う。
+        つまり「シートを選ばずに計算した」場合でも、材料はそのシートのものになる。
+
+        ★**この Project の間は最初に決めた答えを使い回す**（凍結する）。
+          計算の途中で条件表が作られる（`run_project._update_condition_table`）ので、
+          毎回引き直すと**同じ 1 回の計算の中でファイル名が変わってしまう**。
+          シートを明示したときは上の分岐で先に返るので、
+          設定画面で選び直した結果がこの控えに邪魔されることはない。
+        """
+        if self._condition_fallback is _UNSET:
+            import condition_table as ct
+            path = self.condition_path
+            # CSV は [None] を返す（シートの概念が無い）ので落とす
+            found = (ct.sheets(path) if path and os.path.exists(path) else [])
+            self._condition_fallback = next((n for n in found if n), None)
+        return self._condition_fallback
+
     @property
     def condition_label(self):
         """**条件の名前**。
@@ -274,11 +301,26 @@ class Project:
         ★シートの指定があれば**シート名**（条件表 xlsx は 1 シート 1 条件）。
         無ければファイル名（拡張子なし）。ただし既定名（`条件表` /
         `材料条件表`）は条件を分けていないということなので空にする。
+
+        ★★**シート未指定でも、条件表があれば先頭シートの名前を使う**
+        （2026-09-06 ユーザー判断。不具合報告 WIN240377 の ②）。
+        シートを選ばずに計算しても**材料は先頭シートのものが使われている**ので、
+        名前を空にすると「どの条件で計算したか」が結果に残らない。
+        しかも `inverse_square` / `frequency_response` / `report_inverse_square` は
+        シートを数え上げて条件名を立てるため、**1 つの `結果/` の中で
+        `室_まとめ_….csv` と `室_現状_逆二乗.csv` が混在していた**。
         """
         if self.condition_sheet:
             return safe_name(self.condition_sheet)
         stem = _stem(self.condition_csv)
-        return "" if not stem or stem in DEFAULT_CONDITION_STEMS else safe_name(stem)
+        if stem and stem not in DEFAULT_CONDITION_STEMS:
+            # ★条件表そのものに名前が付いているならそれが条件名（従来どおり）。
+            #   先頭シートより**利用者が付けたファイル名のほうが強い**
+            return safe_name(stem)
+        # 既定名の条件表（`条件表.xlsx`）＝ファイル名では条件を区別していない。
+        # このとき実際に使われるのは**先頭シート**なので、その名前を条件名にする
+        sheet = self._fallback_sheet()
+        return safe_name(sheet) if sheet else ""
 
     @property
     def file_prefix(self):
@@ -328,6 +370,35 @@ class Project:
                 seen.add(name)
                 unique.append(name)
         return unique
+
+    def drop_old_names(self, folder, filename, verbose=False):
+        """**いま書く名前**以外の候補（＝昔の名前）を消す。→ 消した名前のリスト
+
+        `clear_results()` と同じ考え。**昔の名前が残ると結果フォルダに並んでしまい、
+        どちらが最新か分からなくなる**。まとめ表や Excel は `RESULT_FILES` に
+        入っていないので `clear_results()` の対象にならず、書き手からこれを呼ぶ。
+
+        ★条件名の付け方が変わったとき（2026-09-06 に、シート未指定でも
+          先頭シート名を付けるようにした）に、前の名前が取り残されるのを防ぐ。
+        ★**新しいファイルを書いたあとに呼ぶこと**（先に消すと、途中で落ちたときに
+          前の結果まで失う）。
+        """
+        keep = self.prefixed(filename)
+        removed = []
+        for name in self.name_candidates(filename):
+            if name == keep:
+                continue
+            path = os.path.join(folder, name)
+            if not os.path.exists(path):
+                continue
+            try:
+                os.remove(path)
+                removed.append(name)
+            except OSError as error:
+                print(f"[project] 古い名前の結果を消せませんでした: {name}（{error}）")
+        if removed and verbose:
+            print(f"[project] 昔の名前の結果を消しました: {' / '.join(removed)}")
+        return removed
 
     def result_candidates(self, key):
         """その結果として**読める名前**を、探す順に返す。

@@ -10,6 +10,10 @@
 基準状態は `Atmosphere()` の既定値（20℃ / 湿度 40% / 101.325 kPa）。
 40% は元コードの空気吸収近似が想定していた条件に合わせてある。
 
+★★**気圧の単位は kPa**（Pa ではない）。Pa（101325）を渡すと密度が 1000 倍になり、
+音圧レベルの `10log10(ρc/400)` が **+30 dB** ずれる。
+桁が違えば `_check_pressure` が理由を告げて止める（2026-09-05 に追加）。
+
 使い方:
 
     from atmosphere import Atmosphere
@@ -40,6 +44,33 @@ TRIPLE_POINT = 273.16               # 水の三重点 T01 [K]
 # dB → ネーパ（エネルギーの指数減衰係数）への換算。
 # E = E0 * 10^(-α_dB * d / 10) = E0 * exp(-m * d)  なので m = α_dB * ln(10) / 10
 DB_TO_NEPER = np.log(10.0) / 10.0
+
+# ★**気圧の単位は kPa**（Pa ではない）。地上で妥当な範囲を決めておく。
+# 標高 0 m の高気圧が約 105 kPa、エベレスト山頂で約 34 kPa
+PRESSURE_MIN, PRESSURE_MAX = 20.0, 120.0
+
+
+def _check_pressure(pressure):
+    """気圧が kPa として妥当か確かめる。
+
+    ★★**単位は kPa**（既定 101.325）。Pa（101325）を渡すと密度が 1000 倍になり、
+      `10log10(ρc/400)` が **+30 dB** ずれる。しかもどこも例外を出さないので
+      **黙って通ってしまう**（2026-09-05 に実際に踏んだ）。
+      桁が違えば単位の取り違えとして理由を告げて止める。
+    """
+    value = float(pressure)
+    if value <= 0.0:
+        raise ValueError(f"気圧 {pressure} が不正です（kPa で指定してください）")
+    if not PRESSURE_MIN <= value <= PRESSURE_MAX:
+        hint = ""
+        if PRESSURE_MIN * 1000.0 <= value <= PRESSURE_MAX * 1000.0:
+            hint = (f"  ★Pa で渡していませんか？ "
+                    f"{value:.0f} Pa なら {value / 1000.0:.3f} kPa です")
+        raise ValueError(
+            f"気圧 {value:g} kPa は想定範囲外です"
+            f"（{PRESSURE_MIN:.0f}〜{PRESSURE_MAX:.0f} kPa）。"
+            f"**単位は kPa**（標準大気は {REFERENCE_PRESSURE} kPa）。{hint}")
+    return value
 
 
 def saturation_vapour_pressure(temperature, pressure=REFERENCE_PRESSURE):
@@ -192,8 +223,7 @@ class Atmosphere:
             raise ValueError(f"温度 {temperature} ℃ は想定範囲外です（-50〜60℃）")
         if not 0.0 <= humidity <= 100.0:
             raise ValueError(f"相対湿度 {humidity} % は 0〜100 の範囲で指定してください")
-        if pressure <= 0.0:
-            raise ValueError(f"気圧 {pressure} kPa が不正です")
+        _check_pressure(pressure)
         self.temperature = float(temperature)
         self.humidity = float(humidity)
         self.pressure = float(pressure)

@@ -398,6 +398,8 @@ def write(project, template=None, verbose=True):
     out = path(project)
     os.makedirs(os.path.dirname(out), exist_ok=True)
     book.save(out)
+    # 条件名の付け方が変わったときに昔の名前が並ばないようにする（2026-09-06）
+    project.drop_old_names(os.path.dirname(out), WORKBOOK_FILE)
     if verbose:
         print(f"[Excel] 結果一式（{len(blocks)} シート）: {out}")
     return out

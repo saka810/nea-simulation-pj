@@ -3,6 +3,7 @@
 NEA（日本環境アメニティ株式会社）のシミュレーション PJ。
 幾何音響シミュレーション（音線法 ＋ 虚音源バックトレース）の **Fortran → Python 移植**。
 
+- **使い方（操作手順書）** … [docs/使い方マニュアル.md](docs/使い方マニュアル.md)（PDF 版 `docs/pdf/使い方マニュアル.pdf`）
 - 各モジュールの役割・Fortran との対応・実装状況 … [PROGRAM_STRUCTURE.md](PROGRAM_STRUCTURE.md)
 - 作業一覧 … [TODO.md](TODO.md)
 - 数式とフローの解説 … [docs/技術説明書.md](docs/技術説明書.md)
@@ -12,7 +13,7 @@ NEA（日本環境アメニティ株式会社）のシミュレーション PJ�
 
 ## フォルダ構成
 
-    geosim/                 Python 移植版のパッケージ（本体。34 ファイル）
+    geosim/                 Python 移植版のパッケージ（本体。45 ファイル）
     tests/test_geosim.py    数値検証。pytest 不要、素の Python で走る
     docs/                   数式・フロー・CAD の作図ルールの解説（PDF 版は docs/pdf/）
     data/                   吸音率テーブルのサンプル
@@ -47,8 +48,8 @@ NEA（日本環境アメニティ株式会社）のシミュレーション PJ�
 書き直したら作り直す：
 
 ```
-.venv\Scripts\python docsuild_pdf.py            # docs/*.md を全部
-.venv\Scripts\python docsuild_pdf.py 技術説明書.md   # 1 つだけ
+.venv\Scripts\python docs\build_pdf.py            # docs/*.md を全部
+.venv\Scripts\python docs\build_pdf.py 技術説明書.md   # 1 つだけ
 ```
 
 **追加のライブラリは要らない。**数式は matplotlib の mathtext で画像に焼き、
@@ -293,7 +294,7 @@ python procedure.py ..\test.dxf --absorption ..\absorption.csv --absorption-kind
 .\.venv\Scripts\python tests\test_geosim.py
 ```
 
-**604 項目**（2026-08-24 時点）。解析的に答えが分かる問題（直方体の虚音源距離、
+**881 項目**（2026-09-09 時点）。解析的に答えが分かる問題（直方体の虚音源距離、
 減衰率が既知の応答など）で数式レベルの正しさを確かめる。
 **数式に関わるコードを変更したら必ず走らせること。**
 
@@ -312,6 +313,7 @@ python procedure.py ..\test.dxf --absorption ..\absorption.csv --absorption-kind
 |---|---|
 | `test.dxf` | 2×3×1 m の直方体（mm 単位、音源・受音点入り、法線内向き） |
 | `test2.dxf` | 閉じたポリラインで描いた平面 9 角形 ＋ 立ち上げた壁の 2 面（開いた形状） |
+| `docs/例題/五角形の部屋.dxf` | **使い方マニュアルの例題**。五角形平面 3×4 m ×天井高 2.7 m（26.73 m³）。レイヤ 4 種・音源 1 点・受音点 3 点 |
 
 ## Git 管理外のもの
 
