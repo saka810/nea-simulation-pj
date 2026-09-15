@@ -381,9 +381,14 @@ def impulse_response_from_pulses(filename, pulses, octave_frequencies=None,
 
     pulses : loop_noredundancy.PulseList（`.time` と `.energy` を使う）
     """
+    # ★★**帯域の幅を渡し忘れない**（2026-09-15 に見つけた）。
+    #   ここで落とすと、1/3 オクターブで回していても `impulse_response` は
+    #   既定の `1/1` として動き、**すでに 1/3 の入力をもう一度 1/3 へ展開する**
+    #   （`CLAUDE.md`「1/3 で回すときはインパルス応答で展開しない」が効かない）。
+    #   `procedure` はちゃんと `band_width` を渡していたのに、ここで捨てていた
     t, ir = impulse_response(pulses.time, pulses.energy,
                              octave_frequencies=octave_frequencies,
-                             atmosphere=atmosphere,
+                             atmosphere=atmosphere, band_width=band_width,
                              sampling_frequency=sampling_frequency,
                              max_time=max_time, numtaps=numtaps, verbose=verbose,
                              method=method, taps=taps)

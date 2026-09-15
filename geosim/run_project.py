@@ -77,6 +77,11 @@ def run(project, verbose=True, make_figures=True, progress=None,
     （F-6。追跡は受音点に依らない）。結果は受音点ごとに `結果/recN/`・`図/recN/`、
     受音点に依らないもの（室の吸音と理論値・音線軌跡）は `結果/` 直下へ書く。
     ファイル名の頭には対象室＋条件名（`project.name`）が付く。
+
+    ★**音源が複数あるときは 1 点ずつ回す**（2026-09-15。不具合報告 ⑨）。
+    結果は `結果/src1/recN/` `結果/src2/recN/` …に分かれ、そのあと
+    `source_mix` が見方（平均・重ね合わせ）を作る。
+    **音源が 1 点だけなら置き場は従来どおり**（`結果/recN/`）。
     """
     project.ensure_dirs()
     if save_settings:
@@ -87,6 +92,105 @@ def run(project, verbose=True, make_figures=True, progress=None,
     if not dxf or not os.path.exists(dxf):
         raise FileNotFoundError(f"DXF が見つかりません: {project.dxf!r}")
 
+    # ★★**音源が複数あれば 1 点ずつ回す**（2026-09-15 ユーザー要望。不具合報告 ⑨）。
+    #   それまでは `model.source_points[0]` を黙って使い、2 点目以降を捨てていた。
+    #   結果は `結果/srcM/recN/` に分かれ、そのあと `source_mix` が合成を作る
+    sources = _sources(project)
+    if len(sources) > 1:
+        return _run_sources(project, sources, verbose=verbose,
+                            make_figures=make_figures, progress=progress,
+                            reuse_paths=reuse_paths)
+    return _run_source(project, verbose=verbose, make_figures=make_figures,
+                       progress=progress, reuse_paths=reuse_paths,
+                       save_settings=save_settings)
+
+
+def _sources(project, model=None):
+    """計算する音源の一覧。`project.source` の指定が最優先、無ければ DXF から。
+
+    ★**全部返す**のが肝（不具合報告 ⑨）。`_source_of()` は 1 点しか返さないので、
+    音源が 2 点あっても 2 点目が黙って捨てられていた。
+    """
+    import read_dxffile as rd
+
+    if project.source is not None:
+        return [np.asarray(project.source, dtype=float)]
+    if model is None:
+        model = _ordered(project,
+                         rd.read_model(project.dxf_path, unit=project.unit,
+                                       band_number=project.band_number,
+                                       verbose=False), verbose=False)
+    return [np.asarray(p, dtype=float)
+            for p in (getattr(model, "source_points", None) or [])]
+
+
+def _ordered(project, model, verbose=True):
+    """**測定点の並び**（`測定点順.json`）を当てる（2026-09-15 ユーザー要望）。
+
+    ★DXF に出てきた順のままだと `結果/recN/` の N が CAD のラベルとずれる
+    （実案件で `rec1` が R4 になっていた）。読んだ直後に 1 回だけ通す。
+    """
+    import point_order as po
+
+    try:
+        return po.apply(project, model, verbose=verbose)
+    except Exception as error:      # 並びが当たらなくても計算は続けられる
+        print(f"[run] 測定点の並びを当てられませんでした: "
+              f"{type(error).__name__}: {error}")
+        return model
+
+
+def _run_sources(project, sources, verbose=True, make_figures=True,
+                 progress=None, reuse_paths=True):
+    """**音源を 1 点ずつ**回し、そのあと合成（`source_mix`）を作る。
+
+    ★**`project.json` に音源を書き戻さない**（`save_settings=False`）。
+    書き戻すと `source` が 1 点に固定され、**次回から 1 点目しか回らなくなる**
+    （2026-09-06 に一括実行で踏んだのと同じ落とし穴）。
+
+    ★測定点の一覧（`結果/<室>_測定点.csv`）は**全部の音源を 1 枚に**並べたいので、
+    音源ごとの `_run_source` では書かず、ここで最後に 1 回だけ書く。
+    """
+    import source_mix as sx
+
+    if verbose:
+        print(f"[run] ★音源が {len(sources)} 点あります。"
+              f"**1 点ずつ**計算して `結果/src1` `結果/src2` … に分けます"
+              f"（ISO 3382 は音源位置ごとに測る）")
+    results = []
+    for order, point in enumerate(sources):
+        sub = _sub_source(project, order, point)
+        if verbose:
+            print("")
+            print(f"[run] ══ 音源 {order + 1}/{len(sources)} "
+                  f"{np.round(point, 3).tolist()} → 結果/{sub.source_folder}/")
+        results.append(_run_source(
+            sub, verbose=verbose, make_figures=make_figures,
+            reuse_paths=reuse_paths, save_settings=False, write_points=False,
+            progress=_prefixed(progress, f"音源{order + 1}/{len(sources)} ")))
+
+    _write_points(project, model=results[0].get("model"), sources=sources,
+                  verbose=verbose)
+    try:
+        sx.write_all(project, verbose=verbose)
+    except Exception as error:      # 合成が作れなくても音源ごとの結果は残る
+        print(f"[run] 合成（音源のまとめ方）を作れませんでした: "
+              f"{type(error).__name__}: {error}")
+    return {"sources": sources, "source_results": results, **results[0]}
+
+
+def _sub_source(project, order, point):
+    """音源 `order` 番目（0 始まり）を扱う `Project`。結果は `結果/srcM/` へ。"""
+    sub = pj.Project(project.folder,
+                     **{k: getattr(project, k) for k in pj.DEFAULTS})
+    sub.source = np.asarray(point, dtype=float).tolist()
+    sub.source_index = order + 1
+    return sub
+
+
+def _run_source(project, verbose=True, make_figures=True, progress=None,
+                reuse_paths=True, save_settings=True, write_points=True):
+    """**音源 1 点ぶん**の計算（受音点は全部）。従来の `run()` の中身。"""
     receivers = _receivers(project)
     if len(receivers) <= 1:
         # 1 点でも `結果/rec1/` に入れる（点数によって置き場が変わらないように）
@@ -97,7 +201,8 @@ def run(project, verbose=True, make_figures=True, progress=None,
                           head_azimuth=project.head_azimuth_for(0),
                           reuse_paths=reuse_paths, progress=progress,
                           save_settings=save_settings)
-        _write_points(project, receivers, result.get("model"), verbose=verbose)
+        if write_points:
+            _write_points(project, receivers, result.get("model"), verbose=verbose)
         _write_summaries(project, verbose=verbose)
         return result
 
@@ -121,7 +226,9 @@ def run(project, verbose=True, make_figures=True, progress=None,
             # 統計残響式は受音点に依らないので 1 点目の結果を配る（無駄なループを消す）
             shared_statistical = (shared_statistical
                                   or results[-1].get("statistical"))
-        _write_points(project, receivers, results[0].get("model"), verbose=verbose)
+        if write_points:
+            _write_points(project, receivers, results[0].get("model"),
+                          verbose=verbose)
         _write_summaries(project, verbose=verbose)
         return {"receivers": receivers, "results": results, **results[0]}
 
@@ -156,7 +263,8 @@ def run(project, verbose=True, make_figures=True, progress=None,
         # 軌跡は受音点に依らないので `結果/` 直下に 1 つだけ置く。
         # `clear_results` のあとに置かないと消される
         recorder.save_npz(project.result_path("raylog"))
-    _write_points(project, receivers, results[0].get("model"), verbose=verbose)
+    if write_points:
+        _write_points(project, receivers, results[0].get("model"), verbose=verbose)
     _write_summaries(project, verbose=verbose)
     return {"receivers": receivers, "results": results, **results[0]}
 
@@ -217,13 +325,14 @@ def _model_for(project, verbose=False):
     import read_dxffile as rd
 
     table = _absorption_table_for(project, verbose=verbose)
-    return rd.read_model(project.dxf_path, unit=project.unit,
-                         absorption_table=table,
-                         orient_normals=project.orient_normals,
-                         band_number=project.band_number,
-                         flip_faces=_flip_faces_for(project),
-                         face_materials=_face_materials_for(project),
-                         verbose=verbose)
+    model = rd.read_model(project.dxf_path, unit=project.unit,
+                          absorption_table=table,
+                          orient_normals=project.orient_normals,
+                          band_number=project.band_number,
+                          flip_faces=_flip_faces_for(project),
+                          face_materials=_face_materials_for(project),
+                          verbose=verbose)
+    return _ordered(project, model, verbose=verbose)
 
 
 def _source_of(project, model):
@@ -448,7 +557,7 @@ def _receiver_groups(project, receivers):
     return names
 
 
-def _write_points(project, receivers=None, model=None, verbose=True):
+def _write_points(project, receivers=None, model=None, verbose=True, sources=None):
     """**測定点の一覧（CSV）と配置図（平面＋立面 2 方向）**を書く。
 
     ★どれがどの点でどちらを向いているか、あとから分かるように
@@ -459,11 +568,11 @@ def _write_points(project, receivers=None, model=None, verbose=True):
     try:
         if receivers is None:
             receivers = _receivers(project)
-        sources = []
-        if project.source is not None:
-            sources = [np.asarray(project.source, dtype=float)]
-        elif model is not None and getattr(model, "source_points", None):
-            sources = [np.asarray(p, dtype=float) for p in model.source_points]
+        # ★音源は**全部**並べる（2026-09-15。不具合報告 ⑨）。
+        #   呼び出し側が音源ごとに回しているときは、その一覧をそのまま渡してもらう
+        if sources is None:
+            sources = _sources(project, model)
+        sources = [np.asarray(p, dtype=float) for p in sources]
         azimuths = [project.head_azimuth_for(k) for k in range(len(receivers))]
 
         shared = _sub_project(project, None) if False else project
@@ -539,13 +648,14 @@ def _trace_once(project, receivers, verbose=True, progress=None):
 
     try:
         table = _absorption_table_for(project)
-        model = rd.read_model(project.dxf_path, unit=project.unit,
-                              absorption_table=table,
-                              orient_normals=project.orient_normals,
-                              band_number=project.band_number,
-                              flip_faces=_flip_faces_for(project),
-                              face_materials=_face_materials_for(project),
-                              verbose=False)
+        model = _ordered(project,
+                         rd.read_model(project.dxf_path, unit=project.unit,
+                                       absorption_table=table,
+                                       orient_normals=project.orient_normals,
+                                       band_number=project.band_number,
+                                       flip_faces=_flip_faces_for(project),
+                                       face_materials=_face_materials_for(project),
+                                       verbose=False), verbose=False)
         source = (project.source if project.source is not None
                   else (model.source_points[0] if model.source_points else None))
         if source is None:
@@ -620,8 +730,10 @@ def _receivers(project, groups=False):
         points = [np.asarray(project.receiver, dtype=float)]
         names = [""]
     else:
-        probe = rd.read_model(project.dxf_path, unit=project.unit,
-                              band_number=project.band_number, verbose=False)
+        probe = _ordered(project,
+                         rd.read_model(project.dxf_path, unit=project.unit,
+                                       band_number=project.band_number,
+                                       verbose=False), verbose=False)
         points = [np.asarray(p, dtype=float) for p in probe.receiver_points]
         names = list(getattr(probe, "receiver_layer_names", []) or
                      ["" for _ in points])
@@ -656,6 +768,10 @@ def _sub_project(project, index):
                      **{k: getattr(project, k) for k in pj.DEFAULTS})
     sub.head_azimuth = project.head_azimuth_for(index)
     sub.receiver_index = index + 1
+    # ★音源の棚（`結果/srcM/`）は引き継ぐ（不具合報告 ⑨）。
+    #   引き継がないと、音源ごとに回しているのに結果が 1 か所へ重なって書かれる
+    sub.source_index = project.source_index
+    sub.source_tag = project.source_tag
     # ★**名前は変えない。**`name` は結果ファイル名の頭に付く（対象室＋条件名）ので、
     #   受音点ごとに変えるとファイル名が受音点ごとに違ってしまう。
     #   何点目かは `receiver_index` が持っていて `Project.summary()` が表示する
@@ -778,13 +894,39 @@ def redraw(project, verbose=True):
       前回の計算結果と食い違うことはない。残響指標・明瞭度・統計残響式は
       本番と同じ関数で計算し直すため、CSV の読み方を別に書かずに済む。
     """
+    # ★音源が複数あるときは**棚ごと**に描き直す（2026-09-15。不具合報告 ⑨）。
+    #   `結果/src1/` `結果/src2/` …と合成の棚を順に見る。合成の「平均」には
+    #   パルス列が無いので、描き直せない棚は知らせて飛ばす
+    if not project.source_folder and project.receiver_index is None:
+        shelves = project.source_folders()
+        if shelves:
+            written = []
+            for tag in shelves:
+                shelf = pj.Project(project.folder,
+                                   **{k: getattr(project, k) for k in pj.DEFAULTS})
+                shelf.source_tag = tag
+                if verbose:
+                    print(f"[run] ── 描き直し: 結果/{tag}/")
+                try:
+                    written.extend(redraw(shelf, verbose=verbose))
+                except (ValueError, FileNotFoundError) as error:
+                    import source_mix as sx
+                    if tag == sx.FOLDERS[sx.MIX_AVERAGE]:
+                        # ★「平均」は**指標だけ**の棚（波形が無いので図は作れない）
+                        print(f"[run] 結果/{tag}/ は指標だけの棚なので図は作りません"
+                              f"（音源ごとの結果を平均したもの）")
+                    else:
+                        print(f"[run] 結果/{tag}/ は描き直せません: {error}")
+            return written
+
     # 受音点が複数あるときは 1 点ずつ描き直す（`receiver_index` を立てて再帰）
     if project.receiver_index is None:
         import summary as sm
         folders = [name for name, _ in sm.receiver_folders(project)
                    if name.startswith("rec")]
+        root = sm.results_root(project)     # 音源が複数なら `結果/srcM/`
         indexes = [int(name[3:]) for name in folders
-                   if os.path.isdir(project.path(pj.RESULT_DIR, name))]
+                   if os.path.isdir(os.path.join(root, name))]
         if indexes:
             written = []
             for k in indexes:

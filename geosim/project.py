@@ -44,6 +44,7 @@ DXF や吸音率 CSV は**プロジェクトフォルダからの相対パスで
 
 import json
 import os
+import re
 
 import numpy as np
 
@@ -54,6 +55,12 @@ RESULT_DIR = "結果"
 FIGURE_DIR = "図"
 # 受音点ごとのフォルダ名（`結果/rec1/` `図/rec1/`）
 RECEIVER_DIR = "rec%d"
+# ★**音源ごとのフォルダ名**（`結果/src1/rec1/`。2026-09-15。不具合報告 ⑨）。
+#   音源が 1 点だけのときは**この段を作らない**（従来どおり `結果/rec1/`）。
+#   点が 1 つしかないのにフォルダが深くなると、過去のプロジェクトと置き方が変わる
+SOURCE_DIR = "src%d"
+# 合成した結果を入れる棚の頭（`合成_平均` / `合成_重ね合わせ` …。`source_mix.py`）
+MIX_PREFIX = "合成_"
 # 画面から手で撮った画像・動画の置き場。**`図/` の直下ではなく子フォルダにする。**
 # `clear_results()` が `図/` の PNG を消してしまうので、
 # 同じ所に置くと計算し直すたびに撮った画像が巻き添えで消える
@@ -102,6 +109,14 @@ CLOSED_CHOICES = (CLOSED_AUTO, CLOSED_YES, CLOSED_NO)
 #   室の吸音と理論値 … 室形状と材料だけで決まる
 #   音線軌跡         … 音源から出た音線の形。受音点をまたいで共有している（F-6）
 SHARED_RESULTS = {"room", "raylog", "points", "open_edges"}
+
+# **音源に依らない**結果。音源が複数あっても `結果/` 直下に置く（`結果/srcM/` に入れない）。
+#   室の吸音と理論値 … 室形状と材料だけで決まる
+#   測定点の一覧     … 配置だけ（音源も受音点も 1 枚の表に並べる）
+#   開いた辺         … 形だけで決まる
+# ★**音線軌跡（raylog）と経路（paths）は音源に依る**ので入れない。
+#   軌跡は音源から出た音線そのもの、経路は音源→受音点の反射の並びである
+SOURCE_SHARED_RESULTS = {"room", "points", "open_edges"}
 
 # **条件（吸音材）に依らない**結果。ファイル名に条件名を付けず、対象室名だけにする。
 #   経路の幾何 … 吸音に依らない（それを使い回すのがこの仕組みの目的）
@@ -189,6 +204,13 @@ DEFAULTS = {
     # 放射方向（`自動` / `+X` / `-X` / `+Y` / `-Y` / `+Z` / `-Z`）。
     # 辺や頂点に載っているとき、どの面に置いた音源かを決めるのに使う
     "source_direction": "自動",
+    # ★**音源が複数あるときの結果の見方**（2026-09-15 ユーザー要望。不具合報告 ⑨
+    #   「S1 の結果を見るのか、S2 を見るのか、平均を見るのか、インパルス応答を
+    #   重ね合わせてそこから出すのか、重ね合わせる場合 時間遅れを考慮するのか。
+    #   結果の見方は選択できるようにして欲しい」）。
+    #   **音源ごとの計算（個別）は必ず行う**ので、ここで選ぶのは
+    #   そのうえで作る「合成」をどれにするか。値は `source_mix.MIX_CHOICES`
+    "source_combination": "すべて",
     "receiver": None,              # None なら DXF の rec レイヤ
     # 受音点に置く「人」の正面方向。真上から見た方位角 [度]。
     # **0° = +X 方向、反時計回り**（真上から見て）。
@@ -236,6 +258,11 @@ class Project:
         # いま何番目の受音点を扱っているか（1 始まり）。**保存する条件ではない**ので
         # DEFAULTS には入れない。`結果/recN/` `図/recN/` の振り分けにだけ使う
         self.receiver_index = values.get("receiver_index")
+        # ★いま何番目の**音源**を扱っているか（1 始まり）。音源が 1 点だけなら None。
+        #   `source_tag` は合成の結果（`合成_平均` など）を入れる棚の名前で、
+        #   立っていればそちらが優先される。どちらも**保存する条件ではない**
+        self.source_index = values.get("source_index")
+        self.source_tag = values.get("source_tag")
         # 条件シートの指定が無いときに使うシート名（`_fallback_sheet`）の控え。
         # **保存する条件ではない**ので DEFAULTS には入れない
         self._condition_fallback = _UNSET
@@ -245,15 +272,58 @@ class Project:
     def path(self, *parts):
         return os.path.join(self.folder, *parts)
 
-    def result_dir(self, shared=False):
+    @property
+    def source_folder(self):
+        """音源ごとのフォルダ名（`src1` / `合成_平均` など）。1 音源なら空。
+
+        ★**音源が 1 点だけのときは空**にして、従来どおり `結果/recN/` に置く
+        （2026-09-15。不具合報告 ⑨）。点が 1 つしかないのに段を増やすと、
+        それまでのプロジェクトと置き方が変わってしまう。
+        """
+        if self.source_tag:
+            return str(self.source_tag)
+        if self.source_index:
+            return SOURCE_DIR % int(self.source_index)
+        return ""
+
+    def source_folders(self):
+        """`結果/` の下にある**音源ごとの棚**を順に返す（`src1` `src2` `合成_平均`…）。
+
+        音源が 1 点だけのプロジェクトは棚を作らないので**空**が返る
+        （＝従来どおり `結果/recN/` を見ればよい、の意味）。
+        並びは **src が番号順 → 合成**。まとめ表や Excel を棚ごとに作るのに使う。
+        """
+        root = self.path(RESULT_DIR)
+        if not os.path.isdir(root):
+            return []
+        found = [name for name in os.listdir(root)
+                 if os.path.isdir(os.path.join(root, name))]
+        numbered, mixed = [], []
+        for name in found:
+            if re.fullmatch(SOURCE_DIR.replace("%d", r"\d+"), name):
+                numbered.append(name)
+            elif name.startswith(MIX_PREFIX):
+                mixed.append(name)
+        numbered.sort(key=lambda n: int(re.sub(r"\D", "", n)))
+        return numbered + sorted(mixed)
+
+    def result_dir(self, shared=False, source_shared=False):
         """結果の置き場。受音点が決まっていれば `結果/recN/`。
 
         `shared=True` は受音点に依らないもの（統計残響式など）で、
         受音点を扱っていても `結果/` 直下を返す。
+
+        ★音源が複数あるときは間に `srcM`（または合成の名前）が入る
+        （`結果/src2/rec1/`）。`source_shared=True` は**音源にも依らない**もの
+        （室の吸音・測定点・開いた辺）で、その段を挟まない。
         """
-        if shared or self.receiver_index is None:
-            return self.path(RESULT_DIR)
-        return self.path(RESULT_DIR, RECEIVER_DIR % self.receiver_index)
+        parts = [RESULT_DIR]
+        tag = "" if source_shared else self.source_folder
+        if tag:
+            parts.append(tag)
+        if not (shared or self.receiver_index is None):
+            parts.append(RECEIVER_DIR % self.receiver_index)
+        return self.path(*parts)
 
     # ---- ファイル名の頭（対象室＋条件名）------------------------------
     #
@@ -346,7 +416,8 @@ class Project:
         受音点に依らないもの（`SHARED_RESULTS`）は `結果/` 直下、
         それ以外は `結果/recN/` に置く。名前には対象室＋条件名が頭に付く。
         """
-        return os.path.join(self.result_dir(shared=key in SHARED_RESULTS),
+        return os.path.join(self.result_dir(shared=key in SHARED_RESULTS,
+                                            source_shared=key in SOURCE_SHARED_RESULTS),
                             self._named(key, RESULT_FILES[key]))
 
     def name_candidates(self, filename):
@@ -408,7 +479,8 @@ class Project:
         ③ 頭の付いていない名前（頭を付ける前に計算したプロジェクト）
         ④ さらに古い名前（`rt_statistical.csv` など。`LEGACY_RESULT_FILES`）
         """
-        folder = self.result_dir(shared=key in SHARED_RESULTS)
+        folder = self.result_dir(shared=key in SHARED_RESULTS,
+                                 source_shared=key in SOURCE_SHARED_RESULTS)
         names = [RESULT_FILES[key]] + LEGACY_RESULT_FILES.get(key, [])
         paths = []
         for name in names:
@@ -438,15 +510,25 @@ class Project:
         """明瞭度の CSV（`結果/recN/…clarity.csv`）。"""
         return self.result_path("clarity")
 
-    def figure_dir(self, shared=False):
+    def figure_dir(self, shared=False, source_shared=None):
         """図の置き場。受音点が決まっていれば `図/recN/`。
 
         `shared=True` は**受音点に依らない図**（測定点の配置図など）で、
         `図/` 直下に置く（結果 CSV の `SHARED_RESULTS` と同じ考え方）。
+
+        ★音源が複数あるときは間に `srcM` が入る（`図/src2/rec1/`）。
+        `source_shared` を省くと `shared` と同じ扱いにする——いま `shared=True`
+        なのは測定点の配置図だけで、これは音源にも依らない（全部の点を 1 枚に描く）。
         """
-        if shared or self.receiver_index is None:
-            return self.path(FIGURE_DIR)
-        return self.path(FIGURE_DIR, RECEIVER_DIR % self.receiver_index)
+        if source_shared is None:
+            source_shared = shared
+        parts = [FIGURE_DIR]
+        tag = "" if source_shared else self.source_folder
+        if tag:
+            parts.append(tag)
+        if not (shared or self.receiver_index is None):
+            parts.append(RECEIVER_DIR % self.receiver_index)
+        return self.path(*parts)
 
     def figure_path(self, name, shared=False):
         """図のパス。**図にも対象室＋条件名を付ける**（貼ってから見分けが付くように）。
@@ -553,9 +635,18 @@ class Project:
         #     書き直されないまま終わっていた。実際に研修室で消えていた）。
         #   受音点 N>1 を扱っている分身に、共有のものを消す筋合いはない
         shared_allowed = self.receiver_index in (None, 1)
+        # ★★**音源にも依らないものは「1 番目の音源」のときだけ消す**
+        #   （2026-09-15。不具合報告 ⑨ で音源ごとに回すようにしたときの落とし穴）。
+        #   『吸音率と理論値.csv』『測定点.csv』『開いた辺.csv』は `結果/` 直下に
+        #   1 つしかないので、2 番目の音源の掃除で**1 番目が書いたものが消える**。
+        #   音源 M>1 を扱っている分身に、音源に依らないものを消す筋合いはない
+        source_shared_allowed = (shared_allowed and not self.source_tag
+                                 and self.source_index in (None, 1))
         # 受音点ごとのものと、受音点に依らないものの両方（result_path が振り分ける）
         for key in RESULT_FILES:
             if key in skip:
+                continue
+            if key in SOURCE_SHARED_RESULTS and not source_shared_allowed:
                 continue
             if key in SHARED_RESULTS and not shared_allowed:
                 continue
@@ -752,6 +843,11 @@ class Project:
         #   （`name` は結果ファイル名の頭に付くので、受音点ごとに変わると
         #     ファイル名が受音点ごとに違ってしまう）
         who = "" if self.receiver_index is None else f"（受音点 {self.receiver_index}）"
+        # ★音源が複数あるときは何番目かも出す（不具合報告 ⑨。どの音源の結果か分かるように）
+        if self.source_folder:
+            who = f"（音源 {self.source_folder}" + (
+                "" if self.receiver_index is None
+                else f" / 受音点 {self.receiver_index}") + "）"
         condition = f" / 条件『{self.condition_label}』" if self.condition_label else ""
         return (f"プロジェクト『{self.display_name}』{condition}{who}\n"
                 f"  フォルダ  {self.folder}\n"

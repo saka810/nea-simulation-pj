@@ -1223,15 +1223,19 @@ def load_model_for(project, verbose=True):
                           band_number=project.band_number, verbose=False)
     flipped = project.flipped_faces_for(len(first.mesh))
     materials = project.face_materials_for(len(first.mesh))
+    # ★**測定点の並び**（`測定点順.json`）を当てる（2026-09-15 ユーザー要望）。
+    #   この画面で受音点の向きを決めるので、番号が計算とずれると取り違える
+    import point_order as po
     if not flipped and not materials:
         if verbose:
             print("[read_dxffile] " + first.summary().replace("\n", "\n[read_dxffile] "))
-        return first
-    return rd.read_model(project.dxf_path, unit=project.unit, absorption_table=table,
-                         orient_normals=project.orient_normals,
-                         band_number=project.band_number,
-                         flip_faces=flipped or None, face_materials=materials,
-                         verbose=verbose)
+        return po.apply(project, first, verbose=verbose)
+    return po.apply(project, rd.read_model(
+        project.dxf_path, unit=project.unit, absorption_table=table,
+        orient_normals=project.orient_normals,
+        band_number=project.band_number,
+        flip_faces=flipped or None, face_materials=materials,
+        verbose=verbose), verbose=verbose)
 
 
 def main():

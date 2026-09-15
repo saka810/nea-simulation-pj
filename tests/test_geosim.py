@@ -12,6 +12,7 @@ pytest は使わず、素の Python で走る（依存を増やさないため�
   無い場合は既定の吸音率で走る（結果の判定には影響しない項目だけを見る）。
 """
 
+import io
 import os
 import sys
 import itertools
@@ -5312,6 +5313,204 @@ def test_open_edges():
               "自由端" in text and "区分" in text)
 
 
+class _FakeModel:
+    """点だけ持つ最小のモデル（並べ替え・音源の数え方を試すのに使う）。"""
+
+    def __init__(self, sources, receivers, layers=None):
+        self.source_points = [np.asarray(p, dtype=float) for p in sources]
+        self.receiver_points = [np.asarray(p, dtype=float) for p in receivers]
+        self.receiver_layer_names = list(layers or ["" for _ in receivers])
+
+
+def _pulse_list(times, energies, distances, bands=2):
+    """テスト用のパルス列を組む（`PulseList` の中身を直に埋める）。"""
+    p = ln.PulseList(bands)
+    p.reflection_count = np.zeros(len(times), dtype=int)
+    p.time = np.asarray(times, dtype=float)
+    p.distance = np.asarray(distances, dtype=float)
+    p.direction = np.tile(np.array([1.0, 0.0, 0.0]), (len(times), 1))
+    p.energy = np.asarray(energies, dtype=float).reshape(len(times), bands)
+    return p
+
+
+def test_multiple_sources():
+    """[50] 音源が複数あるとき（不具合報告 ⑨。2026-09-15 ユーザー要望）。
+
+    それまでは `model.source_points[0]` を黙って使い、**2 点目以降を捨てていた**
+    （実案件で 3 回・延べ 4 時間ぶんが S1 だけの結果だった）。
+    音源ごとに回して `結果/srcM/recN/` に分け、`source_mix` が見方を作る。
+    """
+    print("")
+    print("[50] 複数音源と合成（不具合報告 ⑨）")
+    import tempfile
+
+    import project as pj
+    import run_project as rp
+    import sound_level as sl
+    import source_mix as sx
+    from atmosphere import Atmosphere
+
+    # ---- ① 音源を全部拾う（1 点目だけにしない）----
+    with tempfile.TemporaryDirectory() as folder:
+        project = pj.Project(folder, **dict(pj.DEFAULTS))
+        model = _FakeModel([[1.0, 0.5, 0.5], [1.0, 2.5, 0.5]], [[0.7, 2.0, 0.5]])
+        sources = rp._sources(project, model)
+        check("★音源を 2 点とも返す（以前は先頭 1 点だけだった）",
+              len(sources) == 2, f"{len(sources)} 点")
+        check("`_source_of` は従来どおり 1 点（参照実装として残す）",
+              np.allclose(rp._source_of(project, model), [1.0, 0.5, 0.5]))
+        project.source = [1.0, 0.5, 0.5]
+        check("`project.source` の指定があればそれが最優先（1 点）",
+              len(rp._sources(project, model)) == 1)
+
+    # ---- ② 置き場（音源が 1 点なら従来どおり）----
+    with tempfile.TemporaryDirectory() as folder:
+        one = pj.Project(folder, **dict(pj.DEFAULTS))
+        one.receiver_index = 1
+        check("★音源が 1 点なら `結果/rec1/`（置き方を変えない）",
+              one.result_dir().endswith(os.path.join(pj.RESULT_DIR, "rec1")),
+              one.result_dir())
+
+        two = pj.Project(folder, **dict(pj.DEFAULTS))
+        two.source_index, two.receiver_index = 2, 1
+        check("音源が複数なら `結果/src2/rec1/`",
+              two.result_dir().endswith(os.path.join(pj.RESULT_DIR, "src2", "rec1")),
+              two.result_dir())
+        check("★音線軌跡は**音源ごと**（`結果/src2/`）",
+              os.path.dirname(two.result_path("raylog")).endswith(
+                  os.path.join(pj.RESULT_DIR, "src2")))
+        check("★室の吸音と理論値は**音源に依らない**ので `結果/` 直下",
+              os.path.dirname(two.result_path("room")).endswith(pj.RESULT_DIR))
+        check("測定点の一覧も `結果/` 直下（全部の点を 1 枚に並べる）",
+              os.path.dirname(two.result_path("points")).endswith(pj.RESULT_DIR))
+        check("図も音源ごと（`図/src2/rec1/`）",
+              two.figure_dir().endswith(os.path.join(pj.FIGURE_DIR, "src2", "rec1")))
+
+    # ---- ③ 2 番目の音源の掃除で 1 番目の「音源に依らない結果」を消さない ----
+    with tempfile.TemporaryDirectory() as folder:
+        project = pj.Project(folder, **dict(pj.DEFAULTS))
+        project.dxf = "室.dxf"
+        project.source_index, project.receiver_index = 2, 1
+        project.ensure_dirs()
+        room = pj.Project(folder, **dict(pj.DEFAULTS))
+        room.dxf = "室.dxf"
+        os.makedirs(os.path.dirname(room.result_path("room")), exist_ok=True)
+        with io.open(room.result_path("room"), "w", encoding="utf-8") as handle:
+            handle.write("x")
+        project.clear_results(verbose=False)
+        check("★★音源 2 の掃除で『吸音率と理論値』が消えない",
+              os.path.exists(room.result_path("room")))
+
+    # ---- ④ パルス列を重ねる ----
+    first = _pulse_list([0.010, 0.020], [[1.0, 1.0], [0.5, 0.5]], [3.4, 6.9])
+    second = _pulse_list([0.030, 0.040], [[2.0, 2.0], [0.25, 0.25]], [10.3, 13.8])
+    merged = sx.merge_pulses([first, second])
+    check("重ね合わせ: 本数は足し算", len(merged) == 4)
+    check("★時刻はそのまま（伝搬遅れを残す＝同時に鳴らした音）",
+          np.allclose(np.sort(merged.time), [0.010, 0.020, 0.030, 0.040]))
+    aligned = sx.merge_pulses([first, second], aligned=True)
+    check("★時間差なし: 音源ごとに最初の到来を 0 s へ寄せる",
+          np.allclose(np.sort(aligned.time), [0.0, 0.0, 0.010, 0.010]))
+    check("★★寄せても**距離は触らない**（大きさが変わってはいけない）",
+          np.allclose(np.sort(aligned.distance), [3.4, 6.9, 10.3, 13.8]))
+    check("エネルギーは並べるだけ（足し込まない）",
+          np.isclose(aligned.energy.sum(), first.energy.sum() + second.energy.sum()))
+
+    # ---- ⑤ 同じ音源を 2 つ重ねると **+3.01 dB**（エネルギー和の物差し）----
+    air = Atmosphere()
+    bands = ab.octave_bands(2)
+    single = sl.band_levels(first.time, first.energy, first.distance, air, bands,
+                            verbose=False)
+    doubled = sx.merge_pulses([first, first])
+    both = sl.band_levels(doubled.time, doubled.energy, doubled.distance, air,
+                          bands, verbose=False)
+    check("★同じものを 2 つ重ねたら +3.010 dB（エネルギー和）",
+          np.allclose(both["levels"] - single["levels"], 3.0103, atol=1.0e-3),
+          f"{np.round(both['levels'] - single['levels'], 4).tolist()}")
+
+    # ---- ⑥ 平均のとり方（dB はエネルギー平均）----
+    tables = [[["音圧レベル", "Lp_dB", "80"], ["参考", "音源距離_m", "2"]],
+              [["音圧レベル", "Lp_dB", "86"], ["参考", "音源距離_m", "4"]]]
+    energy = sx._average_rows(tables, energy=True)
+    plain = sx._average_rows(tables, energy=False)
+    want = 10.0 * np.log10((10 ** 8.0 + 10 ** 8.6) / 2.0)
+    check("★dB の行はエネルギー平均（dB をそのまま平均しない）",
+          np.isclose(float(energy[0][2]), want, atol=1.0e-6),
+          f"{float(energy[0][2]):.3f} dB（算術平均なら 83.000）")
+    check("距離のような dB でない行は算術平均",
+          np.isclose(float(plain[1][2]), 3.0))
+    check("文字の欄はそのまま残る", energy[0][1] == "Lp_dB")
+    flags = sx._energy_columns("spl", tables[0])
+    check("★`spl.csv` の中でも dB の行だけをエネルギー平均にする",
+          flags == [True, False], f"{flags}")
+    check("残響時間・明瞭度・STI は算術平均（dB でも C50 はこちら）",
+          sx._energy_columns("clarity", tables[0]) == [False, False])
+
+    # ---- ⑦ 見方の選び方 ----
+    check("『すべて』で 3 通り", len(sx.modes_for(sx.MIX_ALL)) == 3)
+    check("『個別のみ』なら合成を作らない", sx.modes_for(sx.MIX_NONE) == [])
+    check("1 つだけ選べる", sx.modes_for(sx.MIX_SUM) == [sx.MIX_SUM])
+    check("知らない値は『すべて』とみなす（黙って何も作らないより安全）",
+          len(sx.modes_for("なにか")) == 3)
+    check("棚の名前は `合成_` で始まる（`source_folders` が見分ける）",
+          all(name.startswith(pj.MIX_PREFIX) for name in sx.FOLDERS.values()))
+
+
+def test_point_order():
+    """[51] 測定点の並び（2026-09-15 ユーザー要望）。
+
+    > 基本は作成順で良いですが、GUI 上で修正できるようにできないかな？
+
+    ★実案件で **`rec1` が R4** になっていた（DXF に出てきた順に番号を振るため）。
+    """
+    print("")
+    print("[51] 測定点の並び")
+    import tempfile
+
+    import point_order as po
+    import project as pj
+
+    with tempfile.TemporaryDirectory() as folder:
+        project = pj.Project(folder, **dict(pj.DEFAULTS))
+
+        def model():
+            return _FakeModel([[0.0, 0.0, 0.0], [9.0, 0.0, 0.0]],
+                              [[1.0, 0.0, 0.0], [2.0, 0.0, 0.0], [3.0, 0.0, 0.0]],
+                              layers=["A", "B", "C"])
+
+        check("並びを決めていなければ CAD の作成順のまま",
+              np.allclose(po.apply(project, model(), verbose=False)
+                          .receiver_points[0], [1.0, 0.0, 0.0]))
+
+        po.save(project, sources=[0, 1], receivers=[2, 0, 1])
+        moved = po.apply(project, model(), verbose=False)
+        check("★並べ替えが効く（rec1 が 3 点目になる）",
+              np.allclose(moved.receiver_points[0], [3.0, 0.0, 0.0]))
+        check("★レイヤ名も一緒に動く（測線ごとの評価が狂わない）",
+              moved.receiver_layer_names == ["C", "A", "B"])
+        check("音源も並べ替えられる",
+              np.allclose(po.apply(project, model(), verbose=False)
+                          .source_points[0], [0.0, 0.0, 0.0]))
+
+        # ★点の数が合わないときは**使わない**（normals.json と同じ約束）
+        po.save(project, sources=[0, 1], receivers=[0, 1])
+        kept = po.apply(project, model(), verbose=False)
+        check("★★数が合わない並びは使わない（黙って取り違えないため）",
+              np.allclose(kept.receiver_points[0], [1.0, 0.0, 0.0]))
+
+        # ★番号が重複・抜けのある並びも使わない
+        po.save(project, sources=[0, 1], receivers=[0, 0, 1])
+        kept = po.apply(project, model(), verbose=False)
+        check("重複した番号の並びも使わない",
+              np.allclose(kept.receiver_points[0], [1.0, 0.0, 0.0]))
+
+        po.save(project, sources=[1, 0], receivers=[0, 1, 2])
+        check("★入力なので対象室名・条件名の頭は付けない（`視点.json` と同じ）",
+              os.path.basename(po.path(project)) == po.ORDER_FILE)
+        check("保存した並びを読み戻せる",
+              po.load(project, verbose=False)["sources"] == [1, 0])
+
+
 def main():
     print("geosim 数値検証")
     print(f"  Python {sys.version.split()[0]} / numpy {np.__version__}")
@@ -5336,7 +5535,8 @@ def main():
                test_measurement_points, test_image_source_view,
                test_ui_2026_08_24, test_camera_save, test_hemi_anechoic,
                test_frequency_response, test_mode_shape, test_sections,
-               test_dxf_faces, test_open_edges):
+               test_dxf_faces, test_open_edges,
+               test_multiple_sources, test_point_order):
         fn()
 
     failed = [name for name, ok in _results if not ok]

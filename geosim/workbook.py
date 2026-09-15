@@ -73,8 +73,13 @@ TITLE_FONT_SIZE = 11
 
 
 def path(project):
-    """結果一式（xlsx）のパス。`結果/` 直下（受音点に依らないので）。"""
-    return os.path.join(project.path(pj.RESULT_DIR),
+    """結果一式（xlsx）のパス。`結果/` 直下（受音点に依らないので）。
+
+    ★**音源が複数あるときは棚ごと**（`結果/src1/` `結果/合成_平均/` …）。
+    棚ごとにまとめ表が違うので、1 つに重ねると最後の棚で上書きされる
+    （2026-09-15。不具合報告 ⑨ の対応で実際に踏んだ）。
+    """
+    return os.path.join(sm.results_root(project),
                         project.prefixed(WORKBOOK_FILE))
 
 
@@ -140,7 +145,7 @@ def _as_number(text):
 
 def _summary_table(project, filename, text_columns):
     """まとめ表の CSV を読む。**条件名の付く前の名前も探す**（`name_candidates`）。"""
-    folder = project.path(pj.RESULT_DIR)
+    folder = sm.results_root(project)
     rows = None
     for name in project.name_candidates(filename):
         rows = _read_rows(os.path.join(folder, name))
@@ -279,7 +284,7 @@ def sheets(project, verbose=True):
     # 条件を横に並べた比較（一括計算したときだけできる。条件名は頭に付かない）
     room = project.room_label
     comparison = _read_rows(os.path.join(
-        project.path(pj.RESULT_DIR),
+        sm.results_root(project),
         f"{room}_{sm.CONDITION_FILE}" if room else sm.CONDITION_FILE))
     if comparison is not None:
         name = SHEET_COMPARISON

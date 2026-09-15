@@ -22,6 +22,11 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 import project as pj
+import source_mix as sx
+
+# ★**音源が複数あるときの結果の見方**（2026-09-15 ユーザー要望。不具合報告 ⑨）。
+#   音源ごとの計算（個別）は必ず行うので、ここで選ぶのは「合成」をどれにするか
+MIX_CHOICES = sx.MIX_CHOICES
 
 BAND_CHOICES = [("8 バンド（63〜8k Hz）", 8), ("6 バンド（125〜4k Hz）", 6)]
 # ★インパルス応答の合成のやり方（2026-08-23 ユーザー指摘）。
@@ -300,9 +305,11 @@ class SetupWindow:
         combo(1, "orient_normals", "法線の向き", NORMAL_CHOICES)
         combo(2, "closed_model", "閉じたモデル", CLOSED_CHOICES)
         combo(3, "impulse_method", "インパルス応答の合成", IMPULSE_CHOICES)
+        # ★音源が 2 点以上あるときだけ効く（1 点なら何も変わらない）
+        combo(4, "source_combination", "音源が複数のとき", MIX_CHOICES)
         self.vars["statistical"] = tk.BooleanVar()
         ttk.Checkbutton(frame, text="統計残響式（Sabine / Eyring / Eyring-Knudsen）も計算する",
-                        variable=self.vars["statistical"]).grid(row=4, column=1,
+                        variable=self.vars["statistical"]).grid(row=5, column=1,
                                                                 sticky="w", padx=8)
 
     def _build_buttons(self, parent):
@@ -328,6 +335,8 @@ class SetupWindow:
         # （左寄りの補助的なもの → 右寄りの本命）の順に並べる
         items = [
             ("条件だけ保存", self._on_save),
+            # ★測定点の並び（`結果/recN/` の N をどの点にするか。2026-09-15 ユーザー要望）
+            ("測定点の並び…", self._on_point_order),
             ("面を確認…（法線・吸音材）", self._on_normals),
             ("前回の結果を見る", self._on_view),
             # ★同じフォルダの条件表を全部回す（2026-08-21 ユーザー要望）。
@@ -392,6 +401,8 @@ class SetupWindow:
         self._set_combo("orient_normals", NORMAL_CHOICES, p.orient_normals)
         self._set_combo("closed_model", CLOSED_CHOICES,
                         getattr(p, "closed_model", pj.CLOSED_AUTO))
+        self._set_combo("source_combination", MIX_CHOICES,
+                        getattr(p, "source_combination", sx.MIX_ALL))
         self._set_combo("impulse_method", IMPULSE_CHOICES,
                         getattr(p, "impulse_method", "fast"))
         self.vars["statistical"].set(bool(p.statistical))
@@ -449,6 +460,8 @@ class SetupWindow:
                                                         NORMAL_CHOICES)
         self.project.closed_model = self._combo_value("closed_model",
                                                       CLOSED_CHOICES)
+        self.project.source_combination = self._combo_value("source_combination",
+                                                            MIX_CHOICES)
         self.project.impulse_method = self._combo_value("impulse_method",
                                                         IMPULSE_CHOICES)
         self.project.statistical = bool(self.vars["statistical"].get())
@@ -493,6 +506,30 @@ class SetupWindow:
             self.vars[key].set(os.path.normpath(path))
             if key == "condition_csv":
                 self._refresh_sheets()      # 選んだ表の条件シートを並べ直す
+
+    def _on_point_order(self):
+        """**測定点の並び**を直す窓を開く（`測定点順.json`）。
+
+        ★CAD に描いた順がそのまま `rec1` `rec2` …になるので、ラベル（R1…）と
+        ずれることがある（実案件で `rec1` が R4 になっていた。2026-09-15）。
+        並べ替えは**次の計算から効く**（計算済みの結果フォルダは並べ替えない）。
+        """
+        self._collect()
+        folder = self.vars["folder"].get().strip()
+        if not folder or not os.path.isdir(folder):
+            messagebox.showerror("測定点の並び",
+                                 "先にプロジェクトフォルダを決めてください")
+            return
+        if not self.project.dxf_path or not os.path.exists(self.project.dxf_path):
+            messagebox.showerror("測定点の並び", "先に DXF を選んでください")
+            return
+        import point_order as po
+
+        try:
+            po.edit(self.project, parent=self.root)
+        except Exception as e:
+            messagebox.showerror("測定点の並びを開けませんでした",
+                                 f"{type(e).__name__}: {e}")
 
     def _show_directions(self):
         """音線がどの向きへ飛ぶかを見る（室形状は関係ないので単体で開ける）。"""
