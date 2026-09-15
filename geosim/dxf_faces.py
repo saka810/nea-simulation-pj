@@ -20,6 +20,9 @@ AutoCAD の中で `EXPLODE` すると、REGION は**輪郭の LINE**に、
     （2026-09-09。それまでは外周だけを面にしていて**開口が塞がっていた**）。
     穴を橋でつないで（キーホール法）耳刈りし、**3DFACE** で書く。
     ★面積が「外周 − 穴」と合わなければ穴を開けず、外周だけに戻して知らせる
+  ・★★**元の図面の `POINT` を引き継ぐ**（2026-09-11。不具合報告 ⑧）。
+    音源・受音点は `src` / `rec` 画層の POINT で渡す決めなのに面しか書いて
+    いなかったので、**変換を通すたびに音源も受音点も消えていた**
   ・座標は**元の単位のまま**（`$INSUNITS` も引き継ぐ）
 """
 import io
@@ -270,20 +273,28 @@ def _tables(layers):
     return "".join(out)
 
 
-def write_faces_dxf(path, polygons, insunits=4, triangles=None):
+def write_faces_dxf(path, polygons, insunits=4, triangles=None, points=None):
     """輪を**閉じた 3D ポリライン**として書く（本ツールが読める形）。
 
     `triangles` は [(レイヤ, (点, 点, 点)), …]。**穴のある面**はポリライン 1 本では
     表せないので、三角形に割って **3DFACE** で書く（2026-09-09。`read_dxffile` は
     3DFACE も読めるし、読み込み側の**同一平面パッチ**が 1 枚にまとめ直す）。
+
+    `points` は [(レイヤ, (x, y, z)), …]。元の図面の `POINT`（音源・受音点）を
+    そのまま書き戻す（2026-09-11。不具合報告 ⑧）。
     """
     triangles = list(triangles or [])
+    points = list(points or [])
     layers = sorted({layer for layer, _points in polygons}
-                    | {layer for layer, _corners in triangles}) or ["0"]
+                    | {layer for layer, _corners in triangles}
+                    | {layer for layer, _xyz in points}) or ["0"]
     with io.open(path, "w", encoding="utf-8", newline="\n") as handle:
         handle.write(_header(insunits))
         handle.write(_tables(layers))
         handle.write("0\nSECTION\n2\nENTITIES\n")
+        for layer, xyz in points:
+            handle.write("0\nPOINT\n8\n%s\n10\n%.6f\n20\n%.6f\n30\n%.6f\n"
+                         % (layer, xyz[0], xyz[1], xyz[2]))
         for layer, corners in triangles:
             # 3DFACE は 4 隅を持つ。三角形なので 4 点目は 3 点目と同じにする
             first, second, third = corners
@@ -302,6 +313,82 @@ def write_faces_dxf(path, polygons, insunits=4, triangles=None):
             handle.write("0\nSEQEND\n8\n%s\n" % layer)
         handle.write("0\nENDSEC\n0\nEOF\n")
     return path
+
+
+# ---- 元の図面の POINT（音源・受音点）----------------------------------------
+#
+# ★★2026-09-11 ユーザー要望「POINT も引き継ぎたいですね」（不具合報告 ⑧）。
+#   音源・受音点は `src` / `rec` 画層の POINT で渡す決め（`read_dxffile`）なのに、
+#   ここは面しか書いていなかったので**変換を通すたびに両方とも消えていた**。
+#   実案件（階段教室）では利用者が `Src` 画層に置いた音源 2 点が落ち、
+#   「音源が DXF にありません」と言われる状態になっていた。
+#
+#   ★**accoreconsole は通さない。**読めないのは ACIS（REGION / 3DSOLID）だけで、
+#     元の DXF は**テキストとして普通に読める**。POINT のグループコードは
+#     そのまま取れるので、元のファイルから直接拾って書き足す。
+
+def _tags(text):
+    """DXF を (グループコード, 値) の並びにする。
+
+    ASCII DXF は**コードと値が 1 行ずつ交互**に並ぶだけなので、2 行ずつ読む。
+    数字でない行が来たら（壊れたファイル）その組は飛ばす。
+    """
+    lines = text.replace("\r\n", "\n").split("\n")
+    for index in range(0, len(lines) - 1, 2):
+        code = lines[index].strip()
+        if not code.lstrip("-").isdigit():
+            continue
+        yield int(code), lines[index + 1].strip()
+
+
+def read_points(dxf_path):
+    """元の DXF の `POINT` を拾う。→ [(画層, (x, y, z)), …]
+
+    ★**モデル空間（`ENTITIES`）だけ**を見る。`BLOCKS` の中の POINT は
+    ブロック定義の座標系なので、そのまま置くと位置が合わない
+    （`INSERT` の挿入点・尺度・回転を当てないと世界座標にならない）。
+
+    ★**画層で絞らない**。`src` / `rec` かどうかは `read_dxffile` が
+    画層名で選ぶので、ここで決め打ちすると命名の揺れ（`Src` / `音源` など）に
+    追随できなくなる。余分に入っていても読み込み側が無視する。
+    """
+    try:
+        text = read_text(dxf_path, DXF_ENCODINGS, label="元の DXF")
+    except OSError:
+        return []
+
+    points = []
+    section, kind = None, None
+    layer, xyz = "0", [None, None, None]
+
+    def keep():
+        if kind == "POINT" and None not in xyz:
+            points.append((layer, (xyz[0], xyz[1], xyz[2])))
+
+    for code, value in _tags(text):
+        if code == 0:
+            keep()
+            if value == "SECTION":
+                section = "(名前待ち)"
+            elif value == "ENDSEC":
+                section = None
+            kind = value
+            layer, xyz = "0", [None, None, None]
+            continue
+        if section == "(名前待ち)" and code == 2:
+            section = value
+            continue
+        if section != "ENTITIES" or kind != "POINT":
+            continue
+        if code == 8:
+            layer = value
+        elif code in (10, 20, 30):
+            try:
+                xyz[code // 10 - 1] = float(value)
+            except ValueError:
+                pass
+    keep()
+    return points
 
 
 def _insunits_of(dxf_path):
@@ -656,8 +743,23 @@ def convert(dxf_path, out_path=None, accore=None, verbose=True, keep=False):
                 print(f"[面に分解] ★直線でない辺・面がありました: {kinds}"
                       "（円弧やスプラインは面にできません）")
 
+        # ★元の図面の POINT（音源・受音点）を引き継ぐ（2026-09-11。不具合報告 ⑧）
+        points = read_points(dxf_path)
+        if verbose:
+            if points:
+                counts = {}
+                for layer, _xyz in points:
+                    counts[layer] = counts.get(layer, 0) + 1
+                detail = " / ".join(f"{name} {n}" for name, n
+                                    in sorted(counts.items()))
+                print(f"[面に分解] 点（POINT）を {len(points)} 個"
+                      f"引き継ぎました（画層: {detail}）")
+            else:
+                print("[面に分解] 元の図面に点（POINT）はありませんでした。"
+                      "★音源・受音点は `src` / `rec` 画層の POINT で渡します")
+
         write_faces_dxf(out_path, polygons, insunits=_insunits_of(dxf_path),
-                        triangles=triangles)
+                        triangles=triangles, points=points)
         if verbose:
             print(f"[面に分解] 書き出しました: {out_path}")
         return out_path

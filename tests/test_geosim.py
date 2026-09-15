@@ -5103,6 +5103,80 @@ def test_dxf_faces():
         check("  試す順は CP932 → UTF-8（accoreconsole が前提）",
               df.DUMP_ENCODINGS == ("cp932", "utf-8"), str(df.DUMP_ENCODINGS))
 
+    # ---- ⑨ ★元の図面の POINT を引き継ぐ（2026-09-11 不具合報告 ⑧）----
+    #
+    # > POINT も引き継ぎたいですね
+    #
+    # 音源・受音点は `src` / `rec` 画層の POINT で渡す決めなのに、面しか
+    # 書いていなかったので**変換を通すたびに両方とも消えていた**。
+    # 実案件（階段教室）では `Src` 画層に置かれた音源 2 点が落ち、
+    # 「音源が DXF にありません」と言われる状態になっていた。
+    def _dxf(body, sections=""):
+        return ("0\nSECTION\n2\nHEADER\n9\n$INSUNITS\n70\n4\n0\nENDSEC\n"
+                + sections
+                + "0\nSECTION\n2\nENTITIES\n" + body + "0\nENDSEC\n0\nEOF\n")
+
+    with tempfile.TemporaryDirectory() as folder:
+        source = os.path.join(folder, "acis.dxf")
+        io.open(source, "w", encoding="utf-8", newline="\n").write(_dxf(
+            "0\nPOINT\n8\nsrc\n10\n1000.0\n20\n500.0\n30\n1500.0\n"
+            "0\nPOINT\n8\nrec\n10\n1200.0\n20\n2500.0\n30\n1200.0\n"
+            "0\nPOINT\n8\nrec\n10\n800.0\n20\n2500.0\n30\n1200.0\n"
+            "0\nLINE\n8\n通芯\n10\n0.0\n20\n0.0\n30\n0.0\n"
+            "11\n1.0\n21\n0.0\n31\n0.0\n"))
+        got = df.read_points(source)
+        check("★元の DXF から POINT を拾える（ACIS が読めなくてもテキストは読める）",
+              len(got) == 3, f"{len(got)} 個")
+        check("  画層も座標も保たれる",
+              got[0] == ("src", (1000.0, 500.0, 1500.0)), f"{got[0]}")
+        check("  POINT 以外は拾わない（LINE の 10/20/30 に釣られない）",
+              [layer for layer, _xyz in got] == ["src", "rec", "rec"],
+              f"{[layer for layer, _xyz in got]}")
+
+        # ★★BLOCKS の中の POINT は拾わない（ブロック定義の座標系なので
+        #   そのまま置くと位置が合わない）
+        blocked = os.path.join(folder, "with_block.dxf")
+        io.open(blocked, "w", encoding="utf-8", newline="\n").write(_dxf(
+            "0\nPOINT\n8\nsrc\n10\n1000.0\n20\n500.0\n30\n1500.0\n",
+            sections=("0\nSECTION\n2\nBLOCKS\n0\nBLOCK\n2\n図面枠\n"
+                      "0\nPOINT\n8\nrec\n10\n9999.0\n20\n9999.0\n30\n0.0\n"
+                      "0\nENDBLK\n0\nENDSEC\n")))
+        check("★BLOCKS の中の POINT は拾わない（ブロック定義の座標系）",
+              df.read_points(blocked) == [("src", (1000.0, 500.0, 1500.0))],
+              f"{df.read_points(blocked)}")
+
+        # 書き戻して、そのまま音源・受音点として読めるか（往復）
+        out = os.path.join(folder, "faces.dxf")
+        df.write_faces_dxf(
+            out, [("床", [(0, 0, 0), (2000, 0, 0), (2000, 3000, 0),
+                          (0, 3000, 0)])], insunits=4, points=got)
+        model = rd_.read_model(out, verbose=False)
+        check("★書き戻した POINT が音源として読める",
+              len(model.source_points) == 1
+              and abs(model.source_points[0][2] - 1.5) < 1e-9,
+              f"{model.source_points}")
+        check("  受音点も読める（mm → m に換算される）",
+              len(model.receiver_points) == 2
+              and abs(model.receiver_points[0][1] - 2.5) < 1e-9,
+              f"{model.receiver_points}")
+        check("  面はこれまでどおり読める（点を足しても壊れない）",
+              len(model.mesh) == 2, f"三角形 {len(model.mesh)} 枚")
+        check("  点の画層は面積に数えない（面ではないので）",
+              set(model.layer_areas) == {"床"}, f"{sorted(model.layer_areas)}")
+
+        # 点が無い図面でも落ちない
+        empty = os.path.join(folder, "nopoint.dxf")
+        io.open(empty, "w", encoding="utf-8", newline="\n").write(_dxf(""))
+        check("点が無い図面でも落ちない", df.read_points(empty) == [])
+
+        # ★CP932 で書かれた元 DXF でも画層名が壊れない
+        cp932 = os.path.join(folder, "cp932.dxf")
+        io.open(cp932, "wb").write(_dxf(
+            "0\nPOINT\n8\n音源\n10\n1.0\n20\n2.0\n30\n3.0\n").encode("cp932"))
+        check("★CP932 の元 DXF でも画層名が壊れない",
+              df.read_points(cp932) == [("音源", (1.0, 2.0, 3.0))],
+              f"{df.read_points(cp932)}")
+
         # ★どちらでも読めないときは、黙って壊さず理由を告げて続ける
         broken = os.path.join(folder, "edges_broken.txt")
         io.open(broken, "wb").write(b"L,1,\xff\xfe\xfd,0,0,0,1,0,0\n")
