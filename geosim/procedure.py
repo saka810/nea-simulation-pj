@@ -48,6 +48,11 @@ def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref
             pulse_filename=None, impulse_filename=None,
             sampling_frequency=ir.SAMPLING_FREQUENCY, max_time=ir.MAX_TIME,
             reverberation_filename=None, decay_filename=None,
+            # ★**RTany**（評価区間を利用者が決める残響時間。2026-09-15 ユーザー指示）。
+            #   両方 None なら従来どおり EDT / T20 / T30 だけ
+            rt_any_start_db=None, rt_any_end_db=None,
+            # 減衰曲線の読み方（`least_squares` = ISO 3382 の回帰／`crossing` = 2 点法）
+            decay_fit=None,
             room_filename=None, statistical=True,
             clarity=True, clarity_filename=None,
             source_power_db=None, noise_level_db=None,
@@ -416,7 +421,10 @@ def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref
             reverberation = rv.reverberation_time(
                 impulse[0], impulse[1], rt_filename=reverberation_filename,
                 decay_filename=decay_filename, frequencies=frequencies,
-                band_width=band_width)
+                band_width=band_width,
+                # ★RTany を足す（指定が無ければ EDT / T20 / T30 のまま）
+                measures=rv.measures_with_any(rt_any_start_db, rt_any_end_db),
+                fit=decay_fit or rv.DEFAULT_DECAY_FIT)
 
     # 明瞭度系の指標（C50 / C80 / D50 / Ts）。残響時間とは見ている中身が違う。
     # 「どれだけ長く響くか」ではなく「初期の音が後から来る音に対してどれだけ強いか」

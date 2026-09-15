@@ -221,6 +221,17 @@ DEFAULTS = {
     #   数値なら全受音点に同じ向きを使う（従来の project.json をそのまま読める）。
     #   リストなら k 番目の受音点に k 番目の向きを使う。`head_azimuth_for()` を通すこと
     "head_azimuth": 0.0,
+    # ★**RTany ― 減衰曲線をどこで読むか**（2026-09-15 ユーザー指示）。
+    #   > 減衰曲線の読み方を任意に読めるようにしています。RTany がそれです。
+    #   > …そのうえで、自動的な数値（RT20 や 30 など）は置いておいてください。
+    #   減衰が二段階になる室では、どこを読むかは設計者が決めること。
+    #   **EDT / T20 / T30 は今までどおり必ず出す**（RTany はそれに足す 1 本）。
+    #   None なら RTany を出さない。既定は T30 と同じ区間（-5 → -35 dB）
+    "rt_any_start_db": -5.0,
+    "rt_any_end_db": -35.0,
+    # 減衰曲線の読み方。`least_squares`（ISO 3382 の最小二乗回帰。既定）か
+    # `crossing`（開始 dB と終了 dB を横切る 2 点の時刻差。元 Fortran と同じ）
+    "decay_fit": "least_squares",
     "raylog_max_rays": 2000,
     "statistical": True,
     # インパルス応答の合成のやり方。`fast`（時間領域→FFT）か `exact`（式(2) そのまま）。

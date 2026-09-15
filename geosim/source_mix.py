@@ -282,11 +282,15 @@ def write_superposed(project, tags, mode, verbose=True):
                 sub.result_path("ir"), pulses, octave_frequencies=frequencies,
                 atmosphere=air, band_width=band_width, max_time=project.max_time,
                 method=getattr(project, "impulse_method", "fast"), verbose=False)
-        rt = rv.reverberation_time(impulse[0], impulse[1],
-                                   rt_filename=sub.result_path("rt"),
-                                   decay_filename=sub.result_path("decay"),
-                                   frequencies=frequencies,
-                                   band_width=band_width, verbose=False)
+        rt = rv.reverberation_time(
+            impulse[0], impulse[1], rt_filename=sub.result_path("rt"),
+            decay_filename=sub.result_path("decay"), frequencies=frequencies,
+            band_width=band_width, verbose=False,
+            # ★読み方は音源ごとの結果と同じにする（並べて比べるので）
+            measures=rv.measures_with_any(
+                getattr(project, "rt_any_start_db", None),
+                getattr(project, "rt_any_end_db", None)),
+            fit=getattr(project, "decay_fit", None) or rv.DEFAULT_DECAY_FIT)
         clarity = rv.clarity_measures(impulse[0], impulse[1],
                                       frequencies=frequencies,
                                       band_width=band_width, verbose=False)

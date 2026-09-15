@@ -3955,6 +3955,9 @@ def test_ui_2026_08_24():
     plotter = vg.build_plotter(room, off_screen=True, panel=True,
                                show_normals=False)
     panel = vg.control_panel(plotter)
+    # ★`build_plotter` が先に作った「レイヤの一括操作」のぶんを数えておく
+    #   （2026-09-15 に結果画面へも入れた。ここで見たいのは**この先で足す欄**）
+    base = len(panel._hits)
     moved = []
     panel.slider("試し", [0.0, 100.0], 10.0, lambda v: moved.append(v), fmt="%.1f")
     control = panel.controls[-1]
@@ -3972,19 +3975,20 @@ def test_ui_2026_08_24():
 
     hits = panel._hits
     check("押せる四角が登録される（枠・▲・▼・タブ 3・ボタン）",
-          len(hits) == 7, f"{len(hits)} 個")
-    click(hits[1]["rect"])
+          len(hits) - base == 7,
+          f"{len(hits) - base} 個（ほかにレイヤの一括操作 {base} 個）")
+    click(hits[base + 1]["rect"])
     check("★▲ を押すと 1 段上がる", abs(control["value"] - 11.0) < 1e-9,
           f"{control['value']}")
-    click(hits[2]["rect"])
+    click(hits[base + 2]["rect"])
     check("★▼ を押すと 1 段下がる", abs(control["value"] - 10.0) < 1e-9,
           f"{control['value']}")
-    click(hits[0]["rect"])
+    click(hits[base + 0]["rect"])
     check("★枠を押すと編集が始まる", panel._editing is control)
     panel.cancel_edit()
-    click(hits[5]["rect"])
+    click(hits[base + 5]["rect"])
     check("★タブを押すと切り替わる", chosen == ["う"], str(chosen))
-    click(hits[6]["rect"])
+    click(hits[base + 6]["rect"])
     check("★ボタンを押すと 1 回だけ効く", pressed == [1], str(pressed))
     before = control["value"]
     raw.SetEventPosition(900, 400)
@@ -3993,7 +3997,7 @@ def test_ui_2026_08_24():
           abs(control["value"] - before) < 1e-9)
     for hit in hits:
         hit["visible"] = False
-    click(hits[1]["rect"])
+    click(hits[base + 1]["rect"])
     check("★隠れている欄は押せない（タブで隠したもの）",
           abs(control["value"] - before) < 1e-9)
     plotter.close()
@@ -4199,8 +4203,11 @@ def test_camera_save():
           all(key in saved["camera"] for key in
               ("position", "focal_point", "up", "view_angle")),
           str(sorted(saved["camera"])))
+    # ★数を決め打ちにしない（2026-09-15 にレイヤの一括操作の「レイヤ番号」が
+    #   増えた。**この画面に無い設定は読み込み側が飛ばす**ので、増えても困らない）
+    kept = {row.get("label") for row in saved["controls"]}
     check("★左パネルの数値も一緒に残す（「画角など」を合わせたいという要望）",
-          len(saved["controls"]) == 2, str(saved["controls"]))
+          {"反射回数", "不透明度"} <= kept, str(sorted(kept)))
     check("開いていたタブも残す", saved["tab"] == "音線", str(saved["tab"]))
 
     # ★**名前を付けて何本でも**（2026-08-24 ユーザー要望「角度は色々保存したい」）
@@ -5511,6 +5518,158 @@ def test_point_order():
               po.load(project, verbose=False)["sources"] == [1, 0])
 
 
+def test_layer_controls():
+    """[52] レイヤの一括操作を**面の確認画面と結果画面で共用**する。
+
+    ★2026-09-15 ユーザー指摘「全レイヤー ON・OFF を追加した気がしましたが、
+    結果の音線の確認の画面ではそれが反映されていませんか？」。
+    2026-09-06（不具合報告 ⑦）で面の確認画面にだけ入れていた。
+    """
+    print("")
+    print("[52] レイヤの一括操作（面の確認画面と結果画面で共用）")
+    import inspect
+
+    import view_model_gui as vg
+
+    names = [f"画層{k + 1}" for k in range(22)]      # 実案件の階段教室と同じ 22 種
+    plotter, panel = vg.make_plotter("レイヤ操作の試験", (900, 700),
+                                     off_screen=True, panel=True)
+    try:
+        notes = []
+        state = {name: True for name in names}
+        controls = vg.LayerControls(panel, names, notice=notes.append,
+                                    heading="レイヤ表示")
+        for name in names:
+            def callback(value, name=name):
+                state[name] = bool(value)
+            controls.add(panel.checkbox(name, True, callback), callback)
+
+        check("22 画層ぶん登録できる", len(controls.boxes) == 22)
+
+        controls.show_all(False)
+        check("★レイヤを全非表示（22 回のクリックが 1 回になる）",
+              not any(state.values()))
+        check("★★チェックの四角も落ちる（SetState を呼ばないと見た目だけ残る）",
+              all(w.GetRepresentation().GetState() == 0 for w, _ in controls.boxes))
+        controls.show_all(True)
+        check("レイヤを全表示", all(state.values()))
+        check("知らせが出る（画面に出るのと同じ文）",
+              any("全表示" in text for text in notes), notes[-1])
+
+        # ★「レイヤ番号」の欄は 1 始まり（数字キーが 1〜9 までなので 10 個目以降はここ）
+        controls.set_index(12)
+        check("★10 個目以降も欄で指せる（数字キーは 1〜9 まで）",
+              controls.index == 11, f"index={controls.index}")
+        controls.show_only()
+        check("★この番号のレイヤだけ表示",
+              state["画層12"] and sum(state.values()) == 1,
+              f"表示 {sum(state.values())} 枚")
+        check("どれを出したか知らせる", "画層12" in notes[-1], notes[-1])
+
+        controls.set_index(0)
+        check("範囲の外は端で止まる（0 → 1 番目）", controls.index == 0)
+        controls.set_index(999)
+        check("範囲の外は端で止まる（999 → 22 番目）", controls.index == 21)
+    finally:
+        plotter.close()
+
+    # ★**両方の画面が同じ部品を使っている**ことを押さえる（片方だけ直る状態を防ぐ）
+    check("★★結果の画面（build_plotter）が共通部品を使う",
+          "LayerControls" in inspect.getsource(vg.build_plotter))
+    import face_editor as fe
+    check("★★面の確認画面も同じ部品を使う",
+          "LayerControls" in inspect.getsource(fe.FaceEditor.build_panel)
+          if hasattr(fe.FaceEditor, "build_panel")
+          else "LayerControls" in inspect.getsource(fe))
+
+
+def test_rt_any():
+    """[53] RTany ― 減衰曲線をどこで読むかを設計者が決める（2026-09-15 ユーザー指示）。
+
+    > 減衰曲線の読み方を任意に読めるようにしています。RTany がそれです。
+    > 読み方を人それぞれが判断する方法を置いておけば良いです。
+    > そのうえで、自動的な数値（RT20 や 30 など）は置いておいてください。
+    """
+    print("")
+    print("[53] RTany（読む区間を自分で決める残響時間）")
+    import tempfile
+
+    import project as pj
+
+    # ---- ① 区間の組み立て ----
+    check("指定が無ければ従来どおり EDT / T20 / T30",
+          set(rv.measures_with_any(None, None)) == {"EDT", "T20", "T30"})
+    made = rv.measures_with_any(-5.0, -15.0)
+    check("★RTany を足す（置き換えない＝自動の数字と見比べられる）",
+          set(made) == {"EDT", "T20", "T30", "RTany"}
+          and made["T30"] == (-5.0, -35.0), str(sorted(made)))
+    check("指定した区間がそのまま入る", made[rv.RT_ANY] == (-5.0, -15.0))
+    check("片方だけなら残りは既定（-5 / -35）",
+          rv.measures_with_any(None, -15.0)[rv.RT_ANY] == (-5.0, -15.0))
+    check("★逆さに書かれたら入れ替える（符号を書き間違えやすい）",
+          rv.measures_with_any(-35.0, -5.0)[rv.RT_ANY] == (-5.0, -35.0))
+    check("開始と終了が同じなら出さない（0 dB 幅は読めない）",
+          rv.RT_ANY not in rv.measures_with_any(-5.0, -5.0))
+    check("既定は T30 と同じ区間（変えるまで T30 と同じ値になる）",
+          rv.RT_ANY_DEFAULT == rv.DECAY_MEASURES["T30"], str(rv.RT_ANY_DEFAULT))
+
+    # ---- ② まっすぐ減る曲線なら、どの区間で読んでも同じ値になる ----
+    #     ★これが RTany の物差し。**区間を変えて値が動いたら曲がっている証拠**
+    fs = 44100.0
+    dt = 1.0 / fs
+    want = 1.2
+    t = dt * np.arange(int(fs * want * 1.5))
+    straight = -60.0 * t / want
+    for span in ((-5.0, -35.0), (-5.0, -15.0), (-10.0, -20.0), (0.0, -60.0)):
+        got = rv._decay_time(straight, dt, span[0], span[1])
+        check(f"直線なら区間 {span} でも T = {want} s",
+              abs(got - want) < 1e-9, f"{got:.9f} s")
+
+    # ---- ③ 二段減衰では区間で値が変わる（だから設計者が決める）----
+    #     前半 0.5 s 相当で 30 dB、後半はゆっくり
+    # ★**上側の包絡**を取る（残っているエネルギーは「遅い成分」に支配される）。
+    #   下側を取ると速い直線のままになり、曲がった曲線にならない
+    fast = -60.0 * t / 0.5
+    slow = -30.0 - 60.0 * (t - 0.25) / 2.0
+    bent = np.maximum(fast, slow)
+    early = rv._decay_time(bent, dt, -5.0, -15.0)
+    late = rv._decay_time(bent, dt, -5.0, -35.0)
+    check("★★二段減衰では読む区間で値が変わる（T30 を 1 本の直線で読めない）",
+          early < late * 0.8, f"前半 {early:.3f} s / T30 相当 {late:.3f} s")
+
+    # ---- ④ 表に区間が残る（利用者が決めた値なので後から読み返せるように）----
+    result = rv.decay_measures(t, np.random.default_rng(0).normal(size=len(t))
+                               * 10.0 ** (bent / 20.0),
+                               frequencies=[500.0, 1000.0],
+                               measures=rv.measures_with_any(-5.0, -15.0),
+                               verbose=False)
+    check("RTany が指標として出る", rv.RT_ANY in result["measures"])
+    check("どの区間で読んだかを結果が持つ",
+          result["ranges"][rv.RT_ANY] == (-5.0, -15.0))
+    with tempfile.TemporaryDirectory() as folder:
+        path = os.path.join(folder, "rt.csv")
+        rv.write_reverberation_time(path, result)
+        text = io.open(path, encoding="utf-8-sig").read()
+        check("★表にも区間が残る（表だけ見て何 dB から何 dB か分かる）",
+              "RTany_start_db" in text and "RTany_end_db" in text)
+        check("非線形性 ξ も出る（その区間を読んでよいかの目安）",
+              "RTany_xi" in text)
+        check("EDT / T20 / T30 も今までどおり並ぶ",
+              all(f"{name}_s" in text for name in ("EDT", "T20", "T30")))
+
+    # ---- ⑤ 設定として持ち回れる ----
+    with tempfile.TemporaryDirectory() as folder:
+        project = pj.Project(folder, **dict(pj.DEFAULTS))
+        check("既定は T30 と同じ区間",
+              (project.rt_any_start_db, project.rt_any_end_db) == (-5.0, -35.0))
+        check("読み取り方の既定は ISO 3382（回帰）",
+              project.decay_fit == rv.DECAY_FIT_LEAST_SQUARES)
+        project.rt_any_end_db = -15.0
+        project.save()
+        again = pj.Project.load(folder)
+        check("project.json に残る", again.rt_any_end_db == -15.0)
+
+
 def main():
     print("geosim 数値検証")
     print(f"  Python {sys.version.split()[0]} / numpy {np.__version__}")
@@ -5536,7 +5695,8 @@ def main():
                test_ui_2026_08_24, test_camera_save, test_hemi_anechoic,
                test_frequency_response, test_mode_shape, test_sections,
                test_dxf_faces, test_open_edges,
-               test_multiple_sources, test_point_order):
+               test_multiple_sources, test_point_order, test_layer_controls,
+               test_rt_any):
         fn()
 
     failed = [name for name, ok in _results if not ok]

@@ -836,6 +836,10 @@ def _run_one(project, receiver, verbose=True, make_figures=True,
         max_time=project.max_time,
         reverberation_filename=project.result_path("rt"),
         decay_filename=project.result_path("decay"),
+        # ★RTany（減衰曲線をどこで読むか。2026-09-15 ユーザー指示）
+        rt_any_start_db=getattr(project, "rt_any_start_db", None),
+        rt_any_end_db=getattr(project, "rt_any_end_db", None),
+        decay_fit=getattr(project, "decay_fit", None),
         room_filename=project.result_path("room"),
         clarity_filename=project.clarity_path(),
         level_filename=project.result_path("spl"),
@@ -1018,7 +1022,12 @@ def redraw(project, verbose=True):
         rows = np.atleast_1d(impulse)
         results["impulse"] = (rows["time_s"].astype(float), rows["ir"].astype(float))
         results["reverberation"] = rv.reverberation_time(
-            results["impulse"][0], results["impulse"][1], frequencies=frequencies)
+            results["impulse"][0], results["impulse"][1], frequencies=frequencies,
+            # ★描き直しでも読み方を合わせる（図と CSV が食い違わないように）
+            measures=rv.measures_with_any(
+                getattr(project, "rt_any_start_db", None),
+                getattr(project, "rt_any_end_db", None)),
+            fit=getattr(project, "decay_fit", None) or rv.DEFAULT_DECAY_FIT)
         results["clarity"] = rv.clarity_measures(
             results["impulse"][0], results["impulse"][1], frequencies=frequencies)
 

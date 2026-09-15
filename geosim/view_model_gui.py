@@ -1544,6 +1544,100 @@ NOTICE_COLORS = {"ok": "#7ee787", "busy": "#ffd166", "error": "#ff7b72"}
 NOTICE_SECONDS = 3.0
 
 
+class LayerControls:
+    """レイヤの一括操作（全表示 / 全非表示 / この番号だけ表示）。**画面をまたいで共用**。
+
+    ★★2026-09-06 に**面の確認画面だけ**へ入れた（不具合報告 ⑦
+      「レイヤー全選択全解除ほしい」）が、**結果の画面には入っていなかった**
+      （2026-09-15 ユーザー指摘「結果の音線の確認の画面では反映されていませんか？」）。
+      同じものを 2 つ持つと片方だけ直る状態が続くので、**ここに 1 つだけ置いて共用する**。
+
+    実案件の階段教室は**画層が 22 種**あり、1 つずつ切り替えると
+    「1 つだけ見る」「全部戻す」に 21〜22 回のクリックが要る。
+
+    使い方（★**ボタンを先に作ってからチェックボックスを並べる**）:
+
+        controls = LayerControls(panel, names, notice=..., on_pick=...)
+        for name in names:
+            widget = panel.checkbox(name, True, callback)
+            controls.add(widget, callback)
+
+    パネルは**作った順に積む**ので、ボタンを後に作ると
+    レイヤの数だけ下に押し下げられ、ページを送らないと見えなくなる
+    （CLAUDE.md「『表示の切り替え』の欄はパネルの先頭へ動かす」）。
+    """
+
+    def __init__(self, panel=None, names=(), notice=None, on_pick=None,
+                 heading=None):
+        """`panel=None` なら**欄を作らずに中身だけ**持つ（画面を出さない試験用）。"""
+        self.names = list(names)
+        self.boxes = []
+        self.index = 0
+        self.pick = None
+        self._notice = notice
+        self._on_pick = on_pick
+        if panel is None:
+            return
+        if heading:
+            panel.heading(heading)
+        panel.button("レイヤを全表示", lambda: self.show_all(True))
+        panel.button("レイヤを全非表示", lambda: self.show_all(False))
+        panel.button("この番号のレイヤだけ表示", self.show_only)
+        # ★★**数字キーは 1〜9 まで**（VTK のキーイベントは 1 文字）。
+        #   10 個目以降はこの欄（スピンボックス）で指す
+        self.pick = panel.slider("レイヤ番号", (1, max(1, len(self.names))), 1,
+                                 self.set_index, fmt="%.0f", step=1)
+
+    def add(self, widget, callback):
+        """チェックボックスを 1 つ登録する（並べた順がレイヤ番号）。"""
+        self.boxes.append((widget, callback))
+        return widget
+
+    def set_index(self, value):
+        """「レイヤ番号」の欄の値（1 始まり）を受ける。"""
+        if not self.names:
+            return
+        self.index = max(0, min(len(self.names) - 1, int(round(float(value))) - 1))
+        if self._on_pick is not None:
+            self._on_pick(self.index)
+
+    def set_visible(self, index, flag):
+        """レイヤ 1 つの表示を切り替える（チェックボックスの見た目も合わせる）。
+
+        ★**コールバックを呼ぶだけでは四角の色が変わらない**（VTK の
+          チェックボックスは自分で状態を持っている）。`SetState` も併せて呼ぶ。
+        """
+        if not 0 <= index < len(self.boxes):
+            return
+        widget, callback = self.boxes[index]
+        try:
+            widget.GetRepresentation().SetState(1 if flag else 0)
+        except Exception as error:      # 見た目が揃わなくても表示は切り替える
+            print(f"[レイヤ] チェックボックスの状態を合わせられませんでした: "
+                  f"{type(error).__name__}: {error}")
+        callback(bool(flag))
+
+    def show_all(self, flag):
+        """全レイヤをまとめて表示／非表示にする。"""
+        for index in range(len(self.boxes)):
+            self.set_visible(index, flag)
+        self.say(f"レイヤを全{'表示' if flag else '非表示'}にしました")
+
+    def show_only(self):
+        """「レイヤ番号」の欄で指しているレイヤ**だけ**を表示する。
+
+        ★1 つだけ見る使い方が多いので、全非表示 → 1 つ表示を 1 操作にした。
+        """
+        for index in range(len(self.boxes)):
+            self.set_visible(index, index == self.index)
+        name = self.names[self.index] if self.index < len(self.names) else "?"
+        self.say(f"レイヤ {self.index + 1}『{name}』だけ表示しました")
+
+    def say(self, message):
+        if self._notice is not None:
+            self._notice(message)
+
+
 def notice(plotter, message, kind="ok", seconds=NOTICE_SECONDS):
     """★**画面の真ん中下に一時的な知らせを出す**（2026-08-24 ユーザー要望）。
 
@@ -1933,14 +2027,23 @@ def build_plotter(model, title="モデルビューア", off_screen=False,
     if panel is not None:
         panel.screen_title(f"{title}")
         panel.text(f"三角形 {len(mesh)} 枚 / レイヤ {len(layers)}", size=9)
-        panel.heading("レイヤ表示")
+        # ★★**一括の切り替えを結果の画面にも出す**（2026-09-15 ユーザー指摘
+        #   「全レイヤー ON・OFF を追加した気がしましたが、結果の音線の確認の
+        #   画面ではそれが反映されていませんか？」）。2026-09-06 に面の確認画面へ
+        #   入れたときは、この画面（音線・音粒子・虚音源・音圧分布が共用）に
+        #   入れていなかった。部品は `LayerControls` に 1 つだけ置いて共用する。
+        # ★ボタンは**チェックボックスより先**に作る（パネルは作った順に積むので、
+        #   後にすると 22 画層のときページを送らないと見えない）
+        controls = LayerControls(panel, layers, heading="レイヤ表示",
+                                 notice=lambda text: notice(plotter, text))
         for i, name in enumerate(layers):
             count = model.layer_counts.get(name, 0)
-            panel.checkbox(f"{name} ({count})", True,
-                           _visibility_callback(plotter, face_actors[name],
-                                                arrow_actors[name], state,
-                                                edge_actors.get(name)),
-                           colour=LAYER_PALETTE[i % len(LAYER_PALETTE)])
+            callback = _visibility_callback(plotter, face_actors[name],
+                                            arrow_actors[name], state,
+                                            edge_actors.get(name))
+            controls.add(panel.checkbox(f"{name} ({count})", True, callback,
+                                        colour=LAYER_PALETTE[i % len(LAYER_PALETTE)]),
+                         callback)
 
     plotter.view_isometric()
     # あとから不透明度や表示を変えられるよう、レイヤごとの actor を Plotter に持たせる。

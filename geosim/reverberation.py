@@ -66,6 +66,50 @@ DECAY_MEASURES = {
     "T30": (-5.0, -35.0),
 }
 
+# ★★**RTany ― 評価区間を利用者が決める残響時間**（2026-09-15 ユーザー指示）。
+#
+#   > 減衰曲線の読み方を任意に読めるようにしています。RTany がそれです。
+#   > 読み方を人それぞれが判断する方法を置いておけば良いです。
+#   > そのうえで、自動的な数値（RT20 や 30 など）は置いておいてください。
+#
+#   きっかけは**減衰が二段階になる室**（階段教室。曲率が 125〜4k Hz で 10% 超）。
+#   前半が速く減り後半が遅く残るので、T30 を 1 本の直線で読むこと自体に無理がある。
+#   どこを読むかは**音響設計者が決めること**なので、機械が選ばずに手で決められる
+#   口を用意する（測定側の `sti_measurement` プロジェクトと同じ考え方）。
+#
+#   ★**EDT / T20 / T30 は今までどおり必ず出す**。RTany はそれに足す 1 本で、
+#     置き換えではない（自動の数字と見比べられないと判断できないため）。
+#   ★既定は T30 と同じ区間にしてある（変えるまでは T30 と同じ値になる＝
+#     「まだ何も決めていない」ことが数字を見れば分かる）。
+RT_ANY = "RTany"
+RT_ANY_DEFAULT = (-5.0, -35.0)
+
+
+def measures_with_any(start_db=None, end_db=None, base=None):
+    """`DECAY_MEASURES` に **RTany** を足した組を返す。→ {名前: (開始dB, 終了dB)}
+
+    `start_db` / `end_db` が両方 None なら足さない（従来どおり EDT / T20 / T30）。
+    片方だけ指定されたら、もう片方は既定（-5 / -35 dB）を使う。
+
+    ★**開始より終了のほうが下**でなければならない（`-5 → -35`）。
+      逆さに書かれたら**入れ替える**（符号を書き間違えやすいので、
+      黙って変な値を出すより直して知らせる）。
+    """
+    measures = dict(DECAY_MEASURES if base is None else base)
+    if start_db is None and end_db is None:
+        return measures
+    start = RT_ANY_DEFAULT[0] if start_db is None else float(start_db)
+    end = RT_ANY_DEFAULT[1] if end_db is None else float(end_db)
+    if start < end:
+        print(f"[reverberation] RTany の区間が逆さです（{start} → {end} dB）。"
+              f"入れ替えて {end} → {start} dB として読みます")
+        start, end = end, start
+    if start == end:
+        print(f"[reverberation] RTany の開始と終了が同じ（{start} dB）なので出しません")
+        return measures
+    measures[RT_ANY] = (start, end)
+    return measures
+
 # 減衰曲線の読み取り方。
 #   'least_squares' … 評価区間の全サンプルへ直線を最小二乗で当てる（**ISO 3382**。既定）
 #   'crossing'      … 開始 dB と終了 dB を横切る 2 点の時刻差（元コード 134 行）。
@@ -677,6 +721,8 @@ def decay_measures(time, ir, frequencies=None, measures=None, method="butter",
     return {"frequencies": base["frequencies"], "time": base["time"],
             "decay": base["decay"], "measures": values,
             "nonlinearity": nonlinearity, "fit": fits,
+            # どの区間で読んだか（RTany は利用者が決めるので表にも残す）
+            "ranges": dict(measures),
             "curvature": base["curvature"], "floor_db": base["floor_db"],
             "fit_method": fit}
 
@@ -806,6 +852,15 @@ def write_decay_measures(filename, result):
     rows["curvature_percent"] = result["curvature"]
     if result.get("floor_db") is not None:
         rows["decay_floor_db"] = result["floor_db"]
+    # ★**RTany はどの区間で読んだかを表に残す**（2026-09-15）。
+    #   利用者が決める値なので、表だけ見て「何 dB から何 dB まで」が分からないと
+    #   あとで読み返せない。バンドに依らない値だが、この表は 1 行 1 項目なので
+    #   全バンドに同じ値を並べる（`summary.py` は名前で拾うので邪魔にならない）
+    span = (result.get("ranges") or {}).get(RT_ANY)
+    if span is not None:
+        count = len(result["frequencies"])
+        rows[f"{RT_ANY}_start_db"] = np.full(count, float(span[0]))
+        rows[f"{RT_ANY}_end_db"] = np.full(count, float(span[1]))
     return tb.write_frequency_table(filename, result["frequencies"], rows)
 
 

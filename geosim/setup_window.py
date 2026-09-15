@@ -58,6 +58,17 @@ GEOMETRY_FIELDS = [
 ROOM_FIELDS = [
     ("volume", "室容積 [m³]", float, "空欄なら閉じた形状から自動算出"),
 ]
+# ★**RTany ― 減衰曲線をどこで読むか**（2026-09-15 ユーザー指示）。
+#   EDT / T20 / T30 は今までどおり必ず出る。RTany はそれに足す 1 本で、
+#   **減衰が二段階になる室でどこを読むかを設計者が決める**ためのもの
+DECAY_FIELDS = [
+    ("rt_any_start_db", "RTany 開始 [dB]", float,
+     "空欄なら RTany を出さない。既定 -5（T30 と同じ）"),
+    ("rt_any_end_db", "RTany 終了 [dB]", float,
+     "既定 -35（T30 と同じ）。前半だけ読むなら -15 など"),
+]
+DECAY_FIT_CHOICES = [("ISO 3382（区間の全点に直線を当てる）", "least_squares"),
+                     ("2 点法（開始 dB と終了 dB を横切る時刻の差）", "crossing")]
 SOURCE_FIELDS = [
     # 音圧レベルの絶対値・STI の SNR に要る（2026-08-21 ユーザー要望）
     ("source_power_db", "音源 PWL [dB]", float,
@@ -71,7 +82,8 @@ ATMOSPHERE_FIELDS = [
     ("humidity", "相対湿度 [%]", float, ""),
     ("pressure", "気圧 [kPa]", float, ""),
 ]
-NUMBER_FIELDS = GEOMETRY_FIELDS + ROOM_FIELDS + SOURCE_FIELDS + ATMOSPHERE_FIELDS
+NUMBER_FIELDS = (GEOMETRY_FIELDS + ROOM_FIELDS + DECAY_FIELDS + SOURCE_FIELDS
+                 + ATMOSPHERE_FIELDS)
 
 # インパルス応答の長さを理論残響時間の何倍にするか（1 秒単位に切り上げる）。
 # T30 は 35 dB 減るまで見るので 0.58 倍あれば測れるが、余裕を見て 1.5 倍
@@ -272,6 +284,25 @@ class SetupWindow:
                                    justify="left")
         self.room_note.grid(row=1, column=0, columnspan=3, sticky="w", pady=(4, 0))
 
+        # ★**減衰曲線の読み方**（2026-09-15 ユーザー指示）。
+        #   EDT / T20 / T30 は今までどおり必ず出る。ここで決めるのは
+        #   **RTany**（設計者が自分で区間を決めて読む 1 本）と、直線の当て方
+        frame = self._section(parent, "減衰曲線の読み方（EDT / T20 / T30 は常に出ます）")
+        for row, (key, label, _type, hint) in enumerate(DECAY_FIELDS):
+            self._number_row(frame, row, key, label, hint)
+        ttk.Label(frame, text="読み取り方").grid(row=len(DECAY_FIELDS), column=0,
+                                            sticky="w", pady=3)
+        var = tk.StringVar()
+        self.vars["decay_fit"] = var
+        ttk.Combobox(frame, textvariable=var, state="readonly", width=44,
+                     values=[text for text, _ in DECAY_FIT_CHOICES]).grid(
+                         row=len(DECAY_FIELDS), column=1, sticky="w", padx=8)
+        ttk.Label(frame, foreground="#3a6ea5", justify="left",
+                  text="★減衰が二段階になる室では、T30 を 1 本の直線で読むこと自体に"
+                       "無理があります。どこを読むかは設計者が決めてください"
+                  ).grid(row=len(DECAY_FIELDS) + 1, column=0, columnspan=3,
+                         sticky="w", pady=(4, 0))
+
         frame = self._section(parent, "音源（音圧レベル・STI に使う）")
         for row, (key, label, _type, hint) in enumerate(SOURCE_FIELDS):
             self._number_row(frame, row, key, label, hint)
@@ -401,6 +432,8 @@ class SetupWindow:
         self._set_combo("orient_normals", NORMAL_CHOICES, p.orient_normals)
         self._set_combo("closed_model", CLOSED_CHOICES,
                         getattr(p, "closed_model", pj.CLOSED_AUTO))
+        self._set_combo("decay_fit", DECAY_FIT_CHOICES,
+                        getattr(p, "decay_fit", "least_squares"))
         self._set_combo("source_combination", MIX_CHOICES,
                         getattr(p, "source_combination", sx.MIX_ALL))
         self._set_combo("impulse_method", IMPULSE_CHOICES,
@@ -460,6 +493,7 @@ class SetupWindow:
                                                         NORMAL_CHOICES)
         self.project.closed_model = self._combo_value("closed_model",
                                                       CLOSED_CHOICES)
+        self.project.decay_fit = self._combo_value("decay_fit", DECAY_FIT_CHOICES)
         self.project.source_combination = self._combo_value("source_combination",
                                                             MIX_CHOICES)
         self.project.impulse_method = self._combo_value("impulse_method",

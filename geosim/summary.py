@@ -44,7 +44,9 @@ LEVEL_ROWS = ["Lp_dB", "Lp_A_dB", "直接音_dB", "反射音_dB"]
 LEVEL_ENERGY_AVERAGE = True
 
 # `rt.csv` / `clarity.csv` から拾う行と、まとめ表での並び順
-REVERBERATION_ROWS = ["EDT_s", "T20_s", "T30_s"]
+# ★RTany（利用者が決めた区間の残響時間。2026-09-15）も並べる。
+#   出していないプロジェクトでは行が無いだけなので、足しておいて害はない
+REVERBERATION_ROWS = ["EDT_s", "T20_s", "T30_s", "RTany_s"]
 STATISTICAL_ROWS = ["sabine_s", "eyring_s", "eyring_knudsen_s"]
 CLARITY_ROWS = ["C50_db", "C80_db", "D50", "Ts_s"]
 
