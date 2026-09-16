@@ -5531,6 +5531,76 @@ def test_multiple_sources():
     check("棚の名前は `合成_` で始まる（`source_folders` が見分ける）",
           all(name.startswith(pj.MIX_PREFIX) for name in sx.FOLDERS.values()))
 
+    # ---- ⑧ ★棚を持ち回っているか（不具合報告 ⑪ ⑫ とその同型）----
+    #   `source_tag` / `source_index` は「保存する条件ではない」ので
+    #   `pj.DEFAULTS` に入っていない。そこから組み直すと棚が落ちて
+    #   `結果/recN/` を見にいき、音源が 2 点以上のときは何も見つからない
+    import frequency_response as fr
+
+    with tempfile.TemporaryDirectory() as folder:
+        for tag in ("src1", "src2"):
+            for rec in (1, 2):
+                shelf = sx.tagged(pj.Project(folder, **dict(pj.DEFAULTS)),
+                                  tag=tag, receiver_index=rec)
+                for key in ("pulses", "rt"):
+                    path = shelf.result_path(key)
+                    os.makedirs(os.path.dirname(path), exist_ok=True)
+                    open(path, "w").close()
+
+        parent = pj.Project(folder, **dict(pj.DEFAULTS))
+        want = os.path.join("結果", "src2")
+
+        def where(sub, key="pulses"):
+            path = sub.existing_result_path(key) or sub.result_path(key)
+            return os.path.relpath(path, folder)
+
+        check("★計算済みなら結果ありと分かる（⑪。棚も見る）",
+              pj.has_results(parent))
+        check("★棚を指していればその棚だけを見る（⑪）",
+              pj.has_results(sx.tagged(parent, tag="src2"))
+              and not pj.has_results(sx.tagged(parent, tag="合成_平均")))
+
+        shelf = sx.tagged(parent, tag="src2")
+        check("★虚音源は棚のパルス列を読む（⑫。`view_images.load_sets`）",
+              where(sx.tagged(shelf, tag=shelf.source_tag,
+                              index=shelf.source_index,
+                              receiver_index=1)).startswith(want),
+              where(sx.tagged(shelf, tag=shelf.source_tag, receiver_index=1)))
+        check("★逆二乗も棚のパルス列を読む（`inverse_square.read_levels`）",
+              where(sx.tagged(shelf, tag=shelf.source_tag,
+                              index=shelf.source_index,
+                              receiver_index=1)).startswith(want))
+        check("★伝達関数も棚を引き継ぐ（`frequency_response._on_shelf`）",
+              where(fr._on_shelf(shelf, 2)).startswith(
+                  os.path.join(want, "rec2")),
+              where(fr._on_shelf(shelf, 2)))
+        check("★条件の比較表も棚のまとめ表を見る（`summary`）",
+              os.path.relpath(os.path.dirname(
+                  sx.tagged(shelf, tag=shelf.source_tag,
+                            index=shelf.source_index).result_path("rt")),
+                  folder) == want)
+        check("★棚を選ばない Project は 1 番目の音源を開く（`default_shelf`）",
+              sx.default_shelf(parent, verbose=False).source_folder == "src1")
+        check("受音点の数は棚ごとに数える",
+              sx.receiver_count(parent, "src1") == 2)
+
+    # ★音源が 1 点のプロジェクトは従来どおり（棚を作らない・段を増やさない）
+    with tempfile.TemporaryDirectory() as folder:
+        one = pj.Project(folder, **dict(pj.DEFAULTS))
+        one.receiver_index = 1
+        path = one.result_path("pulses")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        open(path, "w").close()
+        same = sx.default_shelf(pj.Project(folder, **dict(pj.DEFAULTS)),
+                                verbose=False)
+        check("★単一音源は棚を選ばない（置き方を変えない）",
+              same.source_folder == "")
+        check("★単一音源は従来どおり `結果/rec1/`",
+              os.path.relpath(fr._on_shelf(same, 1).result_path("pulses"),
+                              folder).startswith(os.path.join("結果", "rec1")))
+        check("★単一音源でも結果ありと分かる",
+              pj.has_results(pj.Project(folder, **dict(pj.DEFAULTS))))
+
 
 def test_point_order():
     """[51] 測定点の並び（2026-09-15 ユーザー要望）。

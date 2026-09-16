@@ -2308,9 +2308,33 @@ openpyxl が無い環境では Excel だけ作れずに済む（CSV は書ける
 （指定を無視して他の棚で True を返さない）。棚を指していなければ
 `結果/` 直下 → `結果/src1/` → … の順に見る。
 
-★**同じ形が他にも残っている**：`inverse_square.read_levels()`（:227）と
-`summary` の条件比較（:367）。音源が 2 点以上のプロジェクトでは同じ理由で
-結果を見つけられないはず（**未検証**）。
+#### 同型の直し（2026-09-16。上と同じ日に片付けた）
+
+報告書が「未検証」として挙げていた 2 か所に加え、**同じ形が 3 か所**あった。
+どれも受音点ごとに `Project` を組み直すところ。
+
+| どこ | 直し方 |
+|---|---|
+| `inverse_square.read_levels()` | `sx.tagged()` で棚を引き継ぐ |
+| `summary.write_condition_summary()` | 同上 |
+| `frequency_response._reverberation_time()` | `_on_shelf()` に集約 |
+| `frequency_response`（受音点ごとのパルス列） | 同上 |
+| `frequency_response.write_csv()` | 同上 |
+
+★**棚を引き継ぐだけでは足りない**。`inverse_square` / `frequency_response` /
+`report_inverse_square` は `Project.load()` から始まるので、**そもそも棚を
+選んでいなかった**（`結果/` 直下を見て「先に計算してください」で止まる）。
+`main()` で **`sx.default_shelf()`** を通し、1 番目の音源を開いてそう言うようにした
+（`app.py` と同じ作法）。
+
+★**組み直すときは `source_mix.tagged()` を通す**のが確実。
+`pj.DEFAULTS` から写す形を新しく書かないこと。
+
+まだ残っているもの（音源が 2 点以上のときに効く）:
+
+- `run_project.run_conditions()` の Excel 作り直し（:422）は棚を選ばない。
+  条件の一括実行を 2 音源で回したときに出る
+- `mode_shape` は結果を読まず計算し直すので、この形ではない
 
 ---
 

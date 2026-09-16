@@ -215,6 +215,7 @@ def read_coherent_levels(project, verbose=True):
     import absorption as ab
     import atmosphere as at
     import loop_noredundancy as ln
+    import source_mix as sx
 
     frequencies = ab.frequency_bands(project.band_number,
                                      getattr(project, "band_width", "1/1"),
@@ -223,9 +224,13 @@ def read_coherent_levels(project, verbose=True):
                         humidity=project.humidity, pressure=project.pressure)
     levels, missing = {}, 0
     for index in range(1, 1000):
-        sub = pj.Project(project.folder,
-                         **{k: getattr(project, k) for k in pj.DEFAULTS})
-        sub.receiver_index = index
+        # ★音源ごとの棚（`結果/src1/`）を引き継ぐ（2026-09-16。不具合報告 ⑪ ⑫ の同型）。
+        #   `pj.DEFAULTS` から組み直すと `source_tag` / `source_index` が落ちる
+        #   （どちらも「保存する条件ではない」ので DEFAULTS に無い）。
+        #   落ちると `結果/recN/` を見にいき、音源が 2 点以上のときは
+        #   パルス列が 1 つも見つからない
+        sub = sx.tagged(project, tag=project.source_tag,
+                        index=project.source_index, receiver_index=index)
         path = sub.existing_result_path("pulses")
         if path is None or not os.path.exists(path):
             missing += 1
@@ -488,6 +493,7 @@ def main(argv=None):
     import argparse
 
     import condition_table as ct
+    import source_mix as sx
 
     parser = argparse.ArgumentParser(
         description="逆二乗則からのずれを測線ごとに出す（計算はやり直さない）")
@@ -505,6 +511,10 @@ def main(argv=None):
                              **{k: getattr(base, k) for k in pj.DEFAULTS})
         if sheet:
             project.condition_sheet = sheet
+        # ★音源が 2 点以上なら**棚を選ぶ**（2026-09-16。不具合報告 ⑪ ⑫ の同型）。
+        #   結果は `結果/srcM/recN/` に入るので、棚を選ばないと `結果/` 直下を見て
+        #   「先に計算してください」で止まる。既定は 1 番目の音源で、そう言う
+        project = sx.default_shelf(project)
         print(f"[逆二乗] 条件『{project.condition_label}』")
         table, figure = run(project)
         done += 1 if table else 0
