@@ -19,6 +19,18 @@ import itertools
 
 import numpy as np
 
+# ★★端末の文字コードで書けない文字があっても**落とさない**（2026-09-17）。
+#   cp932 の端末へ出すと `≈` `²` などで UnicodeEncodeError になり、
+#   **テストが途中で止まって残りが走らない**（実際に [7] の途中で止まった）。
+#   符号化そのものは端末に合わせたままにする（UTF-8 に変えると cp932 の画面では
+#   日本語が全部化ける）。書けない字だけエスケープに落として先へ進む。
+#   ※ 下の文言側も cp932 で書ける字に直してあるので、ふだんは出番が無い保険。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(errors="backslashreplace")
+    except (AttributeError, ValueError):   # 差し替えられた stdout など
+        pass
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "geosim"))
 
@@ -302,7 +314,7 @@ def test_absorption():
           np.abs(numeric - closed).max() < 1e-8,
           f"最大差 {np.abs(numeric - closed).max():.2e}")
 
-    check("α_s の最大値が 0.951（z≈1.57）",
+    check("α_s の最大値が 0.951（z≒1.57）",
           abs(ab.STATISTICAL_MAX - 0.951) < 0.002
           and abs(ab.STATISTICAL_MAX_IMPEDANCE - 1.567) < 0.01,
           f"{ab.STATISTICAL_MAX:.4f} (z={ab.STATISTICAL_MAX_IMPEDANCE:.3f})")
@@ -337,7 +349,7 @@ def test_absorption():
     rigid = ab.random_to_normal(0.0, warn=False)
     check("★剛な面（残響室法 α = 0）が NaN にならない",
           np.isfinite(rigid) and rigid == 0.0, f"α_n = {rigid!r}")
-    check("★剛な面の反射則は全反射（|R|² = 1）",
+    check("★剛な面の反射則は全反射（|R|^2 = 1）",
           abs(_sr.energy_decay(np.array([0.0, 0.0, -1.0]),
                                np.array([0.0, 0.0, 1.0]), rigid, 1.0) - 1.0) < 1e-12)
     check("★配列に 0 が混じっても NaN を出さない",
@@ -2488,7 +2500,7 @@ def test_result_naming():
           np.isclose(float(mean[3]), 0.25), f"{mean[3]}（正解 0.25）")
     check("平均吸音率の行には総表面積が入る",
           np.isclose(float(mean[2]), 1.0), mean[2])
-    check("等価吸音面積 A = S・ᾱ も並べる",
+    check("等価吸音面積 A = S・α（平均）も並べる",
           np.isclose(float([r for r in table if r[1] == "等価吸音面積_m2"][0][3]),
                      0.25))
     stat_rows = {row[1]: row for row in table[1:] if row[0] == "残響時間理論値"}
@@ -4525,7 +4537,7 @@ def test_hemi_anechoic():
     # ---- ★★中心周波数と帯域端は IEC 61260-1 / JIS C 1513-1 の**ベース10** ----
     #   2026-09-16 にユーザー指示でベース2（2^(n/3)・f/√2）から揃えた。
     #   規格の原本（06_参考文献/02_規格・法律/JIS/JIS C 1513-1_2020）で確認済み
-    check("★厳密中心周波数は f_m = 1000·G^(x/b)（5.4.1 式(2)。G = 10^(3/10)）",
+    check("★厳密中心周波数は f_m = 1000・G^(x/b)（5.4.1 式(2)。G = 10^(3/10)）",
           np.allclose(ab.exact_midband([63.0, 125.0, 1000.0, 4000.0, 8000.0]),
                       [63.09573, 125.89254, 1000.0, 3981.07171, 7943.28235]),
           str(ab.exact_midband([63.0, 8000.0])))
@@ -4541,7 +4553,7 @@ def test_hemi_anechoic():
 
     low_oct, high_oct = ab.band_edges([1000.0], "1/1")
     low_3rd, high_3rd = ab.band_edges([1000.0], "1/3")
-    check("★帯域端は f_m·G^(∓1/(2b))（5.6.1 式(4)(5)）",
+    check("★帯域端は f_m・G^(-1/(2b)) から f_m・G^(+1/(2b))（5.6.1 式(4)(5)）",
           np.allclose([low_oct[0], high_oct[0]],
                       [1000.0 * ab.OCTAVE_RATIO ** -0.5,
                        1000.0 * ab.OCTAVE_RATIO ** 0.5])
@@ -4611,7 +4623,7 @@ def test_hemi_anechoic():
     distance = np.array([0.5, 1.0, 2.0, 4.0, 7.0])
     ideal = 94.0 - 20.0 * np.log10(distance)
     delta, reference = iq.deviations(distance, ideal)
-    check("★理想の 1/r² ならずれは 0", np.allclose(delta, 0.0, atol=1e-9)
+    check("★理想の 1/r^2 ならずれは 0", np.allclose(delta, 0.0, atol=1e-9)
           and abs(reference - 94.0) < 1e-9, f"{np.max(np.abs(delta)):.2e}")
     shifted = ideal.copy()
     shifted[2] += 2.0
