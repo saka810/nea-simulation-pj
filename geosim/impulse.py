@@ -54,12 +54,26 @@ NUMTAPS = 8192
 OCTAVE_BAND_FREQUENCIES = DEFAULT_OCTAVE_BANDS
 
 
-def third_octave_bands(count=32, start=15.625):
-    """1/3 オクターブバンドの中心周波数 [Hz]。元コード 46 行。
+def third_octave_bands(count=32, start=None):
+    """合成に使う 1/3 オクターブバンドの**厳密**中心周波数 [Hz]。
 
-    mf(i) = 15.625 * 2^((i-1)/3) → 15.625 Hz 〜 20 kHz
+    元コードは `mf(i) = 15.625 * 2^((i-1)/3)`（ベース 2、15.625 Hz 始まり）
+    だったが、**JIS C 1513-1 5.4.1 式(2)** のベース 10 に揃えた
+    （2026-09-16 ユーザー指示）。
+
+        f_m = 1000 · G^(x/3)      G = 10^(3/10)   → f_m = 1000 · 10^(x/10)
+
+    既定は x = -18〜+13 の 32 バンド（呼び値 16 Hz 〜 20 kHz。
+    厳密値では 15.849 Hz 〜 19 953 Hz）。元のベース 2 とは最大 1.4% しか違わない
+    ので、オクターブ → 1/3 の割り当て（`band_mapping`）は変わらない。
+
+    `start` を渡すとその**呼び値**のバンドから始める。
     """
-    return start * 2.0 ** (np.arange(count) / 3.0)
+    import absorption as _ab
+    first = -18 if start is None else int(round(
+        10.0 * np.log10(float(start) / _ab.REFERENCE_FREQUENCY)))
+    index = np.arange(first, first + int(count))
+    return _ab.REFERENCE_FREQUENCY * 10.0 ** (index / 10.0)
 
 
 def band_mapping(octave_frequencies, third_frequencies):
@@ -223,15 +237,19 @@ def impulse_train(energy32_air, time, nfft, sound_velocity,
     return trains
 
 
-def bandpass_edges(mf, fmax):
-    """各 1/3 オクターブバンドの正規化遮断周波数。元コード 152〜154 行。
+def bandpass_edges(mf, fmax, band_width=None):
+    """各バンドの正規化遮断周波数。元コード 152〜154 行。
 
-    下端 mf * 2^(-1/6)、上端 mf * 2^(1/6) をナイキスト周波数で割る。
-    ナイキストを超えるバンドは 0.999 で頭打ちにする。
+    ★**帯域端は JIS C 1513-1 5.6.1**（`absorption.band_edges`）。
+    元コードは `mf·2^(∓1/6)`（ベース 2）だったが、規格のベース 10
+    `mf·G^(∓1/(2b))` に揃えた（2026-09-16 ユーザー指示。1/3 なら ×0.891 25 /
+    ×1.122 02 で、規格 表 F.1 の不連続点と一致する）。
+
+    ナイキスト周波数で割って正規化し、超えるバンドは 0.999 で頭打ちにする。
     """
-    lower = mf * 2.0 ** (-1.0 / 6.0) / fmax
-    upper = np.minimum(mf * 2.0 ** (1.0 / 6.0) / fmax, 0.999)
-    return lower, upper
+    import absorption as _ab
+    lower, upper = _ab.band_edges(mf, band_width or _ab.BAND_WIDTH_THIRD)
+    return lower / fmax, np.minimum(upper / fmax, 0.999)
 
 
 def filter_bandpass(numtaps, wmin, wmax):
@@ -319,8 +337,10 @@ def impulse_response(time, energy, octave_frequencies=None, atmosphere=None,
     #   展開すると 100〜500 Hz の値が表の外（20 Hz や 10 kHz）まで塗り広げられる
     import absorption as _ab
     third_input = _ab.is_third_octave(band_width)
-    mf = (np.asarray(octave_frequencies, dtype=float) if third_input
-          else third_octave_bands())
+    # ★**計算は厳密中心周波数で行う**（JIS C 1513-1 5.4.1。呼び値は表示用）。
+    #   空気吸収も帯域分割もここから引くので、ここで直せば下流はそのまま
+    mf = (_ab.exact_midband(np.asarray(octave_frequencies, dtype=float))
+          if third_input else third_octave_bands())
 
     if verbose:
         print(f"[impulse] {atmosphere.summary()}")
@@ -342,7 +362,7 @@ def impulse_response(time, energy, octave_frequencies=None, atmosphere=None,
     #   実案件で **63 倍**速い（2026-08-21）。端数遅延は窓付き sinc で分配する
     # `method='exact'`      … 式(2.67) をそのまま（`transfer_function`）。
     #   **参照実装**。周波数 × パルスの総当たりなので遅い
-    lower, upper = bandpass_edges(mf, fmax)
+    lower, upper = bandpass_edges(mf, fmax, band_width=_ab.BAND_WIDTH_THIRD)
     delay = (numtaps - 1) // 2
     if method == "exact":
         spectrum = transfer_function(energy32, time, nfreq, df, sound_velocity)

@@ -11,7 +11,8 @@
 
   ① 対数周波数で線形補間する（吸音率は周波数の対数に対してなだらかに動くので、
      等間隔でない測定値をつなぐならこれが素直）
-  ② **バンドの幅で平均する**（1/1 オクターブなので f/√2 〜 f√2）。
+  ② **バンドの幅で平均する**（帯域端は JIS C 1513-1 5.6.1。
+     オクターブなら f·G^∓0.5、G = 10^(3/10)）。
      中心周波数の 1 点だけを読むより、山や谷を均せる
   ③ データの外側は**いちばん端の値を保つ**（外挿はしない）。
      どこから外挿かは `extrapolated` で返すので、出力に注意書きを添えられる
@@ -39,10 +40,22 @@ def interpolate(frequencies, values, target):
                            left=values[0], right=values[-1]))
 
 
+def _edges(centre, width):
+    """バンドの下端・上端。**JIS C 1513-1 5.6.1**（厳密中心周波数 ± G^(1/(2b))）。
+
+    2026-09-16 にユーザー指示でベース 2（f/√2）から揃えた。
+    `absorption.band_edges` と**必ず同じ**ものを使う（吸音率を平均する幅と
+    フィルタの幅が食い違うと、帯域の値の意味がずれるため）。
+    """
+    import absorption as ab
+    band_width = ab.BAND_WIDTH_THIRD if abs(float(width) - 1.0 / 3.0) < 1e-9         else ab.BAND_WIDTH_OCTAVE
+    low, high = ab.band_edges(centre, band_width)
+    return float(low), float(high)
+
+
 def band_average(frequencies, values, centre, samples=SAMPLES, width=1.0):
     """バンド（`centre`）の平均吸音率。`width` はオクターブ数（1/3 なら 1/3）。"""
-    half = float(width) / 2.0
-    low, high = centre * 2.0 ** (-half), centre * 2.0 ** half
+    low, high = _edges(centre, width)
     points = np.logspace(math.log10(low), math.log10(high), samples)
     return float(np.mean([interpolate(frequencies, values, f) for f in points]))
 
@@ -57,9 +70,8 @@ def to_bands(frequencies, values, centres, samples=SAMPLES, width=1.0):
     bands, extrapolated = [], []
     for centre in centres:
         bands.append(band_average(frequencies, values, centre, samples, width))
-        half = float(width) / 2.0
-        if (centre * 2.0 ** (-half) < lowest
-                or centre * 2.0 ** half > highest):
+        low, high = _edges(centre, width)
+        if low < lowest or high > highest:
             extrapolated.append(float(centre))
     return np.array(bands, dtype=float), extrapolated
 

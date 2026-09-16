@@ -329,6 +329,44 @@ def test_absorption():
     check("上限を超える値は全て同じ結果になる",
           abs(ab.random_to_normal(1.5, warn=False) - got) < 1e-9)
 
+    # ---- ★★剛な面（α = 0）が NaN にならない（2026-09-16 ユーザー指摘）----
+    #   以前は α_s = 0 → z = ∞ → 4z/(1+z)² = NaN となり、そのまま反射計算へ
+    #   流れて**結果が黙って全部 NaN になった**（警告も出ない）。
+    #   `frequency_response.py` は「まずは剛な面として」使う想定なので実害があった
+    import sound_ray as _sr
+    rigid = ab.random_to_normal(0.0, warn=False)
+    check("★剛な面（残響室法 α = 0）が NaN にならない",
+          np.isfinite(rigid) and rigid == 0.0, f"α_n = {rigid!r}")
+    check("★剛な面の反射則は全反射（|R|² = 1）",
+          abs(_sr.energy_decay(np.array([0.0, 0.0, -1.0]),
+                               np.array([0.0, 0.0, 1.0]), rigid, 1.0) - 1.0) < 1e-12)
+    check("★配列に 0 が混じっても NaN を出さない",
+          np.all(np.isfinite(ab.random_to_normal(
+              np.array([0.0, 0.05, 0.2, 0.9]), warn=False))))
+    check("両端（z = 0 と z = ∞）の極限は 0（どちらも全反射）",
+          ab.normal_absorption(np.inf) == 0.0
+          and ab.normal_absorption(0.0) == 0.0
+          and ab.statistical_absorption(np.inf) == 0.0
+          and ab.statistical_absorption(0.0) == 0.0)
+    check("★剛（z = ∞）の圧力反射率は R = +1（inf/inf を NaN にしない）",
+          ab.reflection_coefficient(np.inf, 1.0) == 1.0
+          and ab.reflection_coefficient(np.inf, 0.0) == 1.0)
+    check("★剛な面を拡散入射で平均しても 0 に戻る",
+          abs(ab.normal_to_random(rigid)) < 1e-12)
+    check("0 のすぐ隣も連続（0.001 → 0.0005 付近）",
+          abs(ab.random_to_normal(0.001, warn=False) - 0.000501) < 1e-5)
+
+    # ★もし将来また NaN が出るようになったら、黙って流さず理由を告げて止める
+    import unittest.mock as _mock
+    with _mock.patch.object(ab, "normal_absorption",
+                            lambda z: np.full(np.shape(np.atleast_1d(z)), np.nan)):
+        try:
+            ab.random_to_normal(np.array([0.2]), warn=False, label="試験用")
+            stopped = False
+        except ValueError as error:
+            stopped = "試験用" in str(error)
+    check("★NaN になったら理由を告げて止まる（黙って流さない）", stopped)
+
     # バンド定義
     check("8 バンドが 63〜8000 Hz",
           np.allclose(ab.octave_bands(8), [63, 125, 250, 500, 1000, 2000, 4000, 8000]))
@@ -4477,11 +4515,58 @@ def test_hemi_anechoic():
           str([f"{v:.0f}" for v in ab.frequency_bands(8, "1/3", 100.0)]))
     check("オクターブは従来どおり（8 → 63〜8k）",
           np.allclose(ab.frequency_bands(8), ab.octave_bands(8)))
-    check("★帯域の幅で端が変わる（1/1 は f/√2〜f√2、1/3 は f·2^(∓1/6)）",
-          np.allclose(ab.band_edges([1000.0], "1/1"),
-                      ([1000.0 / np.sqrt(2)], [1000.0 * np.sqrt(2)]))
-          and np.allclose(ab.band_edges([1000.0], "1/3"),
-                          ([1000.0 * 2 ** (-1 / 6)], [1000.0 * 2 ** (1 / 6)])))
+    # ---- ★★中心周波数と帯域端は IEC 61260-1 / JIS C 1513-1 の**ベース10** ----
+    #   2026-09-16 にユーザー指示でベース2（2^(n/3)・f/√2）から揃えた。
+    #   規格の原本（06_参考文献/02_規格・法律/JIS/JIS C 1513-1_2020）で確認済み
+    check("★厳密中心周波数は f_m = 1000·G^(x/b)（5.4.1 式(2)。G = 10^(3/10)）",
+          np.allclose(ab.exact_midband([63.0, 125.0, 1000.0, 4000.0, 8000.0]),
+                      [63.09573, 125.89254, 1000.0, 3981.07171, 7943.28235]),
+          str(ab.exact_midband([63.0, 8000.0])))
+    check("1/3 の呼び値 160/315/630 の厳密値",
+          np.allclose(ab.exact_midband([160.0, 315.0, 630.0]),
+                      [158.48932, 316.22777, 630.95734]))
+    check("★厳密値を入れ直しても動かない（いちばん近い格子点に丸めるだけ）",
+          np.allclose(ab.exact_midband(ab.exact_midband([63.0, 8000.0])),
+                      ab.exact_midband([63.0, 8000.0])))
+    check("基準周波数はちょうど 1000 Hz（5.3）", ab.exact_midband(1000.0) == 1000.0)
+    check("オクターブ周波数比 G = 10^(3/10) = 1.995 26（5.2.1 式(1)）",
+          abs(ab.OCTAVE_RATIO - 1.99526231) < 1e-8, f"{ab.OCTAVE_RATIO:.8f}")
+
+    low_oct, high_oct = ab.band_edges([1000.0], "1/1")
+    low_3rd, high_3rd = ab.band_edges([1000.0], "1/3")
+    check("★帯域端は f_m·G^(∓1/(2b))（5.6.1 式(4)(5)）",
+          np.allclose([low_oct[0], high_oct[0]],
+                      [1000.0 * ab.OCTAVE_RATIO ** -0.5,
+                       1000.0 * ab.OCTAVE_RATIO ** 0.5])
+          and np.allclose([low_3rd[0], high_3rd[0]],
+                          [1000.0 * ab.OCTAVE_RATIO ** (-1 / 6),
+                           1000.0 * ab.OCTAVE_RATIO ** (1 / 6)]))
+    check("★1/3 の帯域端は規格 表 F.1 の 0.891 25 / 1.122 02 と一致",
+          abs(low_3rd[0] / 1000.0 - 0.89125) < 5e-6
+          and abs(high_3rd[0] / 1000.0 - 1.12202) < 5e-6,
+          f"{low_3rd[0] / 1000:.6f} / {high_3rd[0] / 1000:.6f}")
+    check("帯域幅周波数比 f2/f1 = G^(1/b)（5.6.2）",
+          abs(high_oct[0] / low_oct[0] - 10 ** 0.3) < 1e-9
+          and abs(high_3rd[0] / low_3rd[0] - 10 ** 0.1) < 1e-9)
+    check("★√2・2^(1/6) ではない（ベース2 との差は 0.12% / 0.04%）",
+          abs(high_oct[0] - 1000.0 * np.sqrt(2)) > 1.0
+          and abs(high_3rd[0] - 1000.0 * 2 ** (1 / 6)) > 0.3)
+    check("`exact=False` なら渡した中心周波数のまま（参照・検算用）",
+          np.allclose(ab.band_edges([8000.0], "1/1", exact=False),
+                      ([8000.0 * ab.OCTAVE_RATIO ** -0.5],
+                       [8000.0 * ab.OCTAVE_RATIO ** 0.5])))
+
+    # ★★空気吸収が ISO 9613-1 表1 と一致すること（呼び値を渡しても厳密で引く）
+    import sound_level as _sl
+    from atmosphere import Atmosphere as _Atm
+    _air = _Atm(temperature=20.0, humidity=40.0)
+    check("★空気吸収が ISO 9613-1 表1（20℃40%）と一致する",
+          np.allclose(_air.absorption_db_per_metre(
+                          ab.exact_midband(ab.octave_bands(8))) * 1000,
+                      [0.150, 0.521, 1.39, 2.63, 4.65, 11.2, 36.1, 128.0],
+                      rtol=0.005),
+          str(np.round(_air.absorption_db_per_metre(
+              ab.exact_midband(ab.octave_bands(8))) * 1000, 3)))
     check("幅の呼び方を取り違えない", ab.is_third_octave("1/3")
           and not ab.is_third_octave("1/1") and abs(ab.band_ratio("1/3") - 1 / 3) < 1e-9)
     check("1/3 の中心周波数は**呼び値**（表と数字がそろう）",
