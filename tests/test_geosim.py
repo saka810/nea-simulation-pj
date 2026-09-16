@@ -2760,6 +2760,37 @@ def test_condition_table():
           and sheet.cell(row=2,
                          column=columns[ct.COLUMN_COUNT]).number_format == "0",
           sheet.cell(row=2, column=columns[ct.COLUMN_AREA]).number_format)
+    # ---- ★「面数」と「面数（パッチ）」は別物（2026-09-16。不具合報告 ⑬）----
+    #   「面数」は三角形に割ったあとの枚数なので、モデルを作った人が数える
+    #   面数より必ず多く見える。計算が 1 枚として扱うのは同一平面パッチのほう
+    import mesh_method as mm
+    triangles = [tuple(np.asarray(m.vertexes, dtype=float)) for m in model.mesh]
+    face_normal = np.array([np.asarray(m.normal, dtype=float) for m in model.mesh])
+    patch_of_face = mm.coplanar_patches(triangles, face_normal,
+                                        [m.material for m in model.mesh])
+    patches = ct.layer_patch_counts(model)
+    check("★「面数（パッチ）」の列がある（整数表示）",
+          ct.COLUMN_PATCHES in columns
+          and sheet.cell(row=2,
+                         column=columns[ct.COLUMN_PATCHES]).number_format == "0")
+    check("★パッチ数は交差判定と同じ数え方（coplanar_patches と一致）",
+          sum(patches.values()) == int(patch_of_face.max()) + 1,
+          f"レイヤ別の合計 {sum(patches.values())} / "
+          f"全体 {int(patch_of_face.max()) + 1}")
+    check("★三角形の枚数より少ない（n 角形は n-2 枚になるので）",
+          all(patches[k] <= model.layer_counts[k] for k in model.layer_counts)
+          and sum(patches.values()) < sum(model.layer_counts.values()),
+          f"パッチ {sum(patches.values())} / 三角形 "
+          f"{sum(model.layer_counts.values())}")
+    check("直方体は 6 枚（床・天井・壁 4 枚）",
+          sum(patches.values()) == 6, str(patches))
+    written = {sheet.cell(row=r, column=columns[ct.COLUMN_LAYER]).value:
+               sheet.cell(row=r, column=columns[ct.COLUMN_PATCHES]).value
+               for r in range(2, ct.LAYER_SLOTS + 2)
+               if sheet.cell(row=r, column=columns[ct.COLUMN_LAYER]).value}
+    check("表に書かれた値がレイヤ別のパッチ数と合う",
+          written == patches, f"{written} / {patches}")
+
     check("★安全率の列がある（小数 2 桁）",
           sheet.cell(row=2,
                      column=columns[ct.COLUMN_FACTOR]).number_format == "0.00")
@@ -2842,6 +2873,51 @@ def test_condition_table():
     check("面数・面積は書き直される",
           after.cell(row=2, column=columns[ct.COLUMN_COUNT]).value
           == model.layer_counts[layers[0]])
+
+    # ---- ★パッチ列が無い昔の表にも、体裁を壊さず足せる（不具合報告 ⑬）----
+    old_book = load_workbook(path)
+    old_sheet = old_book[ct.FIRST_SHEET]
+    old_sheet.delete_cols(columns[ct.COLUMN_PATCHES])
+    old_book.save(path)
+    check("下ごしらえ：パッチ列を落とした表になっている",
+          ct.COLUMN_PATCHES not in [c.value for c in
+                                    load_workbook(path)[ct.FIRST_SHEET][1]])
+    ct.update(project, model, library, verbose=False)
+    grown = load_workbook(path)[ct.FIRST_SHEET]
+    grown_head = [c.value for c in grown[1]]
+    grown_columns = {label: i + 1 for i, label in enumerate(grown_head) if label}
+    check("★パッチ列は右端に足される（見出しが埋まっている間は送る）",
+          ct.COLUMN_PATCHES in grown_columns
+          and grown_columns[ct.COLUMN_PATCHES]
+          > grown_columns[ct.COLUMN_AREA], str(grown_head))
+    check("★足しても材料番号・安全率・利用者のセルは無事",
+          grown.cell(row=2, column=grown_columns[ct.COLUMN_NUMBER]).value == 11
+          and grown.cell(row=2, column=grown_columns[ct.COLUMN_FACTOR]).value == 0.8
+          and any(grown.cell(row=2, column=c).value == "利用者が足した列"
+                  for c in range(1, grown.max_column + 1)))
+
+    # ★離れた場所に利用者の列があっても、**空いている列にしか書かない**
+    named_book = load_workbook(path)
+    named = named_book[ct.FIRST_SHEET]
+    named.delete_cols(grown_columns[ct.COLUMN_PATCHES])
+    named.cell(row=1, column=named.max_column + 2, value="利用者の見出し")
+    named.cell(row=2, column=named.max_column, value="利用者の値")
+    named_book.save(path)
+    ct.update(project, model, library, verbose=False)
+    far = load_workbook(path)[ct.FIRST_SHEET]
+    far_head = [c.value for c in far[1]]
+    far_columns = {label: i + 1 for i, label in enumerate(far_head) if label}
+    check("★利用者の列は上書きしない（空いている列に置く）",
+          far_head.count("利用者の見出し") == 1
+          and far.cell(row=2,
+                       column=far_columns["利用者の見出し"]).value == "利用者の値"
+          and far_columns[ct.COLUMN_PATCHES] != far_columns["利用者の見出し"],
+          str(far_head))
+    check("足した列にパッチ数が入る",
+          grown.cell(row=2, column=grown_columns[ct.COLUMN_PATCHES]).value
+          == patches[layers[0]],
+          f"{grown.cell(row=2, column=grown_columns[ct.COLUMN_PATCHES]).value} / "
+          f"{patches[layers[0]]}")
 
     # ---- シートを増やすと条件が増える ----
     book = load_workbook(path)
