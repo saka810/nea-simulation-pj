@@ -202,13 +202,25 @@ def _model_of(project):
                          band_number=project.band_number, verbose=False)
 
 
+def _on_shelf(project, index):
+    """その受音点を指す `Project`（**音源ごとの棚は引き継ぐ**）。
+
+    ★`pj.DEFAULTS` から組み直すと `source_tag` / `source_index` が落ちる
+    （どちらも「保存する条件ではない」ので DEFAULTS に無い）。落ちると
+    `結果/recN/` を見にいくので、音源が 2 点以上のプロジェクトでは
+    パルス列も残響時間も 1 つも見つからない（2026-09-16。不具合報告 ⑪ ⑫ の同型）。
+    """
+    import source_mix as sx
+
+    return sx.tagged(project, tag=project.source_tag,
+                     index=project.source_index, receiver_index=index)
+
+
 def _reverberation_time(project, index):
     """残響時間（中音域の代表値）。読めなければ None。"""
     import table as tb
 
-    sub = pj.Project(project.folder,
-                     **{k: getattr(project, k) for k in pj.DEFAULTS})
-    sub.receiver_index = index
+    sub = _on_shelf(project, index)
     path = sub.existing_result_path("rt")
     if path is None or not os.path.exists(path):
         return None
@@ -270,9 +282,7 @@ def evaluate(project, low=DEFAULT_LOW, high=DEFAULT_HIGH, step=DEFAULT_STEP,
             if index > max(wanted):
                 break
             continue
-        sub = pj.Project(project.folder,
-                         **{k: getattr(project, k) for k in pj.DEFAULTS})
-        sub.receiver_index = index
+        sub = _on_shelf(project, index)
         path = sub.existing_result_path("pulses")
         if path is None or not os.path.exists(path):
             missing += 1
@@ -324,9 +334,7 @@ def write_csv(project, result, verbose=True):
     """`結果/recN/<室>_<条件>_伝達関数.csv`（周波数・大きさ・位相）。"""
     written = []
     for name, data in result["receivers"].items():
-        sub = pj.Project(project.folder,
-                         **{k: getattr(project, k) for k in pj.DEFAULTS})
-        sub.receiver_index = int(name.replace("rec", ""))
+        sub = _on_shelf(project, int(name.replace("rec", "")))
         path = os.path.join(os.path.dirname(sub.result_path("pulses")),
                             sub.prefixed(FILE_NAME))
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -445,6 +453,7 @@ def main(argv=None):
     import argparse
 
     import condition_table as ct
+    import source_mix as sx
 
     parser = argparse.ArgumentParser(
         description="伝達関数（周波数特性）と固有周波数を出す（計算はやり直さない）")
@@ -467,6 +476,10 @@ def main(argv=None):
                              **{k: getattr(base, k) for k in pj.DEFAULTS})
         if sheet:
             project.condition_sheet = sheet
+        # ★音源が 2 点以上なら**棚を選ぶ**（2026-09-16。不具合報告 ⑪ ⑫ の同型）。
+        #   結果は `結果/srcM/recN/` に入るので、棚を選ばないと `結果/` 直下を見て
+        #   「先に計算してください」で止まる。既定は 1 番目の音源で、そう言う
+        project = sx.default_shelf(project)
         print(f"[伝達関数] 条件『{project.condition_label}』")
         run(project, low=args.low, high=args.high, step=args.step,
             band=args.band,

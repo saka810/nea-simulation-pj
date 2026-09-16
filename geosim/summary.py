@@ -358,6 +358,7 @@ def write_condition_summary(project, conditions=None, verbose=True):
     結果が無い条件は飛ばす。
     """
     import condition_table as ct
+    import source_mix as sx
 
     if conditions is None:
         conditions = ct.discover(project.folder)
@@ -365,8 +366,11 @@ def write_condition_summary(project, conditions=None, verbose=True):
 
     for item in conditions:
         file_name, sheet = item if isinstance(item, (tuple, list)) else (item, None)
-        sub = pj.Project(project.folder,
-                         **{k: getattr(project, k) for k in pj.DEFAULTS})
+        # ★音源ごとの棚（`結果/src1/`）を引き継ぐ（2026-09-16。不具合報告 ⑪ ⑫ の同型）。
+        #   `pj.DEFAULTS` に `source_tag` / `source_index` は入っていないので、
+        #   組み直すと棚が落ちて `結果/` 直下のまとめ表を探してしまう
+        sub = sx.tagged(project, tag=project.source_tag,
+                        index=project.source_index)
         sub.condition_csv = file_name
         sub.condition_sheet = sheet or ""
         label = sub.condition_label or "（既定）"

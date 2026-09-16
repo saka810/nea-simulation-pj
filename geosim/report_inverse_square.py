@@ -312,6 +312,7 @@ def main(argv=None):
     import argparse
 
     import condition_table as ct
+    import source_mix as sx
 
     parser = argparse.ArgumentParser(
         description="逆二乗の検討報告書を作る（計算はやり直さない）")
@@ -328,6 +329,10 @@ def main(argv=None):
                              **{k: getattr(base, k) for k in pj.DEFAULTS})
         if sheet:
             project.condition_sheet = sheet
+        # ★音源が 2 点以上なら**棚を選ぶ**（2026-09-16。不具合報告 ⑪ ⑫ の同型）。
+        #   結果は `結果/srcM/recN/` に入るので、棚を選ばないと `結果/` 直下を見て
+        #   「先に計算してください」で止まる。既定は 1 番目の音源で、そう言う
+        project = sx.default_shelf(project)
         print(f"[報告書] 条件『{project.condition_label}』")
         build(project, pdf=not args.no_pdf)
     return 0

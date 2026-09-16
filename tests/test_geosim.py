@@ -329,6 +329,44 @@ def test_absorption():
     check("上限を超える値は全て同じ結果になる",
           abs(ab.random_to_normal(1.5, warn=False) - got) < 1e-9)
 
+    # ---- ★★剛な面（α = 0）が NaN にならない（2026-09-16 ユーザー指摘）----
+    #   以前は α_s = 0 → z = ∞ → 4z/(1+z)² = NaN となり、そのまま反射計算へ
+    #   流れて**結果が黙って全部 NaN になった**（警告も出ない）。
+    #   `frequency_response.py` は「まずは剛な面として」使う想定なので実害があった
+    import sound_ray as _sr
+    rigid = ab.random_to_normal(0.0, warn=False)
+    check("★剛な面（残響室法 α = 0）が NaN にならない",
+          np.isfinite(rigid) and rigid == 0.0, f"α_n = {rigid!r}")
+    check("★剛な面の反射則は全反射（|R|² = 1）",
+          abs(_sr.energy_decay(np.array([0.0, 0.0, -1.0]),
+                               np.array([0.0, 0.0, 1.0]), rigid, 1.0) - 1.0) < 1e-12)
+    check("★配列に 0 が混じっても NaN を出さない",
+          np.all(np.isfinite(ab.random_to_normal(
+              np.array([0.0, 0.05, 0.2, 0.9]), warn=False))))
+    check("両端（z = 0 と z = ∞）の極限は 0（どちらも全反射）",
+          ab.normal_absorption(np.inf) == 0.0
+          and ab.normal_absorption(0.0) == 0.0
+          and ab.statistical_absorption(np.inf) == 0.0
+          and ab.statistical_absorption(0.0) == 0.0)
+    check("★剛（z = ∞）の圧力反射率は R = +1（inf/inf を NaN にしない）",
+          ab.reflection_coefficient(np.inf, 1.0) == 1.0
+          and ab.reflection_coefficient(np.inf, 0.0) == 1.0)
+    check("★剛な面を拡散入射で平均しても 0 に戻る",
+          abs(ab.normal_to_random(rigid)) < 1e-12)
+    check("0 のすぐ隣も連続（0.001 → 0.0005 付近）",
+          abs(ab.random_to_normal(0.001, warn=False) - 0.000501) < 1e-5)
+
+    # ★もし将来また NaN が出るようになったら、黙って流さず理由を告げて止める
+    import unittest.mock as _mock
+    with _mock.patch.object(ab, "normal_absorption",
+                            lambda z: np.full(np.shape(np.atleast_1d(z)), np.nan)):
+        try:
+            ab.random_to_normal(np.array([0.2]), warn=False, label="試験用")
+            stopped = False
+        except ValueError as error:
+            stopped = "試験用" in str(error)
+    check("★NaN になったら理由を告げて止まる（黙って流さない）", stopped)
+
     # バンド定義
     check("8 バンドが 63〜8000 Hz",
           np.allclose(ab.octave_bands(8), [63, 125, 250, 500, 1000, 2000, 4000, 8000]))
@@ -2760,6 +2798,37 @@ def test_condition_table():
           and sheet.cell(row=2,
                          column=columns[ct.COLUMN_COUNT]).number_format == "0",
           sheet.cell(row=2, column=columns[ct.COLUMN_AREA]).number_format)
+    # ---- ★「面数」と「面数（パッチ）」は別物（2026-09-16。不具合報告 ⑬）----
+    #   「面数」は三角形に割ったあとの枚数なので、モデルを作った人が数える
+    #   面数より必ず多く見える。計算が 1 枚として扱うのは同一平面パッチのほう
+    import mesh_method as mm
+    triangles = [tuple(np.asarray(m.vertexes, dtype=float)) for m in model.mesh]
+    face_normal = np.array([np.asarray(m.normal, dtype=float) for m in model.mesh])
+    patch_of_face = mm.coplanar_patches(triangles, face_normal,
+                                        [m.material for m in model.mesh])
+    patches = ct.layer_patch_counts(model)
+    check("★「面数（パッチ）」の列がある（整数表示）",
+          ct.COLUMN_PATCHES in columns
+          and sheet.cell(row=2,
+                         column=columns[ct.COLUMN_PATCHES]).number_format == "0")
+    check("★パッチ数は交差判定と同じ数え方（coplanar_patches と一致）",
+          sum(patches.values()) == int(patch_of_face.max()) + 1,
+          f"レイヤ別の合計 {sum(patches.values())} / "
+          f"全体 {int(patch_of_face.max()) + 1}")
+    check("★三角形の枚数より少ない（n 角形は n-2 枚になるので）",
+          all(patches[k] <= model.layer_counts[k] for k in model.layer_counts)
+          and sum(patches.values()) < sum(model.layer_counts.values()),
+          f"パッチ {sum(patches.values())} / 三角形 "
+          f"{sum(model.layer_counts.values())}")
+    check("直方体は 6 枚（床・天井・壁 4 枚）",
+          sum(patches.values()) == 6, str(patches))
+    written = {sheet.cell(row=r, column=columns[ct.COLUMN_LAYER]).value:
+               sheet.cell(row=r, column=columns[ct.COLUMN_PATCHES]).value
+               for r in range(2, ct.LAYER_SLOTS + 2)
+               if sheet.cell(row=r, column=columns[ct.COLUMN_LAYER]).value}
+    check("表に書かれた値がレイヤ別のパッチ数と合う",
+          written == patches, f"{written} / {patches}")
+
     check("★安全率の列がある（小数 2 桁）",
           sheet.cell(row=2,
                      column=columns[ct.COLUMN_FACTOR]).number_format == "0.00")
@@ -2842,6 +2911,51 @@ def test_condition_table():
     check("面数・面積は書き直される",
           after.cell(row=2, column=columns[ct.COLUMN_COUNT]).value
           == model.layer_counts[layers[0]])
+
+    # ---- ★パッチ列が無い昔の表にも、体裁を壊さず足せる（不具合報告 ⑬）----
+    old_book = load_workbook(path)
+    old_sheet = old_book[ct.FIRST_SHEET]
+    old_sheet.delete_cols(columns[ct.COLUMN_PATCHES])
+    old_book.save(path)
+    check("下ごしらえ：パッチ列を落とした表になっている",
+          ct.COLUMN_PATCHES not in [c.value for c in
+                                    load_workbook(path)[ct.FIRST_SHEET][1]])
+    ct.update(project, model, library, verbose=False)
+    grown = load_workbook(path)[ct.FIRST_SHEET]
+    grown_head = [c.value for c in grown[1]]
+    grown_columns = {label: i + 1 for i, label in enumerate(grown_head) if label}
+    check("★パッチ列は右端に足される（見出しが埋まっている間は送る）",
+          ct.COLUMN_PATCHES in grown_columns
+          and grown_columns[ct.COLUMN_PATCHES]
+          > grown_columns[ct.COLUMN_AREA], str(grown_head))
+    check("★足しても材料番号・安全率・利用者のセルは無事",
+          grown.cell(row=2, column=grown_columns[ct.COLUMN_NUMBER]).value == 11
+          and grown.cell(row=2, column=grown_columns[ct.COLUMN_FACTOR]).value == 0.8
+          and any(grown.cell(row=2, column=c).value == "利用者が足した列"
+                  for c in range(1, grown.max_column + 1)))
+
+    # ★離れた場所に利用者の列があっても、**空いている列にしか書かない**
+    named_book = load_workbook(path)
+    named = named_book[ct.FIRST_SHEET]
+    named.delete_cols(grown_columns[ct.COLUMN_PATCHES])
+    named.cell(row=1, column=named.max_column + 2, value="利用者の見出し")
+    named.cell(row=2, column=named.max_column, value="利用者の値")
+    named_book.save(path)
+    ct.update(project, model, library, verbose=False)
+    far = load_workbook(path)[ct.FIRST_SHEET]
+    far_head = [c.value for c in far[1]]
+    far_columns = {label: i + 1 for i, label in enumerate(far_head) if label}
+    check("★利用者の列は上書きしない（空いている列に置く）",
+          far_head.count("利用者の見出し") == 1
+          and far.cell(row=2,
+                       column=far_columns["利用者の見出し"]).value == "利用者の値"
+          and far_columns[ct.COLUMN_PATCHES] != far_columns["利用者の見出し"],
+          str(far_head))
+    check("足した列にパッチ数が入る",
+          grown.cell(row=2, column=grown_columns[ct.COLUMN_PATCHES]).value
+          == patches[layers[0]],
+          f"{grown.cell(row=2, column=grown_columns[ct.COLUMN_PATCHES]).value} / "
+          f"{patches[layers[0]]}")
 
     # ---- シートを増やすと条件が増える ----
     book = load_workbook(path)
@@ -4408,11 +4522,58 @@ def test_hemi_anechoic():
           str([f"{v:.0f}" for v in ab.frequency_bands(8, "1/3", 100.0)]))
     check("オクターブは従来どおり（8 → 63〜8k）",
           np.allclose(ab.frequency_bands(8), ab.octave_bands(8)))
-    check("★帯域の幅で端が変わる（1/1 は f/√2〜f√2、1/3 は f·2^(∓1/6)）",
-          np.allclose(ab.band_edges([1000.0], "1/1"),
-                      ([1000.0 / np.sqrt(2)], [1000.0 * np.sqrt(2)]))
-          and np.allclose(ab.band_edges([1000.0], "1/3"),
-                          ([1000.0 * 2 ** (-1 / 6)], [1000.0 * 2 ** (1 / 6)])))
+    # ---- ★★中心周波数と帯域端は IEC 61260-1 / JIS C 1513-1 の**ベース10** ----
+    #   2026-09-16 にユーザー指示でベース2（2^(n/3)・f/√2）から揃えた。
+    #   規格の原本（06_参考文献/02_規格・法律/JIS/JIS C 1513-1_2020）で確認済み
+    check("★厳密中心周波数は f_m = 1000·G^(x/b)（5.4.1 式(2)。G = 10^(3/10)）",
+          np.allclose(ab.exact_midband([63.0, 125.0, 1000.0, 4000.0, 8000.0]),
+                      [63.09573, 125.89254, 1000.0, 3981.07171, 7943.28235]),
+          str(ab.exact_midband([63.0, 8000.0])))
+    check("1/3 の呼び値 160/315/630 の厳密値",
+          np.allclose(ab.exact_midband([160.0, 315.0, 630.0]),
+                      [158.48932, 316.22777, 630.95734]))
+    check("★厳密値を入れ直しても動かない（いちばん近い格子点に丸めるだけ）",
+          np.allclose(ab.exact_midband(ab.exact_midband([63.0, 8000.0])),
+                      ab.exact_midband([63.0, 8000.0])))
+    check("基準周波数はちょうど 1000 Hz（5.3）", ab.exact_midband(1000.0) == 1000.0)
+    check("オクターブ周波数比 G = 10^(3/10) = 1.995 26（5.2.1 式(1)）",
+          abs(ab.OCTAVE_RATIO - 1.99526231) < 1e-8, f"{ab.OCTAVE_RATIO:.8f}")
+
+    low_oct, high_oct = ab.band_edges([1000.0], "1/1")
+    low_3rd, high_3rd = ab.band_edges([1000.0], "1/3")
+    check("★帯域端は f_m·G^(∓1/(2b))（5.6.1 式(4)(5)）",
+          np.allclose([low_oct[0], high_oct[0]],
+                      [1000.0 * ab.OCTAVE_RATIO ** -0.5,
+                       1000.0 * ab.OCTAVE_RATIO ** 0.5])
+          and np.allclose([low_3rd[0], high_3rd[0]],
+                          [1000.0 * ab.OCTAVE_RATIO ** (-1 / 6),
+                           1000.0 * ab.OCTAVE_RATIO ** (1 / 6)]))
+    check("★1/3 の帯域端は規格 表 F.1 の 0.891 25 / 1.122 02 と一致",
+          abs(low_3rd[0] / 1000.0 - 0.89125) < 5e-6
+          and abs(high_3rd[0] / 1000.0 - 1.12202) < 5e-6,
+          f"{low_3rd[0] / 1000:.6f} / {high_3rd[0] / 1000:.6f}")
+    check("帯域幅周波数比 f2/f1 = G^(1/b)（5.6.2）",
+          abs(high_oct[0] / low_oct[0] - 10 ** 0.3) < 1e-9
+          and abs(high_3rd[0] / low_3rd[0] - 10 ** 0.1) < 1e-9)
+    check("★√2・2^(1/6) ではない（ベース2 との差は 0.12% / 0.04%）",
+          abs(high_oct[0] - 1000.0 * np.sqrt(2)) > 1.0
+          and abs(high_3rd[0] - 1000.0 * 2 ** (1 / 6)) > 0.3)
+    check("`exact=False` なら渡した中心周波数のまま（参照・検算用）",
+          np.allclose(ab.band_edges([8000.0], "1/1", exact=False),
+                      ([8000.0 * ab.OCTAVE_RATIO ** -0.5],
+                       [8000.0 * ab.OCTAVE_RATIO ** 0.5])))
+
+    # ★★空気吸収が ISO 9613-1 表1 と一致すること（呼び値を渡しても厳密で引く）
+    import sound_level as _sl
+    from atmosphere import Atmosphere as _Atm
+    _air = _Atm(temperature=20.0, humidity=40.0)
+    check("★空気吸収が ISO 9613-1 表1（20℃40%）と一致する",
+          np.allclose(_air.absorption_db_per_metre(
+                          ab.exact_midband(ab.octave_bands(8))) * 1000,
+                      [0.150, 0.521, 1.39, 2.63, 4.65, 11.2, 36.1, 128.0],
+                      rtol=0.005),
+          str(np.round(_air.absorption_db_per_metre(
+              ab.exact_midband(ab.octave_bands(8))) * 1000, 3)))
     check("幅の呼び方を取り違えない", ab.is_third_octave("1/3")
           and not ab.is_third_octave("1/1") and abs(ab.band_ratio("1/3") - 1 / 3) < 1e-9)
     check("1/3 の中心周波数は**呼び値**（表と数字がそろう）",
@@ -5461,6 +5622,76 @@ def test_multiple_sources():
           len(sx.modes_for("なにか")) == 3)
     check("棚の名前は `合成_` で始まる（`source_folders` が見分ける）",
           all(name.startswith(pj.MIX_PREFIX) for name in sx.FOLDERS.values()))
+
+    # ---- ⑧ ★棚を持ち回っているか（不具合報告 ⑪ ⑫ とその同型）----
+    #   `source_tag` / `source_index` は「保存する条件ではない」ので
+    #   `pj.DEFAULTS` に入っていない。そこから組み直すと棚が落ちて
+    #   `結果/recN/` を見にいき、音源が 2 点以上のときは何も見つからない
+    import frequency_response as fr
+
+    with tempfile.TemporaryDirectory() as folder:
+        for tag in ("src1", "src2"):
+            for rec in (1, 2):
+                shelf = sx.tagged(pj.Project(folder, **dict(pj.DEFAULTS)),
+                                  tag=tag, receiver_index=rec)
+                for key in ("pulses", "rt"):
+                    path = shelf.result_path(key)
+                    os.makedirs(os.path.dirname(path), exist_ok=True)
+                    open(path, "w").close()
+
+        parent = pj.Project(folder, **dict(pj.DEFAULTS))
+        want = os.path.join("結果", "src2")
+
+        def where(sub, key="pulses"):
+            path = sub.existing_result_path(key) or sub.result_path(key)
+            return os.path.relpath(path, folder)
+
+        check("★計算済みなら結果ありと分かる（⑪。棚も見る）",
+              pj.has_results(parent))
+        check("★棚を指していればその棚だけを見る（⑪）",
+              pj.has_results(sx.tagged(parent, tag="src2"))
+              and not pj.has_results(sx.tagged(parent, tag="合成_平均")))
+
+        shelf = sx.tagged(parent, tag="src2")
+        check("★虚音源は棚のパルス列を読む（⑫。`view_images.load_sets`）",
+              where(sx.tagged(shelf, tag=shelf.source_tag,
+                              index=shelf.source_index,
+                              receiver_index=1)).startswith(want),
+              where(sx.tagged(shelf, tag=shelf.source_tag, receiver_index=1)))
+        check("★逆二乗も棚のパルス列を読む（`inverse_square.read_levels`）",
+              where(sx.tagged(shelf, tag=shelf.source_tag,
+                              index=shelf.source_index,
+                              receiver_index=1)).startswith(want))
+        check("★伝達関数も棚を引き継ぐ（`frequency_response._on_shelf`）",
+              where(fr._on_shelf(shelf, 2)).startswith(
+                  os.path.join(want, "rec2")),
+              where(fr._on_shelf(shelf, 2)))
+        check("★条件の比較表も棚のまとめ表を見る（`summary`）",
+              os.path.relpath(os.path.dirname(
+                  sx.tagged(shelf, tag=shelf.source_tag,
+                            index=shelf.source_index).result_path("rt")),
+                  folder) == want)
+        check("★棚を選ばない Project は 1 番目の音源を開く（`default_shelf`）",
+              sx.default_shelf(parent, verbose=False).source_folder == "src1")
+        check("受音点の数は棚ごとに数える",
+              sx.receiver_count(parent, "src1") == 2)
+
+    # ★音源が 1 点のプロジェクトは従来どおり（棚を作らない・段を増やさない）
+    with tempfile.TemporaryDirectory() as folder:
+        one = pj.Project(folder, **dict(pj.DEFAULTS))
+        one.receiver_index = 1
+        path = one.result_path("pulses")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        open(path, "w").close()
+        same = sx.default_shelf(pj.Project(folder, **dict(pj.DEFAULTS)),
+                                verbose=False)
+        check("★単一音源は棚を選ばない（置き方を変えない）",
+              same.source_folder == "")
+        check("★単一音源は従来どおり `結果/rec1/`",
+              os.path.relpath(fr._on_shelf(same, 1).result_path("pulses"),
+                              folder).startswith(os.path.join("結果", "rec1")))
+        check("★単一音源でも結果ありと分かる",
+              pj.has_results(pj.Project(folder, **dict(pj.DEFAULTS))))
 
 
 def test_point_order():

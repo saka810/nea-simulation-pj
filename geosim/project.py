@@ -1123,14 +1123,32 @@ def has_results(project):
     ★**受音点ごとのフォルダ（`結果/rec1/`）も見る。**
     置き場を `結果/recN/` に変えたとき、`結果/` 直下しか見ていなかったので
     結果があるのに「ありません」と言われていた。
+
+    ★★**音源ごとの棚（`結果/src1/`）も見る**（2026-09-16。不具合報告 ⑪）。
+    音源が 2 点以上あると結果は `結果/src1/recN/` に入る（⑨ の対応）ので、
+    棚を見ないと**計算済みでも「結果がありません」**になり、
+    条件入力の「前回の結果を見る」が開けなかった（実案件で踏んだ）。
+    ★既に棚を指している `project` は**その棚だけ**を見る（指定を無視しない）。
     """
-    saved = project.receiver_index
-    try:
-        for index in ((None, 1) if saved is None else (saved,)):
+    saved_receiver, saved_tag = project.receiver_index, project.source_tag
+
+    def found():
+        for index in ((None, 1) if saved_receiver is None else (saved_receiver,)):
             project.receiver_index = index
             if any(os.path.exists(project.existing_result_path(key))
                    for key in ("rt", "pulses")):
                 return True
+        return False
+
+    try:
+        if project.source_folder:
+            return found()
+        # 音源が 1 点なら `source_folders()` は空なので、従来どおり直下だけを見る
+        for tag in [None] + project.source_folders():
+            project.source_tag = tag
+            if found():
+                return True
     finally:
-        project.receiver_index = saved
+        project.receiver_index = saved_receiver
+        project.source_tag = saved_tag
     return False

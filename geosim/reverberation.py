@@ -280,9 +280,10 @@ def statistical_reverberation(mesh, volume, frequencies=None, atmosphere=None,
     sound_velocity = atmosphere.sound_velocity
     constant = 24.0 * np.log(10.0) / sound_velocity  # c=343 のとき 0.1611
 
-    # 空気吸収の項 4mV（m はエネルギーの減衰係数 [1/m]）
-    air = (4.0 * atmosphere.absorption_coefficient(frequencies) * volume
-           if include_air_absorption else np.zeros(len(frequencies)))
+    # 空気吸収の項 4mV（m はエネルギーの減衰係数 [1/m]）。
+    # ★**厳密中心周波数で引く**（ISO 9613-1 表1 と同じ土俵にするため。2026-09-16）
+    air = (4.0 * atmosphere.absorption_coefficient(ab.exact_midband(frequencies))
+           * volume if include_air_absorption else np.zeros(len(frequencies)))
 
     mean_absorption = (areas @ alpha) / total_area          # (nf,)
 
@@ -410,11 +411,13 @@ def octave_bandpass(signal, centre_frequency, sampling_frequency,
     method='fir'    … `scipy.signal.firwin` + 線形畳み込み。遅れを切り落として返す。
     """
     nyquist = sampling_frequency / 2.0
-    # ★帯域幅は `band_width` で決める（`1/1` なら f/√2〜f√2、`1/3` なら
-    #   f·2^(∓1/6)）。2026-08-26 に 1/3 オクターブ対応で追加
-    half = ab.band_ratio(band_width) / 2.0
-    lower = centre_frequency * 2.0 ** (-half)
-    upper = min(centre_frequency * 2.0 ** half, nyquist * 0.999)
+    # ★★帯域端は **JIS C 1513-1 5.6.1**（`ab.band_edges`）。
+    #   **厳密中心周波数**（5.4.1）のまわりに `G^(∓1/(2b))`、G = 10^(3/10)。
+    #   2026-09-16 にユーザー指示でベース 2（f/√2、2^(∓1/6)）から揃えた。
+    #   渡ってくる `centre_frequency` は呼び値なので、その変換もここで済む
+    lower, upper = ab.band_edges(centre_frequency, band_width)
+    lower = float(lower)
+    upper = min(float(upper), nyquist * 0.999)
     if lower >= upper:
         raise ValueError(f"{centre_frequency:.0f} Hz バンドがナイキスト周波数 "
                          f"{nyquist:.0f} Hz に収まりません")

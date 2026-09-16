@@ -10,8 +10,8 @@
         （番号は `=ROW()-1`。**行の位置がそのまま材料番号**）
 
       シート「現状」      ← 条件 1 つ ＝ シート 1 枚。**シート名が条件名**。30 行の枠
-        番号,区分,レイヤー名,材料番号,安全率,材料名（参考）,面数,面積_m2
-         1 ,レイヤ,01__研修室_壁_扉,1,,=IFERROR(VLOOKUP(...)),2,3.3
+        番号,区分,レイヤー名,材料番号,安全率,材料名（参考）,面数,面数（パッチ）,面積_m2
+         1 ,レイヤ,01__研修室_壁_扉,1,,=IFERROR(VLOOKUP(...)),2,1,3.3
 
       シート「吸音追加案」 ← シートを複製して番号を書き換えるだけ
 
@@ -37,6 +37,19 @@
 | 吸音率 α・安全率 | 小数 2 桁（`0.00`） |
 | 面積 | 小数 1 桁（`0.0`） |
 | 面数・番号 | 整数 |
+
+### ★「面数」と「面数（パッチ）」は別物（2026-09-16。不具合報告 ⑬）
+
+モデルを作った人から「面数がやけに多い」と指摘された（実案件の階段教室で
+**他ソフト 241 面に対して 779**）。数え方が違うだけだった。
+
+| 列 | 中身 | 階段教室 |
+|---|---|---:|
+| `面数` | **三角形に割ったあとの枚数**（`model.layer_counts`）。n 角形は必ず n−2 枚になるので増える | 779 |
+| `面数（パッチ）` | **計算が 1 枚として扱う数**（`mesh_method.coplanar_patches()` の同一平面パッチ）。他ソフトの面数とほぼ一致する | 223 |
+
+利用者が見たいのは後者なので列を足した。★**どちらも参考列**で、
+読むときは見ない（入力は「材料番号」と「安全率」だけ）。
 
 ### 「区分」列について
 
@@ -105,12 +118,15 @@ COLUMN_NUMBER = "材料番号"
 COLUMN_FACTOR = "安全率"
 COLUMN_NAME = "材料名（参考）"
 COLUMN_COUNT = "面数"
+# ★**計算が 1 枚として扱う数**（同一平面パッチ）。`COLUMN_COUNT` は三角形に
+#   割ったあとの枚数なので、n 角形のぶんだけ必ず多く見える（不具合報告 ⑬）
+COLUMN_PATCHES = "面数（パッチ）"
 COLUMN_AREA = "面積_m2"
 
 HEADER = [COLUMN_INDEX, COLUMN_SECTION, COLUMN_LAYER, COLUMN_NUMBER,
-          COLUMN_FACTOR, COLUMN_NAME, COLUMN_COUNT, COLUMN_AREA]
+          COLUMN_FACTOR, COLUMN_NAME, COLUMN_COUNT, COLUMN_PATCHES, COLUMN_AREA]
 # 見出しが無くても困らない列（古い表との互換）
-OPTIONAL_COLUMNS = {COLUMN_INDEX, COLUMN_FACTOR, COLUMN_NAME}
+OPTIONAL_COLUMNS = {COLUMN_INDEX, COLUMN_FACTOR, COLUMN_NAME, COLUMN_PATCHES}
 
 # 昔の CSV の見出し（3 列目が材料名だった）
 LEGACY_HEADER = ["区分", "レイヤー名", "材料名", "面数", "面積_m2"]
@@ -610,20 +626,86 @@ def _as_dict(assignment):
                 else assignment)
 
 
+def _patch_of_face(model):
+    """面ごとのパッチ番号（**交差判定と同じ数え方**）。数えられなければ None。
+
+    ★`mesh_method.coplanar_patches()` を**本番と同じ呼び方**で呼ぶ（材料も渡す）。
+    ここだけ別の数え方にすると、表の「面数（パッチ）」が計算の実体とずれる。
+
+    ★**参考列のための値なので、数えられなくても表づくりは止めない**
+    （None を返し、列は空のままにする）。理由は黙って捨てずに出す。
+
+    同じモデルで 2 度呼ばれる（レイヤぶんと面ごとの指定ぶん）ので控えておく。
+    """
+    cached = getattr(model, "_patch_of_face_cache", None)
+    if cached is not None:
+        return cached[0]
+    mesh = getattr(model, "mesh", None)
+    patch = None
+    if mesh is not None and len(mesh):
+        try:
+            import numpy as np
+            import mesh_method as mm
+            triangles = [tuple(np.asarray(m.vertexes, dtype=float)) for m in mesh]
+            normals = np.array([np.asarray(m.normal, dtype=float) for m in mesh])
+            patch = mm.coplanar_patches(triangles, normals,
+                                        [m.material for m in mesh])
+        except Exception as error:
+            print(f"[条件表] 面数（パッチ）を数えられませんでした: "
+                  f"{type(error).__name__}: {error}")
+            patch = None
+    try:
+        model._patch_of_face_cache = (patch,)
+    except Exception:
+        pass        # 控えられなくても数え直せばよい
+    return patch
+
+
+def layer_patch_counts(model):
+    """レイヤごとの「**計算が 1 枚として扱う数**」{レイヤ名: 枚数}。
+
+    条件表の「面数」は三角形に割ったあとの枚数（`model.layer_counts`）なので、
+    n 角形のぶんだけ必ず多く見える。モデルを作った人が数えている面数に近いのは
+    こちら（2026-09-16。不具合報告 ⑬。実案件の階段教室で 779 対 223）。
+
+    ★**同じパッチが 2 つのレイヤにまたがることがある**（同一平面で隣り合い、
+    材料も同じとき）。そのときは両方に数えるので、合計は室全体のパッチ数より
+    多くなりうる。レイヤごとに並べる表なので、これが素直な数え方。
+    """
+    patch = _patch_of_face(model)
+    layers = getattr(model, "face_layers", None)
+    if patch is None or not layers:
+        return {}
+    found = {}
+    for index, layer in enumerate(layers):
+        if index < len(patch):
+            found.setdefault(layer, set()).add(int(patch[index]))
+    return {layer: len(ids) for layer, ids in found.items()}
+
+
 def _face_records(project, model):
-    """面ごとの割り当ての集計 {材料名: (面数, 面積)}。"""
+    """面ごとの割り当ての集計 {材料名: (面数, パッチ数, 面積)}。
+
+    パッチ数は数えられなければ None（列を空のままにする）。
+    """
     face_materials = project.face_materials_for(len(model.mesh))
     if not face_materials:
         return {}
     import reverberation as rv
     areas = rv.triangle_areas(model.mesh)
-    result = {}
+    patch = _patch_of_face(model)
+    result, patches = {}, {}
     for index, material in face_materials.items():
         if not material or index >= len(areas):
             continue
         count, area = result.get(material, (0, 0.0))
         result[material] = (count + 1, area + float(areas[index]))
-    return result
+        if patch is not None and index < len(patch):
+            patches.setdefault(material, set()).add(int(patch[index]))
+    return {material: (count,
+                       len(patches[material]) if material in patches else None,
+                       area)
+            for material, (count, area) in result.items()}
 
 
 # ---- 新しく作る --------------------------------------------------------------
@@ -714,17 +796,21 @@ def _build_condition_sheet(book, name, project, model, library, assignment=None)
         record = rows[offset] if offset < len(rows) else None
         sheet.cell(row=row, column=columns[COLUMN_INDEX] + 1, value="=ROW()-1")
         if record is not None:
-            section, layer, key, count, area = record
+            section, layer, key, count, patches, area = record
             sheet.cell(row=row, column=columns[COLUMN_SECTION] + 1, value=section)
             sheet.cell(row=row, column=columns[COLUMN_LAYER] + 1, value=layer)
             sheet.cell(row=row, column=columns[COLUMN_NUMBER] + 1,
                        value=_number_cell(key))
             sheet.cell(row=row, column=columns[COLUMN_COUNT] + 1, value=int(count))
+            # ★数えられなかったときは**空のまま**にする（0 と書くと誤読される）
+            if patches is not None:
+                sheet.cell(row=row, column=columns[COLUMN_PATCHES] + 1,
+                           value=int(patches))
             sheet.cell(row=row, column=columns[COLUMN_AREA] + 1,
                        value=round(float(area), 3))
         _prepare_row(sheet, row, columns)
 
-    _decorate(sheet, [7, 14, 34, 12, 10, 34, 8, 12])
+    _decorate(sheet, [7, 14, 34, 12, 10, 34, 8, 14, 12])
     return sheet
 
 
@@ -748,9 +834,10 @@ def _prepare_row(sheet, row, columns):
     if COLUMN_AREA in columns:
         sheet.cell(row=row,
                    column=columns[COLUMN_AREA] + 1).number_format = AREA_FORMAT
-    if COLUMN_COUNT in columns:
-        sheet.cell(row=row,
-                   column=columns[COLUMN_COUNT] + 1).number_format = COUNT_FORMAT
+    for label in (COLUMN_COUNT, COLUMN_PATCHES):
+        if label in columns:
+            sheet.cell(row=row,
+                       column=columns[label] + 1).number_format = COUNT_FORMAT
 
 
 def _letter(index):
@@ -771,19 +858,22 @@ def _decorate(sheet, widths):
 
 
 def _rows_for(project, model, library, assignment):
-    """条件シート 1 枚ぶんの行（区分・レイヤー名・材料番号・面数・面積）。"""
+    """条件シート 1 枚ぶんの行
+    （区分・レイヤー名・材料番号・面数・面数（パッチ）・面積）。"""
     layer_areas = getattr(model, "layer_areas", {}) or {}
     layer_counts = getattr(model, "layer_counts", {}) or {}
+    layer_patches = layer_patch_counts(model)
     rows = []
     for layer in sorted(set(layer_counts) | set(layer_areas)):
         key = assignment.get(layer) or resolve_material(layer, library, assignment)
         rows.append((SECTION_LAYER, layer, key, layer_counts.get(layer, 0),
-                     layer_areas.get(layer, 0.0)))
+                     layer_patches.get(layer), layer_areas.get(layer, 0.0)))
     for layer, key in sorted(assignment.items()):
         if layer not in layer_counts and layer not in layer_areas:
-            rows.append((SECTION_GONE, layer, key, 0, 0.0))
-    for material, (count, area) in sorted(_face_records(project, model).items()):
-        rows.append((SECTION_FACE, material, "", count, area))
+            rows.append((SECTION_GONE, layer, key, 0, 0, 0.0))
+    for material, (count, patches, area) in sorted(
+            _face_records(project, model).items()):
+        rows.append((SECTION_FACE, material, "", count, patches, area))
     return rows
 
 
@@ -828,6 +918,7 @@ def _update_book(file_name, project, model, library, verbose=True):
 
     layer_areas = getattr(model, "layer_areas", {}) or {}
     layer_counts = getattr(model, "layer_counts", {}) or {}
+    layer_patches = layer_patch_counts(model)
     faces = _face_records(project, model)
 
     for name in condition_sheets:
@@ -838,8 +929,8 @@ def _update_book(file_name, project, model, library, verbose=True):
                 print(f"[条件表] シート『{name}』は見出しが読めないので触りません")
             continue
         columns = _ensure_columns(sheet, columns)
-        _refresh_sheet(sheet, columns, layer_counts, layer_areas, faces, library,
-                       project, model)
+        _refresh_sheet(sheet, columns, layer_counts, layer_patches, layer_areas,
+                       faces, library, project, model)
     book.save(file_name)
     return file_name
 
@@ -891,11 +982,14 @@ def _refresh_absorption_sheet(sheet, project):
 
 
 def _ensure_columns(sheet, columns):
-    """足りない列（安全率・材料名）を**右端に足す**。
+    """足りない列（安全率・材料名・面数（パッチ））を**空いている列に足す**。
 
-    ★間に挿し込まない。既にある式（`VLOOKUP($D2,…)`）の参照がずれるため。
+    ★**間に挿し込まない**。既にある式（`VLOOKUP($D2,…)`）の参照がずれるため。
+    ★★置き場は**見出しが埋まっている間は右へ送り、最初の空き列**。
+    利用者が離れた場所に作った列を飛び越しはしないが、**空いている列にしか
+    書かない**ので、前からある表に足しても中身は壊れない。
     """
-    for label in (COLUMN_FACTOR, COLUMN_NAME):
+    for label in (COLUMN_FACTOR, COLUMN_NAME, COLUMN_PATCHES):
         if label in columns:
             continue
         index = max(columns.values()) + 1
@@ -906,13 +1000,13 @@ def _ensure_columns(sheet, columns):
         cell.font, cell.fill, cell.alignment = head.font.copy(), \
             head.fill.copy(), head.alignment.copy()
         sheet.column_dimensions[_letter(index + 1)].width = (
-            10 if label == COLUMN_FACTOR else 34)
+            {COLUMN_FACTOR: 10, COLUMN_PATCHES: 14}.get(label, 34))
         columns[label] = index
     return columns
 
 
-def _refresh_sheet(sheet, columns, layer_counts, layer_areas, faces, library,
-                   project, model):
+def _refresh_sheet(sheet, columns, layer_counts, layer_patches, layer_areas,
+                   faces, library, project, model):
     """1 枚の条件シートの面数・面積・式を書き直す（入力列は触らない）。"""
     section_column = columns.get(COLUMN_SECTION)
     layer_column = columns[COLUMN_LAYER]
@@ -926,13 +1020,17 @@ def _refresh_sheet(sheet, columns, layer_counts, layer_areas, faces, library,
             continue
         used[layer] = row
 
-    def write(row, section, layer, count, area):
+    def write(row, section, layer, count, patches, area):
         if section_column is not None:
             sheet.cell(row=row, column=section_column + 1, value=section)
         sheet.cell(row=row, column=layer_column + 1, value=layer)
         if COLUMN_COUNT in columns:
             sheet.cell(row=row, column=columns[COLUMN_COUNT] + 1,
                        value=int(count))
+        if COLUMN_PATCHES in columns:
+            # ★数えられなかったときは**空のまま**にする（0 と書くと誤読される）
+            sheet.cell(row=row, column=columns[COLUMN_PATCHES] + 1,
+                       value=None if patches is None else int(patches))
         if COLUMN_AREA in columns:
             sheet.cell(row=row, column=columns[COLUMN_AREA] + 1,
                        value=round(float(area), 3))
@@ -953,18 +1051,18 @@ def _refresh_sheet(sheet, columns, layer_counts, layer_areas, faces, library,
                 sheet.cell(row=row, column=columns[COLUMN_NUMBER] + 1,
                            value=_number_cell(key))
         write(row, SECTION_LAYER, layer, layer_counts.get(layer, 0),
-              layer_areas.get(layer, 0.0))
+              layer_patches.get(layer), layer_areas.get(layer, 0.0))
 
     # ② 面ごとの指定（記録）
-    for material, (count, area) in sorted(faces.items()):
+    for material, (count, patches, area) in sorted(faces.items()):
         row = used.pop(material, None)
         if row is None:
             row = blanks.pop(0) if blanks else sheet.max_row + 1
-        write(row, SECTION_FACE, material, count, area)
+        write(row, SECTION_FACE, material, count, patches, area)
 
     # ③ 残ったもの＝いまのモデルに無い（前の設定として残す）
     for layer, row in used.items():
-        write(row, SECTION_GONE, layer, 0, 0.0)
+        write(row, SECTION_GONE, layer, 0, 0, 0.0)
 
     # ④ 空の枠にも式と書式を入れておく（番号を書いたらすぐ名前が出るように）
     for row in blanks:
@@ -984,13 +1082,16 @@ def _write_csv(file_name, project, model, library, assignment):
         f.write("# ★書き換えるのは「材料番号」と「安全率」の列だけ\n")
         writer = csv.writer(f)
         writer.writerow([COLUMN_SECTION, COLUMN_LAYER, COLUMN_NUMBER,
-                         COLUMN_FACTOR, COLUMN_NAME, COLUMN_COUNT, COLUMN_AREA])
+                         COLUMN_FACTOR, COLUMN_NAME, COLUMN_COUNT,
+                         COLUMN_PATCHES, COLUMN_AREA])
         previous = safety_factors(file_name)
-        for section, layer, key, count, area in _rows_for(project, model, library,
-                                                          assignment):
+        for section, layer, key, count, patches, area in _rows_for(
+                project, model, library, assignment):
             writer.writerow([section, layer, key,
                              previous.get(layer, ""),
-                             material_name(key, library), count, "%.1f" % area])
+                             material_name(key, library), count,
+                             "" if patches is None else patches,
+                             "%.1f" % area])
     return file_name
 
 

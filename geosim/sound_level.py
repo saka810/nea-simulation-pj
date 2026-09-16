@@ -168,7 +168,9 @@ def received_energy(times, energies, distances=None, atmosphere=None,
         frequencies = ab.octave_bands(energies.shape[1])
     frequencies = np.asarray(frequencies, dtype=float)
 
-    m = atmosphere.absorption_coefficient(frequencies)          # (nf,)
+    # ★空気吸収は**厳密中心周波数**で引く（JIS C 1513-1 5.4.1 / ISO 9613-1 注5。
+    #   2026-09-16）。呼び値のままだと 8 kHz で 1.6% 大きく出る
+    m = atmosphere.absorption_coefficient(ab.exact_midband(frequencies))  # (nf,)
     air = np.exp(-m[None, :] * distances[:, None])              # (n, nf)
     spreading = 1.0 / (4.0 * np.pi * np.maximum(distances, 1e-12) ** 2)
     return energies * air * spreading[:, None]
@@ -187,8 +189,9 @@ def freefield_level(distance, source_power_db=None, atmosphere=None,
         frequencies = ab.octave_bands(band_number or 8)
     frequencies = np.asarray(frequencies, dtype=float)
     power = _power_levels(source_power_db, len(frequencies))
-    air = (10.0 * np.log10(np.exp(-atmosphere.absorption_coefficient(frequencies)
-                                  * distance))
+    air = (10.0 * np.log10(np.exp(
+               -atmosphere.absorption_coefficient(ab.exact_midband(frequencies))
+               * distance))
            if air_absorption else 0.0)
     return (power - 10.0 * np.log10(4.0 * np.pi * distance ** 2)
             + level_constant(atmosphere) + air)
@@ -352,7 +355,7 @@ def coherent_band_levels(times, energies, distances=None, atmosphere=None,
         energies = energies[subset]
 
     velocity = atmosphere.sound_velocity
-    m = atmosphere.absorption_coefficient(frequencies)
+    m = atmosphere.absorption_coefficient(ab.exact_midband(frequencies))
     lower, upper = ab.band_edges(frequencies, band_width)
     # ★帯域ごとの PWL をそのまま使う（平均へ潰さない）
     power = _power_levels(source_power_db, len(frequencies))
