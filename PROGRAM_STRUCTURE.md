@@ -2257,6 +2257,33 @@ openpyxl が無い環境では Excel だけ作れずに済む（CSV は書ける
 設定は `source_combination`（設定画面の「音源が複数のとき」）。
 計算をやり直さずに見方だけ足すときは `python source_mix.py <プロジェクト>`。
 
+#### ★★棚（`source_tag` / `source_index`）は持ち回らないと落ちる
+
+`source_tag` と `source_index` は**保存する条件ではない**ので
+`pj.DEFAULTS` に入っていない。そのため
+
+    sub = pj.Project(project.folder,
+                     **{k: getattr(project, k) for k in pj.DEFAULTS})
+
+で作り直すと**棚が落ちて `結果/recN/` を見にいく**。受音点ごとに `Project` を
+組み直す箇所では `source_tag` / `source_index` も一緒に渡すこと
+（`source_mix.tagged()` を通すのが確実）。
+
+2026-09-16 に実案件（階段教室・音源 2 点）で 2 件踏んだ（不具合報告 ⑪ ⑫）。
+
+| どこ | 症状 |
+|---|---|
+| `project.has_results()` | 棚を見ておらず、計算済みでも「結果がありません」。**条件入力の「前回の結果を見る」が押せない**（「計算結果あり」の表示も出ない） |
+| `view_images.load_sets()` | 棚が落ちてパルス列が見つからず、**虚音源のタブが出ない** |
+
+`has_results()` は**棚を指している `project` はその棚だけ**を見る
+（指定を無視して他の棚で True を返さない）。棚を指していなければ
+`結果/` 直下 → `結果/src1/` → … の順に見る。
+
+★**同じ形が他にも残っている**：`inverse_square.read_levels()`（:227）と
+`summary` の条件比較（:367）。音源が 2 点以上のプロジェクトでは同じ理由で
+結果を見つけられないはず（**未検証**）。
+
 ---
 
 ### point_order.py ― 測定点の並び（2026-09-15）
