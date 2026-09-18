@@ -16,6 +16,7 @@ import io
 import os
 import sys
 import itertools
+import warnings
 
 import numpy as np
 
@@ -5660,6 +5661,31 @@ def test_multiple_sources():
           flags == [True, False], f"{flags}")
     check("残響時間・明瞭度・STI は算術平均（dB でも C50 はこちら）",
           sx._energy_columns("clarity", tables[0]) == [False, False])
+
+    # ★★行ごとに平均のとり方を指定できる（2026-09-18。不具合報告 ⑮）。
+    #    それまでは表を丸ごと 2 通り平均してから dB の行だけ差し替えていたので、
+    #    **見出しの行（63, 125, …, 8000）まで数値として平均していた**。
+    #    エネルギー平均だと 10^(8000/10) がオーバーフローして見出しが inf になり、
+    #    音源が複数のプロジェクトでは毎回 RuntimeWarning が出ていた
+    with_head = [[["区分", "項目", "総合", "63", "4000", "8000"],
+                  ["音圧レベル", "Lp_dB", "80", "80", "80", "80"],
+                  ["参考", "音源距離_m", "2", "", "", ""]],
+                 [["区分", "項目", "総合", "63", "4000", "8000"],
+                  ["音圧レベル", "Lp_dB", "86", "86", "86", "86"],
+                  ["参考", "音源距離_m", "4", "", "", ""]]]
+    marks = sx._energy_columns("spl", with_head[0])
+    check("見出しの行は dB 扱いにしない", marks == [False, True, False], f"{marks}")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        mixed = sx._average_rows(with_head, energy=marks)
+    check("★見出しの周波数がそのまま残る（inf にならない）",
+          mixed[0] == ["区分", "項目", "総合", "63", "4000", "8000"], f"{mixed[0]}")
+    check("★オーバーフローの警告が出ない",
+          not [w for w in caught if issubclass(w.category, RuntimeWarning)],
+          f"{[str(w.message) for w in caught]}")
+    check("dB の行はエネルギー平均のまま",
+          np.isclose(float(mixed[1][2]), want, atol=1.0e-6))
+    check("dB でない行は算術平均のまま", np.isclose(float(mixed[2][2]), 3.0))
 
     # ---- ⑦ 見方の選び方 ----
     check("『すべて』で 3 通り", len(sx.modes_for(sx.MIX_ALL)) == 3)
