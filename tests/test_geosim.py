@@ -1608,6 +1608,41 @@ def test_measurement_points():
     check("受音点ごとの結果は自分のぶんが消える", not os.path.exists(own))
     shutil.rmtree(folder, ignore_errors=True)
 
+    # ★★条件を変えて回したとき、**前の条件の図**を消していないか
+    #    （2026-09-18。不具合報告 ⑭）。CSV は条件名で分かれているので残るのに、
+    #    図フォルダの PNG は名前も見ずに全部消していた。
+    #    実案件（階段教室）で条件を 1 つ回すたびに前の条件の図 110 枚が消えた。
+    folder = tempfile.mkdtemp()
+    project = pj.Project(folder, dxf="研修室.dxf", condition_sheet="条件1")
+    project.receiver_index = 1
+    project.ensure_dirs()
+    figures = project.figure_dir()
+    mine = os.path.join(figures, "研修室_条件1_decay.png")       # いまの条件
+    other = os.path.join(figures, "研修室_条件0_decay.png")      # 別の条件
+    shared = os.path.join(figures, "研修室_points.png")          # 条件に依らない図
+    legacy = os.path.join(figures, "decay.png")                  # 頭を付ける前の図
+    for path in (mine, other, shared, legacy):
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("dummy")
+    project.clear_results(verbose=False)
+    check("★別の条件の図は残す（⑭）", os.path.exists(other))
+    check("★条件に依らない図も残す（毎回書き直される）", os.path.exists(shared))
+    check("いまの条件の図は消す", not os.path.exists(mine))
+    check("頭の付いていない昔の図も消す", not os.path.exists(legacy))
+    shutil.rmtree(folder, ignore_errors=True)
+
+    # 条件名を付けない使い方（`file_prefix` が空）は従来どおり全部消す
+    folder = tempfile.mkdtemp()
+    project = pj.Project(folder)
+    project.receiver_index = 1
+    project.ensure_dirs()
+    path = os.path.join(project.figure_dir(), "decay.png")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("dummy")
+    project.clear_results(verbose=False)
+    check("名前の頭を付けない使い方では従来どおり消す", not os.path.exists(path))
+    shutil.rmtree(folder, ignore_errors=True)
+
 
 
 # ---------------------------------------------------------------- モード分布

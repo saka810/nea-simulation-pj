@@ -541,6 +541,35 @@ class Project:
             parts.append(RECEIVER_DIR % self.receiver_index)
         return self.path(*parts)
 
+    def owns_figure(self, name):
+        """その PNG が**いまの条件の図か**（`clear_results` が消す相手か）。
+
+        ★★**条件名の付いた図は、その条件のものだけを消す**
+        （2026-09-18。不具合報告 ⑭）。それまでは図フォルダの PNG を
+        名前も見ずに全部消していたので、**条件ごとの CSV は残るのに
+        図だけ最後に回した条件のものしか残らなかった**
+        （一括実行だと途中の条件の図が全滅する。実案件で 110 枚消えた）。
+
+        ファイル名の頭を付けるようにした時点（2026-08-21）で
+        「古い条件のファイルが混ざる」問題は**名前で解決している**ので、
+        まとめて消す必要はもう無い。判定は結果 CSV 側（`name_candidates`）と
+        同じ考え方で、**対象室名＋条件名**を手がかりにする。
+
+            階段教室_条件1_decay.png   いまの条件      → 消す
+            階段教室_条件0_decay.png   別の条件        → 残す
+            階段教室_points.png        条件に依らない図 → 残す（毎回書き直される）
+            decay.png                  頭を付ける前の図 → 消す
+        """
+        prefix = self.file_prefix
+        if not prefix:
+            return True                 # 頭を付けない使い方 → 従来どおり全部消す
+        if name.startswith(f"{prefix}_"):
+            return True                 # いまの条件の図
+        room = self.room_label
+        if room and name.startswith(f"{room}_"):
+            return False                # 別の条件、または条件に依らない図
+        return True                     # 頭の付いていない昔の図
+
     def figure_path(self, name, shared=False):
         """図のパス。**図にも対象室＋条件名を付ける**（貼ってから見分けが付くように）。
 
@@ -632,6 +661,10 @@ class Project:
         ★**昔の名前のファイルも消す**（`result_candidates`）。名前を変える前の
         `rt.csv` や `rt_statistical.csv` が残っていると、今回の結果と並んでしまう。
 
+        ★★**図は「いまの条件のもの」だけ消す**（`owns_figure`。2026-09-18。
+        不具合報告 ⑭）。CSV は条件名で分かれているので残るのに、
+        図だけ名前を見ずに全部消していた。
+
         ★**経路の幾何（`経路.npz`）は消さない**（`KEEP_ON_CLEAR`）。
         作り直すのに音線追跡が丸ごと要るうえ、古いかどうかは指紋で判定できるため。
         `keep` に鍵を足せば他のものも残せる（経路を使い回すときの音線軌跡など）。
@@ -665,10 +698,12 @@ class Project:
                 if os.path.exists(path):
                     os.remove(path)
                     removed += 1
+        # ★図も**いまの条件のものだけ**消す（2026-09-18。不具合報告 ⑭）。
+        #   名前も見ずに消していたので、条件を変えて回すと前の条件の図が全滅した
         figures = self.figure_dir()
         if os.path.isdir(figures):
             for name in os.listdir(figures):
-                if name.lower().endswith(".png"):
+                if name.lower().endswith(".png") and self.owns_figure(name):
                     os.remove(os.path.join(figures, name))
                     removed += 1
         if removed and verbose:
