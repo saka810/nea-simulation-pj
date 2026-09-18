@@ -11,7 +11,7 @@ CSV にしてあるのは Excel でそのまま開けるようにするため。
       結果/
         研修室_条件A_まとめ_残響時間.csv    全受音点 ＋ 平均 ＋ 理論値（summary.py が書く）
         研修室_条件A_まとめ_明瞭度.csv      全受音点 ＋ 平均
-        研修室_条件A_吸音率と理論値.csv     材料別の吸音率 → 平均吸音率 → 残響時間理論値
+        研修室_条件A_吸音率と理論値.csv     材料別の吸音率 → 平均吸音率 → 室の諸元 → 理論値
         研修室_条件A_raylog.npz             音線軌跡（可視化用。可変長なので npz）
         rec1/               ← **受音点ごと**
           研修室_条件A_pulses.csv   パルス列（反射回数・到来時刻・到来方向・エネルギー）
@@ -910,7 +910,16 @@ class Project:
 # ------------------------------------------------------------------------------
 
 # 「吸音率と理論値」の CSV の区分（この順に並べる。2026-08-21 ユーザー指定）
-ROOM_SECTIONS = ("材料別の吸音率", "平均吸音率", "残響時間理論値")
+ROOM_SECTION_MATERIALS = "材料別の吸音率"
+ROOM_SECTION_MEAN = "平均吸音率"
+# ★**室の諸元**（2026-09-18 ユーザー要望「容積も行を足しておいて」）。
+#   統計残響式は容積で決まる（`T = 0.161 V / A`）のに、それまで**容積が
+#   結果のどこにも残っていなかった**ので、理論値を後から検算できなかった。
+#   ᾱ → A → V → T と読めるように**理論値の直前**に置く
+ROOM_SECTION_SPEC = "室の諸元"
+ROOM_SECTION_STATISTICAL = "残響時間理論値"
+ROOM_SECTIONS = (ROOM_SECTION_MATERIALS, ROOM_SECTION_MEAN,
+                 ROOM_SECTION_SPEC, ROOM_SECTION_STATISTICAL)
 
 # 「平均吸音率」の区分に入れる行。**平均吸音率だけでなく等価吸音面積も入れる**。
 # 統計残響式は A = Sᾱ（Sabine）／-S ln(1-ᾱ)（Eyring）から T を出すので、
@@ -923,6 +932,13 @@ ROOM_MEAN_ROWS = (("平均吸音率", "mean_absorption"),
 ROOM_STATISTICAL_ROWS = (("sabine_s", "sabine"),
                          ("eyring_s", "eyring"),
                          ("eyring_knudsen_s", "eyring_knudsen"))
+
+# 「室の諸元」の区分に入れる行（周波数に依らない値なので 3 列目だけを埋める）。
+# ★総表面積は「平均吸音率」の行の面積欄にも入っているが、そこは見落としやすいので
+#   ここにも並べる。`statistical` が最初から持っている値で、計算は増えない
+ROOM_SPEC_ROWS = (("容積_m3", "volume"),
+                  ("総表面積_m2", "total_area"),
+                  ("平均自由行程_4V/S_m", "mean_free_path"))
 
 
 def write_room_csv(filename, statistical, frequencies=None):
@@ -939,6 +955,9 @@ def write_room_csv(filename, statistical, frequencies=None):
         平均吸音率,平均吸音率,340.2,0.153,…          ← 面積で重み付けした ᾱ
         平均吸音率,等価吸音面積_m2,,52.1,…
         平均吸音率,空気吸収_4mV_m2,,0.0,…
+        室の諸元,容積_m3,3490.4,                     ← ★周波数に依らない（3 列目だけ）
+        室の諸元,総表面積_m2,3031.9,
+        室の諸元,平均自由行程_4V/S_m,4.60,
         残響時間理論値,sabine_s,,1.91,…
         残響時間理論値,eyring_s,,…
         残響時間理論値,eyring_knudsen_s,,…
@@ -955,15 +974,20 @@ def write_room_csv(filename, statistical, frequencies=None):
         frequencies = statistical["frequencies"]
     surface = statistical["surface"]
 
-    rows = [(ROOM_SECTIONS[0], name, area, alpha)
+    rows = [(ROOM_SECTION_MATERIALS, name, area, alpha)
             for name, area, alpha in zip(surface["names"], surface["areas"],
                                          surface["absorption"])]
     for label, key in ROOM_MEAN_ROWS:
         # 面積の欄は平均吸音率の行だけ埋める（総表面積）。他は帯域の値だけ
         area = surface["total_area"] if key == "mean_absorption" else None
-        rows.append((ROOM_SECTIONS[1], label, area, statistical[key]))
+        rows.append((ROOM_SECTION_MEAN, label, area, statistical[key]))
+    # ★室の諸元（容積など）。**周波数に依らない**ので 3 列目だけを埋める
+    for label, key in ROOM_SPEC_ROWS:
+        value = statistical.get(key)
+        if value is not None:
+            rows.append((ROOM_SECTION_SPEC, label, value, None))
     for label, key in ROOM_STATISTICAL_ROWS:
-        rows.append((ROOM_SECTIONS[2], label, None, statistical[key]))
+        rows.append((ROOM_SECTION_STATISTICAL, label, None, statistical[key]))
     return tb.write_sectioned_table(filename, frequencies, rows,
                                     value_label="面積_m2")
 
@@ -1044,7 +1068,7 @@ def read_room_csv(path):
 
     names, areas, alphas = [], [], []
     for section, item in table["order"]:
-        if section != ROOM_SECTIONS[0]:
+        if section != ROOM_SECTION_MATERIALS:
             continue
         names.append(item)
         try:
