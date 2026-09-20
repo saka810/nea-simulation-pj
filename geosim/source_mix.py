@@ -331,11 +331,22 @@ def write_superposed(project, tags, mode, verbose=True):
 def _average_rows(tables, energy=False):
     """同じ形の表（行のリスト）を平均する。文字の欄は 1 つ目のものを残す。
 
-    `energy=True` の欄は**エネルギー平均**（`10log10(mean(10^(L/10)))`）。
+    `energy` は真偽値か、**行ごとの真偽のリスト**（`_energy_columns` が作る）。
+    True の行は**エネルギー平均**（`10log10(mean(10^(L/10)))`）にする。
     ★dB をそのまま平均してはいけない（`summary.py` と同じ約束）。
+
+    ★★**行ごとに指定できる**（2026-09-18。不具合報告 ⑮）。それまでは
+    表を丸ごと 2 通り平均してから dB の行だけ差し替えていたので、
+    **見出しの行（`63, 125, …, 8000`）まで数値として平均していた**。
+    エネルギー平均だと `10^(8000/10)` がオーバーフローして見出しが `inf` になり、
+    音源が複数のプロジェクトでは**毎回 RuntimeWarning が出ていた**
+    （差し替えで捨てられるので出力は正しかったが、本物の異常が埋もれる）。
     """
     base = [list(row) for row in tables[0]]
+    row_energy = (list(energy) if isinstance(energy, (list, tuple))
+                  else [bool(energy)] * len(base))
     for r, row in enumerate(base):
+        use_energy = row_energy[r] if r < len(row_energy) else False
         for c, cell in enumerate(row):
             values = []
             for table in tables:
@@ -349,7 +360,7 @@ def _average_rows(tables, energy=False):
                     break
             if not values:
                 continue        # 文字（項目名・評価など）はそのまま
-            if energy:
+            if use_energy:
                 mean = 10.0 * np.log10(np.mean(np.power(10.0, np.array(values) / 10.0)))
             else:
                 mean = float(np.mean(values))
@@ -413,17 +424,11 @@ def write_average(project, tags, verbose=True):
                 if verbose:
                     print(f"[合成] 平均: {key} の表の形が音源ごとに違うので飛ばします")
                 continue
-            flags = _energy_columns(key, tables[0])
-            if any(flags):
-                # 行ごとに平均のとり方を変える（dB の行だけエネルギー平均）
-                rows = _average_rows(tables, energy=False)
-                energy_rows = _average_rows(tables, energy=True)
-                for r, use_energy in enumerate(flags):
-                    if use_energy:
-                        # ★3 列目（総合）も dB なのでまとめてエネルギー平均にする
-                        rows[r] = energy_rows[r]
-            else:
-                rows = _average_rows(tables, energy=False)
+            # 行ごとに平均のとり方を変える（dB の行だけエネルギー平均。
+            # ★3 列目（総合）も dB なので、その行はまとめてエネルギー平均にする）。
+            # ★★以前は表を丸ごと 2 通り平均してから差し替えていたので、
+            #   見出しの行まで両方で計算していた（不具合報告 ⑮）
+            rows = _average_rows(tables, energy=_energy_columns(key, tables[0]))
             target = (sub.clarity_path() if key == "clarity"
                       else sub.result_path(key))
             _write_csv(target, rows)
