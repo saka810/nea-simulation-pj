@@ -3160,6 +3160,22 @@ def test_workbook():
     check("グラフが入っている（Excel 側で作り直さなくてよい）", charts >= 4,
           f"{charts} 個")
 
+    # ★**周波数の欄が空の行はグラフに載せない**（2026-09-20）。
+    #   `室の諸元`（容積など）は 3 列目だけを埋めるので、そのまま足すと
+    #   **中身の無い系列が凡例に並ぶ**。表には残し、グラフからだけ外す
+    room = book[wb.SHEET_ROOM]
+    spec = [r for r in room.iter_rows(min_row=2, values_only=True)
+            if r[0] == pj.ROOM_SECTION_SPEC]
+    check("★容積などの諸元は表に残る", len(spec) == len(pj.ROOM_SPEC_ROWS),
+          f"{[r[1] for r in spec]}")
+    check("★諸元は周波数の欄が空（周波数に依らない値なので）",
+          all(v in (None, "") for r in spec for v in r[3:]), str(spec[0]))
+    if room._charts:
+        series = len(room._charts[0].series)
+        check("★★空の系列は凡例に出さない",
+              series == room.max_row - 1 - len(spec),
+              f"系列 {series} / データ行 {room.max_row - 1}")
+
     sheet = book[wb.SHEET_REVERBERATION]
     check("周波数が横に並ぶ（表の共通ルールのまま）",
           [c.value for c in sheet[1]][:2] == ["受音点", "項目"]

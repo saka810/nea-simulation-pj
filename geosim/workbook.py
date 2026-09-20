@@ -470,8 +470,26 @@ def _add_chart(sheet, name, rows, kind, skip):
                            min_row=1, max_row=1)
     chart.add_data(data, from_rows=True, titles_from_data=False)
     chart.set_categories(categories)
+
+    # ★**周波数の欄が空の行はグラフに載せない**（2026-09-20）。
+    #   `室の諸元`（容積・総表面積・平均自由行程）のように**周波数に依らない行**は
+    #   3 列目だけを埋めるので、そのまま足すと**中身の無い系列が凡例に並ぶ**。
+    #   表には残す（読むためのもの）が、グラフは周波数の曲線を見る場所なので外す
+    def _has_values(row):
+        return any(str(v).strip() not in ("", "None") for v in row[skip:])
+
+    drawn = [row for row in rows[1:] if _has_values(row)]
+    if len(drawn) != len(rows) - 1:
+        try:
+            chart.series = [series for series, row
+                            in zip(chart.series, rows[1:]) if _has_values(row)]
+        except Exception as error:      # 外せなくてもグラフ自体は出る
+            print(f"[Excel] 空の系列を外せませんでした: "
+                  f"{type(error).__name__}: {error}")
+            drawn = rows[1:]
+
     # 系列名は「受音点＋項目」を並べたもの（表の左側の列をつなげる）
-    for series, row in zip(chart.series, rows[1:]):
+    for series, row in zip(chart.series, drawn):
         label = " ".join(str(v) for v in row[:skip] if v)
         series.tx = None
         try:
