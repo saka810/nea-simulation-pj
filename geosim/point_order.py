@@ -31,6 +31,19 @@ CAD を描き直させるのが筋だが、図面をもらってから気づく�
 
     python point_order.py <プロジェクト>          いまの並びを見る
     python point_order.py <プロジェクト> --edit    並べ替えの画面を開く
+    python point_order.py <プロジェクト> --match-previous
+                                                  前回の計算と同じ並びに戻す
+
+★★**DXF を作り直すと並びが変わる**（2026-09-20。不具合報告 ⑯）。
+実案件で**画層名を 1 つ変えただけ**の DXF に差し替えたら、三角形は 779 枚とも
+完全に同じなのに `POINT` の出てくる順が変わり、**src1 が S2 に、rec3 が R5 に**
+なっていた。黙って番号が振り直されるので、結果を見るまで気づけない。
+しかも**経路キャッシュの指紋が合わなくなる**ので音線追跡からやり直しになる
+（実案件で 50 分回してから気づいて中止）。
+
+そこで `check_against_previous()` が、**前回の `結果/<室>_測定点.csv` と
+座標を突き合わせて並びの変化を知らせる**（`run_project` がモデルを読んだ直後に
+1 回だけ呼ぶ）。戻し方まで出すので、`--match-previous` で直せる。
 """
 
 import json
@@ -123,6 +136,117 @@ def apply(project, model, verbose=True):
         print(f"[測定点順] {ORDER_FILE} の並びを当てました"
               f"（音源 {'○' if sources else '—'} / 受音点 {'○' if receivers else '—'}）")
     return model
+
+
+# ------------------------------------------------------------------------------
+# ★前回の計算と突き合わせる（2026-09-20。不具合報告 ⑯）
+# ------------------------------------------------------------------------------
+
+KINDS = (("音源", "sources", "src"), ("受音点", "receivers", "rec"))
+
+
+def previous_points(project):
+    """前回書いた `結果/<室>_測定点.csv` から座標を読む → {"音源": [...], "受音点": [...]}。
+
+    ★**結果**なので、条件を変えても対象室が同じなら同じファイルを指す
+    （`SOURCE_SHARED_RESULTS` ＋ `ROOM_SCOPED_RESULTS`）。
+    """
+    import csv
+
+    try:
+        target = project.existing_result_path("points")
+    except Exception:
+        target = None
+    if not target or not os.path.exists(target):
+        return {}
+    found = {"音源": [], "受音点": []}
+    try:
+        with open(target, encoding="utf-8-sig", newline="") as handle:
+            for row in csv.DictReader(handle):
+                kind = (row.get("区分") or "").strip()
+                if kind not in found:
+                    continue
+                try:
+                    found[kind].append([float(row["X_m"]), float(row["Y_m"]),
+                                        float(row["Z_m"])])
+                except (KeyError, TypeError, ValueError):
+                    return {}           # 読めない列があるなら当てにしない
+    except OSError:
+        return {}
+    return found
+
+
+def _match_order(before, now, tolerance=1.0e-6):
+    """前回の点が**いまの何番目**かを返す。集合として一致しなければ None。"""
+    import numpy as np
+
+    if not before or len(before) != len(now):
+        return None
+    now = [np.asarray(p, dtype=float).reshape(3) for p in now]
+    order, used = [], set()
+    for point in before:
+        point = np.asarray(point, dtype=float).reshape(3)
+        hit = [i for i, q in enumerate(now)
+               if i not in used and np.allclose(q, point, atol=tolerance)]
+        if not hit:
+            return None                 # 位置そのものが変わっている（別のモデル）
+        order.append(hit[0])
+        used.add(hit[0])
+    return order
+
+
+def check_against_previous(project, model, applied=True, verbose=True):
+    """前回の計算と**並びが変わっていないか**を見る → 直すための並び（無ければ {}）。
+
+    ★★**黙って番号が振り直されるのを防ぐ**（不具合報告 ⑯）。座標の集合は同じで
+    順番だけが違うときに、何がどう入れ替わったかと戻し方を知らせる。
+    **位置そのものが変わっているときは何も言わない**（点を動かしたなら当然なので）。
+
+    applied : bool
+        ★渡されたモデルに `測定点順.json` が**当たっているか**。
+        `run_project._ordered` は当てたあとに呼ぶので True、
+        `point_order.main` は DXF に出てきた順のまま呼ぶので False。
+        ★**戻す並びは必ず「DXF に出てきた順の番号」**（`測定点順.json` の約束）
+        なので、既にある並びと**合成して**返す。
+    """
+    if project is None or model is None:
+        return {}
+    before = previous_points(project)
+    if not before:
+        return {}
+    kept = dict(zip(("sources", "receivers"),
+                    orders_for(project, model, verbose=False)))
+    fix, notes = {}, []
+    for label, key, prefix in KINDS:
+        now = (model.source_points if key == "sources"
+               else model.receiver_points) or []
+        saved = kept.get(key)
+        if applied or not saved:
+            effective = list(now)
+        else:
+            effective = [now[k] for k in saved]
+        order = _match_order(before.get(label), effective)
+        if order is None or order == list(range(len(order))):
+            continue
+        # 「前回の i 番目 = いまの order[i] 番目」を DXF 順の番号に直す
+        fix[key] = [saved[o] for o in order] if saved else list(order)
+        for index, target in enumerate(order):
+            if index != target:
+                notes.append(f"  前回の {prefix}{index + 1} は"
+                             f"**いまの {target + 1} 番目**です")
+    if fix and verbose:
+        print("[測定点順] ★★測定点の並びが前回の計算と変わっています"
+              "（位置は同じで順番だけ違います）")
+        for line in notes:
+            print(f"[測定点順] {line}")
+        print("[測定点順]   ★このまま回すと `結果/src1/` `結果/rec1/` に"
+              "別の点の結果が入り、**経路の使い回しも効きません**")
+        print(f"[測定点順]   前回と同じ並びに戻すには: "
+              f'python point_order.py "{project.folder}" --match-previous')
+        print(f"[測定点順]   画面で決めるなら --edit / このままでよければ無視して"
+              f"構いません（`{ORDER_FILE}` は書き換えません）")
+    return fix
+
 
 
 def describe(project, model):
@@ -301,6 +425,8 @@ def main():
     p.add_argument("--edit", action="store_true", help="並べ替えの画面を開く")
     p.add_argument("--reset", action="store_true",
                    help="CAD の作成順に戻す（`測定点順.json` を消す）")
+    p.add_argument("--match-previous", action="store_true",
+                   help="前回の計算（結果/<室>_測定点.csv）と同じ並びに戻す")
     a = p.parse_args()
 
     project = pj.Project.load(a.folder)
@@ -319,6 +445,18 @@ def main():
     if a.edit:
         edit(project, model)
         model = _read_model(project)
+    if getattr(a, "match_previous", False):
+        # ★**並べ替える前の（DXF に出てきた順の）モデル**で突き合わせる
+        fix = check_against_previous(project, model, applied=False, verbose=True)
+        if not fix:
+            print("[測定点順] 前回と同じ並びです（直すところはありません）")
+        else:
+            save(project, sources=fix.get("sources"),
+                 receivers=fix.get("receivers"), model=model)
+            print(f"[測定点順] 前回と同じ並びにしました: {path(project)}")
+            model = _read_model(project)
+    else:
+        check_against_previous(project, model, applied=False, verbose=True)
     apply(project, model)
     print(describe(project, model))
 

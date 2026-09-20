@@ -133,11 +133,21 @@ def _ordered(project, model, verbose=True):
     import point_order as po
 
     try:
-        return po.apply(project, model, verbose=verbose)
+        model = po.apply(project, model, verbose=verbose)
     except Exception as error:      # 並びが当たらなくても計算は続けられる
         print(f"[run] 測定点の並びを当てられませんでした: "
               f"{type(error).__name__}: {error}")
         return model
+    # ★★**前回の計算と並びが変わっていたら知らせる**（2026-09-20。不具合報告 ⑯）。
+    #   DXF を作り直すと `POINT` の出てくる順が変わりうるので、黙って
+    #   `結果/src1/` `結果/rec1/` の中身が別の点にすり替わる。
+    #   ここで気づけば 50 分の無駄打ち（経路の使い回しも効かなくなる）を防げる
+    try:
+        po.check_against_previous(project, model, applied=True, verbose=verbose)
+    except Exception as error:      # 突き合わせに失敗しても計算は続けられる
+        print(f"[run] 前回の測定点と突き合わせられませんでした: "
+              f"{type(error).__name__}: {error}")
+    return model
 
 
 def _run_sources(project, sources, verbose=True, make_figures=True,
@@ -305,10 +315,15 @@ def _paths_ready(project, receivers, verbose=True):
             sub = _sub_project(project, index)
             mark = pc.fingerprint(model.mesh, faces, source, point, project.rays,
                                   project.nref, project.radius, project.two_sided)
-            if pc.load(sub.paths_cache(), mark, verbose=False) is None:
+            # ★測定点を全部渡す。位置が合わないとき「並びが入れ替わっただけ」
+            #   かどうかを見て対処法を添えてもらう（2026-09-20。不具合報告 ⑯）
+            known = {"source": list(model.source_points or []),
+                     "receiver": list(model.receiver_points or [])}
+            if pc.load(sub.paths_cache(), mark, verbose=False,
+                       points=known) is None:
                 if verbose:
                     # 理由は `pc.compare` が出す。もう一度呼んで表示させる
-                    pc.load(sub.paths_cache(), mark, verbose=True)
+                    pc.load(sub.paths_cache(), mark, verbose=True, points=known)
                 return False
     except Exception as error:      # 判定に失敗したら安全側（追跡からやり直す）
         print(f"[run] 経路の使い回しを判定できませんでした: "
@@ -808,6 +823,10 @@ def _run_one(project, receiver, verbose=True, make_figures=True,
         absorption_kind=project.absorption_kind,
         material_library=_library_for(project),
         layer_assignment=_assignment_for(project),
+        # ★★**条件表の安全率まで効かせた表をここで渡す**（2026-09-20。不具合報告 ⑱）。
+        #   渡さないと `procedure` が material_library から組み立て直すので、
+        #   **安全率が掛からないまま計算される**（危険側・警告なし）
+        absorption_table=_absorption_table_for(project, verbose=verbose),
         band_number=project.band_number,
         # ★帯域の幅（1/1 か 1/3）と下端（2026-08-26）
         band_width=getattr(project, "band_width", "1/1"),
@@ -1086,11 +1105,22 @@ def _absorption_table_for(project, verbose=False):
 
     ★条件表の**安全率**（例 0.8 掛け）もここで効かせる。
     カタログ値に掛けてから垂直入射へ変換する（`condition_table.absorption_table`）。
+
+    ★★**この表を本計算にも渡すこと**（`procedure.process(absorption_table=…)`）。
+    2026-09-20 より前は `procedure` が material_library から組み立て直していたので、
+    ここで掛けた安全率が計算に届いていなかった（不具合報告 ⑱）。
     """
     import condition_table as ct
 
     library = _library_for(project, verbose=verbose)
     if library is None:
+        # ★安全率が書いてあるのに材料一覧が無いなら**黙って捨てない**。
+        #   吸音率を見過ぎる（危険側）方向に外れるので必ず知らせる
+        factors = ct.factors_for(project, verbose=False)
+        if factors:
+            print(f"[run] ★安全率が {len(factors)} レイヤに書かれていますが、"
+                  f"材料一覧（条件表の「吸音率」シート／吸音率表）が読めないので"
+                  f"**効きません**。材料一覧を用意してください")
         return None
     return ct.absorption_table(library, _assignment_for(project),
                                factors=ct.factors_for(project, verbose=verbose),

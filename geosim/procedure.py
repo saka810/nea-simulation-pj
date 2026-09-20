@@ -42,7 +42,7 @@ from ray_recorder import RayRecorder
 def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref, soundray_number,
             absorption_csv=None, absorption_kind=None, layer_assignment=None,
             band_number=rd.DEFAULT_BAND_NUMBER, band_width="1/1",
-            band_start=None, material_library=None,
+            band_start=None, material_library=None, absorption_table=None,
             unit=None, orient_normals="cad", two_sided=False, volume=None,
             atmosphere=None, raylog_filename=None, raylog_max_rays=2000,
             pulse_filename=None, impulse_filename=None,
@@ -99,6 +99,11 @@ def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref
     material_library : absorption.MaterialLibrary | None
         材料一覧を直接渡す場合（GUI から編集したものなど）。
         指定すると absorption_csv より優先される。
+    absorption_table : dict | None
+        ★**出来あいの吸音率テーブル**（{レイヤ名またはキー: 垂直入射吸音率}）。
+        渡すと `material_library` から組み立て直さずにそのまま使う。
+        `run_project` は条件表の**安全率**を掛けた表をここに渡す
+        （2026-09-20。不具合報告 ⑱。渡さないと安全率が効かない）
     atmosphere : atmosphere.Atmosphere | None
         温度・湿度・気圧。**音速と空気吸収の両方がここから決まる。**
         None なら基準状態（20℃ / 湿度 40% / 101.325 kPa → 音速 343.8 m/s）。
@@ -207,12 +212,18 @@ def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref
     # 吸音率テーブルを作る。
     # ・残響室法の値なら Paris の式で垂直入射に変換してから渡す
     # ・レイヤ → 材料の対応は layer_assignment で差し替えられる（CAD を触らずに済む）
-    absorption_table = None
+    #
+    # ★★**出来あいの表を渡されたらそれを使う**（2026-09-20。不具合報告 ⑱）。
+    #   それまでは呼ばれるたびに `material_library` から**自前に**組み立てていたので、
+    #   `run_project` が条件表の**安全率**を掛けて作った表（`_absorption_table_for`）が
+    #   本計算に届かず、**安全率がまったく効いていなかった**（警告も出ない）。
+    #   同じ 1 回の実行の中でモデルが 2 通りの吸音率で読まれる状態でもあった。
     if material_library is None and absorption_csv is not None:
         material_library = ab.MaterialLibrary.from_file(absorption_csv,
                                                         kind=absorption_kind)
     if material_library is not None:
         print(f"[procedure] {material_library.summary()}")
+    if absorption_table is None and material_library is not None:
         absorption_table = material_library.absorption_table(layer_assignment,
                                                              band_number=band_number)
 

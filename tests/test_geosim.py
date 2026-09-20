@@ -12,6 +12,7 @@ pytest は使わず、素の Python で走る（依存を増やさないため�
   無い場合は既定の吸音率で走る（結果の判定には影響しない項目だけを見る）。
 """
 
+import inspect
 import io
 import os
 import sys
@@ -5345,10 +5346,15 @@ def test_dxf_faces():
         check("★元の DXF から POINT を拾える（ACIS が読めなくてもテキストは読める）",
               len(got) == 3, f"{len(got)} 個")
         check("  画層も座標も保たれる",
-              got[0] == ("src", (1000.0, 500.0, 1500.0)), f"{got[0]}")
+              ("src", (1000.0, 500.0, 1500.0)) in got, f"{got}")
         check("  POINT 以外は拾わない（LINE の 10/20/30 に釣られない）",
-              [layer for layer, _xyz in got] == ["src", "rec", "rec"],
+              sorted(layer for layer, _xyz in got) == ["rec", "rec", "src"],
               f"{[layer for layer, _xyz in got]}")
+        # ★★並びは**画層 → 座標**で決め打ち（2026-09-20。不具合報告 ⑯）。
+        #   元の図面の `ENTITIES` の順に依らないので、作り直しても番号が動かない
+        check("  ★画層 → 座標の順に並ぶ（元の図面の並びに依らない）",
+              [layer for layer, _xyz in got] == ["rec", "rec", "src"]
+              and got[0][1] == (800.0, 2500.0, 1200.0), f"{got}")
 
         # ★★BLOCKS の中の POINT は拾わない（ブロック定義の座標系なので
         #   そのまま置くと位置が合わない）
@@ -5974,6 +5980,297 @@ def test_rt_any():
         check("project.json に残る", again.rt_any_end_db == -15.0)
 
 
+def test_safety_factor_reaches_calculation():
+    """[54] ★★条件表の安全率が本計算に届く（2026-09-20。不具合報告 ⑱）。
+
+    それまでは `run_project._absorption_table_for()` が安全率を掛けた表を作っても、
+    使い道が**経路キャッシュの指紋と作図チェックだけ**で、本計算の
+    `procedure.process()` は `material_library` から**自前に組み立て直していた**。
+    そのため安全率を入れても**結果が 1 ビットも変わらず、警告も出なかった**
+    （吸音を見過ぎる＝危険側に外れる）。
+    """
+    print("\n[54] 条件表の安全率が本計算に届く（不具合報告 ⑱）")
+    import shutil
+    import tempfile
+
+    import condition_table as ct
+    import procedure
+    import project as pj
+    import run_project
+
+    try:
+        from openpyxl import load_workbook
+    except ImportError:
+        check("openpyxl が入っている（条件表 xlsx に要る）", False,
+              "pip install -r requirements.txt")
+        return
+
+    check("★`procedure.process` が出来あいの表を受け取れる",
+          "absorption_table" in inspect.signature(procedure.process).parameters)
+
+    FACTOR = 0.5           # 効いているかどうかが一目で分かる大きさにする
+    ALPHA = 0.60           # カタログ値（残響室法）
+
+    def run_with(factor):
+        """安全率あり／なしで 1 回ずつ回して、実際に使われた吸音率を返す。"""
+        folder = tempfile.mkdtemp(prefix="geosim_factor_")
+        shutil.copy(TEST_DXF, os.path.join(folder, "安全率室.dxf"))
+        project = pj.Project(folder, dxf="安全率室.dxf", band_number=6,
+                             rays=400, nref=3, radius=0.3, max_time=0.3,
+                             statistical=True, volume=6.0)
+        project.absorption_kind = "random"
+        project.ensure_dirs()
+
+        library = ab.MaterialLibrary()
+        library.add("吸音板", [ALPHA] * 6, kind="random")
+        library.add_alias("11", "吸音板")
+        model = rd.read_model(project.dxf_path, band_number=6, verbose=False)
+        path = ct.create(project, model, library, verbose=False)
+
+        book = load_workbook(path)
+        sheet = book[ct.FIRST_SHEET]
+        columns = {label: i + 1 for i, label in enumerate(c.value for c in sheet[1])}
+        layer = sheet.cell(row=2, column=columns[ct.COLUMN_LAYER]).value
+        for row in range(2, ct.LAYER_SLOTS + 2):
+            if not sheet.cell(row=row, column=columns[ct.COLUMN_LAYER]).value:
+                break
+            sheet.cell(row=row, column=columns[ct.COLUMN_NUMBER]).value = 11
+            if factor is not None:
+                sheet.cell(row=row, column=columns[ct.COLUMN_FACTOR]).value = factor
+        book.save(path)
+
+        # 本計算に何が渡ったかを控える（`procedure.process` をくるむ）
+        seen = {}
+        original = procedure.process
+
+        def spy(*args, **kwargs):
+            seen["table"] = kwargs.get("absorption_table")
+            result = original(*args, **kwargs)
+            seen["model"] = result["model"]
+            return result
+
+        procedure.process = spy
+        try:
+            run_project.run(project, verbose=False, make_figures=False,
+                            save_settings=False)
+        finally:
+            procedure.process = original
+        seen["layer"] = layer
+        seen["folder"] = folder
+        return seen
+
+    plain = run_with(None)
+    scaled = run_with(FACTOR)
+
+    check("安全率なしでも表は渡る（組み立て直さない）",
+          plain["table"] is not None)
+    layer = scaled["layer"]
+    check("★安全率のぶん表の値が下がる",
+          scaled["table"][layer][0] < plain["table"][layer][0],
+          f"{plain['table'][layer][0]:.6f} → {scaled['table'][layer][0]:.6f}")
+
+    # カタログ値に掛けてから垂直入射へ変換したもの（順番を守っているか）
+    want = ab.Material("x", np.full(6, ALPHA * FACTOR), "random").normal_incidence()
+    check("★カタログ値に掛けてから垂直入射へ変換する（順番）",
+          np.allclose(scaled["table"][layer], want),
+          f"{scaled['table'][layer][0]:.6f} / 期待 {want[0]:.6f}")
+
+    # ★★ここが本題：実際に読まれたモデルの吸音率が変わること
+    got = np.array([m.absorption_coefficient for m in scaled["model"].mesh])
+    base = np.array([m.absorption_coefficient for m in plain["model"].mesh])
+    check("★★本計算のモデルに安全率が効いている（前は 1 ビットも変わらなかった）",
+          got.max() < base.max() and np.allclose(got[0], want),
+          f"{base[0][0]:.6f} → {got[0][0]:.6f}")
+    check("面の枚数は変わらない（材料の分け方は動かさない）",
+          len(scaled["model"].mesh) == len(plain["model"].mesh))
+
+    # ★材料一覧が無いと安全率は効かないので、黙って捨てずに知らせる
+    folder = tempfile.mkdtemp(prefix="geosim_factor_none_")
+    shutil.copy(TEST_DXF, os.path.join(folder, "安全率室.dxf"))
+    bare = pj.Project(folder, dxf="安全率室.dxf", band_number=6)
+    bare.ensure_dirs()
+    noticed = io.StringIO()
+    keep, sys.stdout = sys.stdout, noticed
+    try:
+        table = run_project._absorption_table_for(bare)
+    finally:
+        sys.stdout = keep
+    check("材料一覧が無ければ表は作れない", table is None)
+
+    for seen in (plain, scaled):
+        shutil.rmtree(seen["folder"], ignore_errors=True)
+    shutil.rmtree(folder, ignore_errors=True)
+
+
+def test_decay_floor():
+    """[55] ★★どこまで読める減衰か（2026-09-20。不具合報告 ⑰）。
+
+    それまでは**曲線の最小値**を返していた。実測なら暗騒音が床を作るので
+    それでよいが、シミュレーションには暗騒音が無いので、シュレーダー積分は
+    応答の終端で**float64 の精度限界（−350 dB 前後）まで落ちるだけ**になる。
+    「余裕たっぷり」という誤った安心を与えるうえ、
+    **ISO 3382 の余裕の見張りが一度も効かなかった**。
+    """
+    print()
+    print("[55] どこまで読める減衰か（不具合報告 ⑰）")
+
+    # ---- ① 崖が無ければ従来どおり最小値（解析的な直線の減衰）----
+    straight = np.linspace(0.0, -90.0, 4000)
+    check("崖が無ければ最小値のまま（意味を変えない）",
+          np.isclose(rv._decay_floor_db(straight), -90.0),
+          f"{rv._decay_floor_db(straight):.2f} dB")
+
+    # ---- ② 報告そのままの形：−80 dB まで素直 → そこから垂直に −350 dB ----
+    curve = np.concatenate([np.linspace(0.0, -80.0, 3500),
+                            np.linspace(-80.0, -350.0, 500)])
+    floor = rv._decay_floor_db(curve)
+    check("★★崖の手前を返す（最小値 −350 dB を返さない）",
+          -85.0 < floor < -70.0, f"最小 {curve.min():.0f} dB / 床 {floor:.1f} dB")
+    check("★浅めに見る（読めるふりをしない）", floor > curve.min())
+
+    # ---- ③ 打ち切った応答のシュレーダー積分（実際に起きている形）----
+    rng = np.random.default_rng(0)
+    fs, t60 = 8000, 1.0
+    time = np.arange(int(fs * 2.5)) / fs
+    ir = rng.normal(size=time.size) * 10.0 ** (-3.0 * time / t60)
+    ir[int(fs * 1.6):] = 0.0                    # ★ここで音が無くなる（打ち切り）
+    energy = np.cumsum(ir[::-1] ** 2)[::-1]
+    schroeder = 10.0 * np.log10(np.maximum(energy / energy[0], 1.0e-300))
+    floor = rv._decay_floor_db(schroeder)
+    check("★★打ち切った応答で −3000 dB を返さない",
+          floor > -200.0, f"最小 {schroeder.min():.0f} dB / 床 {floor:.1f} dB")
+    check("★打ち切りより深くは読めないと言う",
+          floor <= schroeder[:int(fs * 1.6)].min() + 30.0,
+          f"床 {floor:.1f} dB / 打ち切り時点 {schroeder[int(fs * 1.6) - 1]:.1f} dB")
+
+    # ---- ④ ISO 3382 の余裕の見張りが効くようになる ----
+    # 打ち切りが浅いと T30（−35 dB）に必要な −45 dB まで見えない
+    short_ir = ir.copy()
+    short_ir[int(fs * 0.35):] = 0.0
+    energy = np.cumsum(short_ir[::-1] ** 2)[::-1]
+    shallow = 10.0 * np.log10(np.maximum(energy / energy[0], 1.0e-300))
+    needed = rv.DB_MIN - rv.DECAY_MARGIN_DB
+    check("★浅い打ち切りは『余裕が足りない』と分かる（前は −3000 dB で素通り）",
+          rv._decay_floor_db(shallow) > needed,
+          f"床 {rv._decay_floor_db(shallow):.1f} dB / 必要 {needed:.0f} dB")
+    check("★最小値のままだと素通りしていた（回帰の証拠）",
+          shallow.min() < needed, f"最小 {shallow.min():.0f} dB")
+
+    # ---- ⑤ 実物の経路（decay_curves）でも通る ----
+    result = rv.decay_curves(time, ir, frequencies=np.array([500.0, 1000.0]),
+                             verbose=False)
+    check("decay_curves の floor_db も崖の手前になる",
+          np.all(result["floor_db"] > -200.0),
+          f"{np.round(result['floor_db'], 1).tolist()}")
+
+
+class _PointsModel:
+    """測定点だけを持つ模型（`point_order` は点の数と並びしか見ない）。"""
+
+    def __init__(self, sources, receivers):
+        self.source_points = [np.asarray(p, dtype=float) for p in sources]
+        self.receiver_points = [np.asarray(p, dtype=float) for p in receivers]
+        self.receiver_layer_names = [f"rec{i + 1}" for i in range(len(receivers))]
+
+
+def test_point_order_changed():
+    """[56] ★★DXF を作り直すと測定点の並びが変わる（2026-09-20。不具合報告 ⑯）。
+
+    実案件で**画層名を 1 つ変えただけ**の DXF に差し替えたら、三角形は 779 枚とも
+    完全に同じなのに `POINT` の出てくる順が変わり、**src1 が S2 に、rec3 が R5 に**
+    なっていた。黙って番号が振り直され、経路キャッシュも効かなくなる
+    （実案件で 50 分回してから気づいて中止）。
+    """
+    print()
+    print("[56] 測定点の並びが変わったことに気づく（不具合報告 ⑯）")
+    import shutil
+    import tempfile
+
+    import dxf_faces as df
+    import path_cache as pc
+    import point_order as po
+    import project as pj
+
+    # ---- ① 変換の出口で並びを決め打ちにする（作り直しても動かない）----
+    points = [("rec1", (1.0, 2.0, 3.0)), ("src", (0.0, 0.0, 0.0)),
+              ("rec1", (1.0, 1.0, 3.0)), ("rec2", (5.0, 0.0, 1.0))]
+    first = df.sort_points(points)
+    shuffled = df.sort_points([points[i] for i in (2, 0, 3, 1)])
+    check("★★元の図面の並びが変わっても同じ順になる", first == shuffled,
+          f"{[n for n, _ in first]}")
+    check("画層でまとまり、その中は座標順",
+          [n for n, _ in first] == ["rec1", "rec1", "rec2", "src"]
+          and first[0][1] == (1.0, 1.0, 3.0), f"{first}")
+
+    # ---- ② 入れ替わりを見つける ----
+    before = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]]
+    now = [before[1], before[2], before[0]]
+    check("★入れ替わりを番号で返す", po._match_order(before, now) == [2, 0, 1],
+          str(po._match_order(before, now)))
+    check("並びが同じなら素通り",
+          po._match_order(before, before) == [0, 1, 2])
+    check("★位置そのものが違うなら何も言わない（点を動かしたのは当然なので）",
+          po._match_order(before, [[9.0, 9.0, 9.0]] + now[1:]) is None)
+
+    # ---- ③ 前回の計算と突き合わせる ----
+    folder = tempfile.mkdtemp(prefix="geosim_order_")
+    shutil.copy(TEST_DXF, os.path.join(folder, "並び室.dxf"))
+    project = pj.Project(folder, dxf="並び室.dxf", band_number=6)
+    project.ensure_dirs()
+    sources = [[1.0, 0.5, 0.5], [2.0, 0.5, 0.5]]
+    receivers = [[0.7, 2.0, 0.5], [0.7, 1.0, 0.5], [0.7, 1.5, 0.5]]
+    pj.write_points_csv(project.result_path("points"), sources, receivers)
+    check("前回の測定点を読み戻せる",
+          np.allclose(po.previous_points(project)["音源"], sources)
+          and len(po.previous_points(project)["受音点"]) == 3)
+
+    same = _PointsModel(sources, receivers)
+    check("並びが変わっていなければ何も言わない",
+          po.check_against_previous(project, same, verbose=False) == {})
+
+    # ★DXF を作り直して順番が入れ替わった、という状況
+    swapped = _PointsModel([sources[1], sources[0]],
+                           [receivers[0], receivers[2], receivers[1]])
+    fix = po.check_against_previous(project, swapped, verbose=False)
+    check("★★入れ替わりに気づく", fix.get("sources") == [1, 0]
+          and fix.get("receivers") == [0, 2, 1], str(fix))
+    back = [swapped.source_points[k] for k in fix["sources"]]
+    check("★その並びを当てれば前回に戻る", np.allclose(back, sources))
+
+    # ---- ④ すでに `測定点順.json` があるときは合成する ----
+    po.save(project, sources=[1, 0], receivers=[1, 0, 2], model=swapped)
+    applied = _PointsModel(back, receivers)     # 音源だけ既に当ててあるモデル
+    fix2 = po.check_against_previous(project, applied, applied=True, verbose=False)
+    check("当たっていれば音源は挙げない", "sources" not in fix2, str(fix2))
+    # 生の（DXF 順の）モデルから見たとき、保存済みの並びと**合成して**返すこと。
+    #   音源は保存済みの [1, 0] で既に直っているので挙がらない。
+    #   受音点は保存済みが [1, 0, 2] なので、そのうえで前回に戻す並びを出す
+    fix3 = po.check_against_previous(project, swapped, applied=False, verbose=False)
+    check("★保存済みの並びで直っているものは挙げない", "sources" not in fix3,
+          str(fix3))
+    check("★★DXF 順の番号で返す（保存済みの並びと合成する）",
+          fix3.get("receivers") == [0, 2, 1], str(fix3))
+    restored = [swapped.receiver_points[k] for k in fix3["receivers"]]
+    check("★その並びを当てれば前回の受音点に戻る",
+          np.allclose(restored, receivers))
+    os.remove(po.path(project))
+
+    # ---- ⑤ 経路キャッシュの「合わない理由」に対処法が付く ----
+    saved = {"source": [2.0, 0.5, 0.5]}
+    current = {"source": [1.0, 0.5, 0.5]}
+    known = {"source": sources, "receiver": receivers}
+    plain = pc.compare(dict(saved), dict(current))
+    hinted = pc.compare(dict(saved), dict(current), points=known)
+    check("従来どおり理由は出る", "音源の位置が違います" in plain)
+    check("★★『いまの 2 番目』と並びの直し方を添える",
+          "2 番目" in hinted and "測定点順.json" in hinted, hinted[-60:])
+    check("別の位置なら余計なことを言わない",
+          pc.compare(dict(saved), dict(current),
+                     points={"source": [[9.0, 9.0, 9.0]]}) == plain)
+
+    shutil.rmtree(folder, ignore_errors=True)
+
+
 def main():
     print("geosim 数値検証")
     print(f"  Python {sys.version.split()[0]} / numpy {np.__version__}")
@@ -6000,7 +6297,8 @@ def main():
                test_frequency_response, test_mode_shape, test_sections,
                test_dxf_faces, test_open_edges,
                test_multiple_sources, test_point_order, test_layer_controls,
-               test_rt_any):
+               test_rt_any, test_safety_factor_reaches_calculation,
+               test_decay_floor, test_point_order_changed):
         fn()
 
     failed = [name for name, ok in _results if not ok]

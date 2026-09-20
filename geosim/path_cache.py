@@ -93,8 +93,16 @@ def fingerprint(mesh, faces, source, receiver, rays, nref, radius, two_sided):
     }
 
 
-def compare(saved, current):
-    """指紋を突き合わせる。合っていれば None、違えば理由の文字列を返す。"""
+def compare(saved, current, points=None):
+    """指紋を突き合わせる。合っていれば None、違えば理由の文字列を返す。
+
+    points : {"source": [(3,), …], "receiver": [(3,), …]} | None
+        ★**いまのモデルの測定点を全部**渡すと、位置が合わないときに
+        「**順番が入れ替わっているだけ**ではないか」を見て対処法を添える
+        （2026-09-20。不具合報告 ⑯）。DXF を作り直すと `POINT` の出てくる順が
+        変わりうるので、同じモデルなのに**音線追跡からやり直しになる**
+        （実案件で 50 分回してから気づいて中止になった）。
+    """
     reasons = {
         "geometry": "モデルの形か法線が変わっています",
         "patches": "材料の割り当て方が変わってパッチの切れ目が動いています"
@@ -117,8 +125,36 @@ def compare(saved, current):
         else:
             same = a == b
         if not same:
-            return f"{reasons[key]}（{key}: 保存 {a!r} / いま {b!r}）"
+            message = f"{reasons[key]}（{key}: 保存 {a!r} / いま {b!r}）"
+            hint = _order_hint(key, a, points)
+            return message + hint if hint else message
     return None
+
+
+def _order_hint(key, saved, points):
+    """保存した点が**いまの別の測定点**と一致するなら、並びの入れ替えを疑う。
+
+    ★DXF を作り直すと `POINT` の順番が変わりうる（不具合報告 ⑯）。
+    「位置が違います」と言われても利用者には**形を変えた覚えが無い**ので、
+    ここで「順番では？」と添えないと原因に辿り着けない。
+    """
+    if key not in ("source", "receiver") or not points or saved is None:
+        return ""
+    candidates = points.get(key) or []
+    try:
+        saved_point = np.asarray(saved, dtype=float).reshape(3)
+    except Exception:
+        return ""
+    for index, point in enumerate(candidates):
+        if np.allclose(np.asarray(point, dtype=float).reshape(3), saved_point,
+                       atol=1.0e-6):
+            name = "音源" if key == "source" else "受音点"
+            return (f"。★**保存した位置はいまの {name} の {index + 1} 番目**です。"
+                    f"順番が入れ替わっているだけかもしれません"
+                    f"（DXF を作り直すと `POINT` の順が変わることがあります）。"
+                    f"`測定点順.json` で直せます: "
+                    f"python point_order.py <プロジェクト> --match-previous")
+    return ""
 
 
 def save(filename, pulses, mark, verbose=True):
@@ -144,7 +180,7 @@ def save(filename, pulses, mark, verbose=True):
     return filename
 
 
-def load(filename, mark=None, sound_velocity=None, verbose=True):
+def load(filename, mark=None, sound_velocity=None, verbose=True, points=None):
     """保存した経路を `PulseList` に戻す。使えなければ None。
 
     `mark` を渡すと指紋を突き合わせ、食い違えば理由を告げて None を返す。
@@ -171,7 +207,7 @@ def load(filename, mark=None, sound_velocity=None, verbose=True):
                 saved[key] = value.item()
             else:
                 saved[key] = value.tolist()
-        reason = compare(saved, mark)
+        reason = compare(saved, mark, points=points)
         if reason:
             if verbose:
                 print(f"[経路] 保存した経路は使えません: {reason}")

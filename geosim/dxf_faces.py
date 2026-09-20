@@ -388,7 +388,28 @@ def read_points(dxf_path):
             except ValueError:
                 pass
     keep()
-    return points
+    return sort_points(points)
+
+
+def sort_points(points):
+    """`POINT` を**画層 → 座標**の順に並べ直す（2026-09-20。不具合報告 ⑯）。
+
+    ★★**作り直しても番号が動かないようにする**ため。CAD は画層名を変えただけでも
+    `ENTITIES` の並びを変えることがあり、実案件では**三角形が 779 枚とも同じなのに
+    `src1` が S2 に、`rec3` が R5 になった**。`read_dxffile` は出てきた順に番号を
+    振るので、黙って `結果/src1/` の中身が別の点にすり替わる
+    （さらに経路キャッシュの指紋も合わなくなり、音線追跡からやり直しになる）。
+
+    ★**元の図面の並びには依存しない**決め方にしておけば、何度変換しても同じ番号になる。
+    画層名（`rec1` `rec2` …）でまとめてから座標で並べるので、
+    測線ごとに作った点も測線の順に並ぶ。
+    """
+    def key(item):
+        layer, xyz = item
+        return (str(layer).lower(), round(xyz[0], 6), round(xyz[1], 6),
+                round(xyz[2], 6))
+
+    return sorted(points, key=key)
 
 
 def _insunits_of(dxf_path):
@@ -754,6 +775,11 @@ def convert(dxf_path, out_path=None, accore=None, verbose=True, keep=False):
                                     in sorted(counts.items()))
                 print(f"[面に分解] 点（POINT）を {len(points)} 個"
                       f"引き継ぎました（画層: {detail}）")
+                # ★**並べ直したことを言う**（番号が変わりうるので黙って直さない）
+                print("[面に分解] ★点は画層 → 座標の順に並べ直しました"
+                      "（作り直しても `src1` `rec1` の番号が動かないように）。"
+                      "前に計算したことがある室なら、結果を見る前に "
+                      "`python point_order.py <プロジェクト>` で並びを確かめてください")
             else:
                 print("[面に分解] 元の図面に点（POINT）はありませんでした。"
                       "★音源・受音点は `src` / `rec` 画層の POINT で渡します")
