@@ -2520,9 +2520,9 @@ def test_result_naming():
     with open(path, encoding="utf-8-sig", newline="") as f:
         table = [row for row in csv.reader(f) if row]
     sections = [row[0] for row in table[1:]]
-    check("表の順番が 材料別 → 平均 → 理論値",
+    check("表の順番が 材料別 → 平均 → 室の諸元 → 理論値",
           sections == ["材料別の吸音率"] * 2 + ["平均吸音率"] * 3
-                      + ["残響時間理論値"] * 3, str(sections))
+                      + ["室の諸元"] * 3 + ["残響時間理論値"] * 3, str(sections))
     check("1 列目が区分・2 列目が項目・3 列目が面積・以降が周波数",
           table[0][:3] == ["区分", "項目", "面積_m2"]
           and [float(v) for v in table[0][3:]] == [125, 250, 500, 1000, 2000, 4000],
@@ -2540,6 +2540,28 @@ def test_result_naming():
     check("等価吸音面積 A = S・α（平均）も並べる",
           np.isclose(float([r for r in table if r[1] == "等価吸音面積_m2"][0][3]),
                      0.25))
+    # ★★容積が結果に残る（2026-09-18 ユーザー要望）。統計残響式は容積で決まる
+    #    （T = 0.161 V / A）のに、それまで**容積がどこにも書かれていなかった**ので
+    #    理論値を後から検算できなかった。周波数に依らないので 3 列目だけを埋める
+    spec = {row[1]: row for row in table[1:] if row[0] == "室の諸元"}
+    check("★容積が『室の諸元』に入る",
+          np.isclose(float(spec["容積_m3"][2]), 1.0), str(spec.get("容積_m3")))
+    check("総表面積と平均自由行程も並ぶ",
+          np.isclose(float(spec["総表面積_m2"][2]), 1.0)
+          and np.isclose(float(spec["平均自由行程_4V/S_m"][2]), 4.0),
+          f"{spec['総表面積_m2'][2]} / {spec['平均自由行程_4V/S_m'][2]}")
+    check("諸元は周波数に依らないので帯域の欄は空",
+          all(v == "" for v in spec["容積_m3"][3:]), str(spec["容積_m3"][3:]))
+    # ★これが容積を載せる意味：表だけで理論値の出どころを追える。
+    #   定数は丸めた 0.161 ではなく音速から出る 24ln10/c（20℃ で 0.1607）なので、
+    #   0.2% ほどずれる。ここは「表の数字から復元できる」ことの確認なので緩く見る
+    check("★Sabine が表の 容積 と 等価吸音面積 から復元できる（T ≈ 0.161 V / A）",
+          np.isclose(float(stat := 0.161 * float(spec["容積_m3"][2])
+                           / float([r for r in table
+                                    if r[1] == "等価吸音面積_m2"][0][3])),
+                     statistical["sabine"][0], rtol=5.0e-3),
+          f"{stat:.4f} / {statistical['sabine'][0]:.4f}")
+
     stat_rows = {row[1]: row for row in table[1:] if row[0] == "残響時間理論値"}
     check("理論値は 3 式",
           set(stat_rows) == {"sabine_s", "eyring_s", "eyring_knudsen_s"},
