@@ -111,15 +111,12 @@ def _sources(project, model=None):
     ★**全部返す**のが肝（不具合報告 ⑨）。`_source_of()` は 1 点しか返さないので、
     音源が 2 点あっても 2 点目が黙って捨てられていた。
     """
-    import read_dxffile as rd
-
     if project.source is not None:
         return [np.asarray(project.source, dtype=float)]
     if model is None:
-        model = _ordered(project,
-                         rd.read_model(project.dxf_path, unit=project.unit,
-                                       band_number=project.band_number,
-                                       verbose=False), verbose=False)
+        # ★**使い回すモデルから取る**（2026-09-20。高速化の提案 ①）。
+        #   点が欲しいだけでも DXF を丸ごと読むので、1 回 1.74 秒かかっていた
+        model = _model_for(project, verbose=False)
     return [np.asarray(p, dtype=float)
             for p in (getattr(model, "source_points", None) or [])]
 
@@ -335,11 +332,61 @@ def _paths_ready(project, receivers, verbose=True):
     return True
 
 
+# ★★**読んだモデルを使い回す**（2026-09-20。高速化の提案 ①）。
+#   実案件（階段教室・779 三角形）は 1 回読むのに **1.74 秒**かかるのに、
+#   1 条件を回すのに **17 回**読んでいた（音源 × 受音点ごとに 1 回ずつなど）。
+#   F-6「音線追跡は受音点をまたいで 1 回」と同じ考えをモデルの読み込みにも当てる。
+#   ★**幾何だけ使い回し、吸音率は毎回貼り直す**ので、条件（材料）を変えても正しい。
+_MODEL_CACHE = []          # [(鍵, model), …]。直近のものだけ持つ
+MODEL_CACHE_SIZE = 2       # 条件を行き来しても効くよう 2 つ
+REUSE_MODEL = True         # 切りたいときは False（参照実装との突き合わせ用）
+
+
+def clear_model_cache():
+    """使い回しているモデルを捨てる（DXF を差し替えたときなど）。"""
+    _MODEL_CACHE.clear()
+    _FACE_COUNT_CACHE.clear()
+
+
+def _geometry_key(project):
+    """**幾何が同じか**を見分ける鍵。★吸音率の値は入れない（F-9 と同じ約束）。
+
+    幾何を決めるのは DXF そのもの（中身が変われば更新時刻と大きさが変わる）と、
+    読み方（単位・法線の扱い・バンド数）と、手で直した分
+    （`normals.json` / `materials.json`）と、測定点の並び（`測定点順.json`）。
+    """
+    import point_order as po
+
+    dxf = os.path.abspath(project.dxf_path or "")
+    try:
+        status = os.stat(dxf)
+        stamp = (status.st_mtime_ns, status.st_size)
+    except OSError:
+        stamp = None
+    flipped, _note = project.load_flipped_faces()
+    return (dxf, stamp, project.unit, project.orient_normals,
+            project.band_number,
+            repr(sorted(flipped)),
+            repr(sorted((_face_materials_for(project) or {}).items())),
+            repr(po.load(project, verbose=False)))
+
+
 def _model_for(project, verbose=False):
-    """プロジェクトの設定で DXF を読む（吸音率・法線・面ごとの材料まで反映）。"""
+    """プロジェクトの設定で DXF を読む（吸音率・法線・面ごとの材料まで反映）。
+
+    ★**幾何が同じなら読み直さない**（`_geometry_key`）。吸音率は毎回貼り直す。
+    """
     import read_dxffile as rd
 
     table = _absorption_table_for(project, verbose=verbose)
+    key = _geometry_key(project) if REUSE_MODEL else None
+    if key is not None:
+        for saved_key, saved_model in _MODEL_CACHE:
+            if saved_key == key:
+                # ★幾何は同じ。**吸音率だけ貼り直す**（材料が変わっていても正しい）
+                return rd.apply_absorption(saved_model, table,
+                                           band_number=project.band_number,
+                                           verbose=verbose)
     model = rd.read_model(project.dxf_path, unit=project.unit,
                           absorption_table=table,
                           orient_normals=project.orient_normals,
@@ -347,7 +394,13 @@ def _model_for(project, verbose=False):
                           flip_faces=_flip_faces_for(project),
                           face_materials=_face_materials_for(project),
                           verbose=verbose)
-    return _ordered(project, model, verbose=verbose)
+    # ★**並べ替えてから**控える（`po.apply` はその場で入れ替えるので、
+    #   控えたあとにもう一度当てると二重に並べ替わる）
+    model = _ordered(project, model, verbose=verbose)
+    if key is not None:
+        _MODEL_CACHE.append((key, model))
+        del _MODEL_CACHE[:-MODEL_CACHE_SIZE]
+    return model
 
 
 def _source_of(project, model):
@@ -662,15 +715,8 @@ def _trace_once(project, receivers, verbose=True, progress=None):
     import absorption as ab
 
     try:
-        table = _absorption_table_for(project)
-        model = _ordered(project,
-                         rd.read_model(project.dxf_path, unit=project.unit,
-                                       absorption_table=table,
-                                       orient_normals=project.orient_normals,
-                                       band_number=project.band_number,
-                                       flip_faces=_flip_faces_for(project),
-                                       face_materials=_face_materials_for(project),
-                                       verbose=False), verbose=False)
+        # ★使い回すモデルから取る（高速化の提案 ①。中身は `_model_for` と同じ）
+        model = _model_for(project, verbose=False)
         source = (project.source if project.source is not None
                   else (model.source_points[0] if model.source_points else None))
         if source is None:
@@ -740,15 +786,12 @@ def _receivers(project, groups=False):
     ★**音源と重なる点は外す**（そこでは音圧が発散する）。半無響室のモデルは
       測線の起点（＝音源の位置）が受音点のレイヤに入っていた。
     """
-    import read_dxffile as rd
     if project.receiver is not None:
         points = [np.asarray(project.receiver, dtype=float)]
         names = [""]
     else:
-        probe = _ordered(project,
-                         rd.read_model(project.dxf_path, unit=project.unit,
-                                       band_number=project.band_number,
-                                       verbose=False), verbose=False)
+        # ★使い回すモデルから取る（高速化の提案 ①。`_sources` と同じ）
+        probe = _model_for(project, verbose=False)
         points = [np.asarray(p, dtype=float) for p in probe.receiver_points]
         names = list(getattr(probe, "receiver_layer_names", []) or
                      ["" for _ in points])
@@ -827,6 +870,9 @@ def _run_one(project, receiver, verbose=True, make_figures=True,
         #   渡さないと `procedure` が material_library から組み立て直すので、
         #   **安全率が掛からないまま計算される**（危険側・警告なし）
         absorption_table=_absorption_table_for(project, verbose=verbose),
+        # ★★**読み込み済みのモデルを渡す**（2026-09-20。高速化の提案 ①）。
+        #   渡さないと受音点ごと・音源ごとに DXF を読み直す（実案件で 1 回 1.74 秒）
+        model=_model_for(project, verbose=False),
         band_number=project.band_number,
         # ★帯域の幅（1/1 か 1/3）と下端（2026-08-26）
         band_width=getattr(project, "band_width", "1/1"),
@@ -1172,12 +1218,32 @@ def _owner_of(project, load):
     return parent if load(parent) else None
 
 
+_FACE_COUNT_CACHE = {}
+
+
 def _face_count(project):
-    """面数の照合用に DXF を軽く 1 回読む。"""
+    """面数の照合用に DXF を軽く 1 回読む。
+
+    ★**控えておく**（2026-09-20。高速化の提案 ①）。`normals.json` や
+    `materials.json` があると、この照合のためだけに DXF を丸ごと読んでいた。
+    ★`_model_for` の控えは使えない（`_geometry_key` がここを呼ぶので堂々巡りになる）
+    ので、面数だけの小さな控えを別に持つ。
+    """
     import read_dxffile as rd
+
+    dxf = os.path.abspath(project.dxf_path or "")
+    try:
+        status = os.stat(dxf)
+        stamp = (status.st_mtime_ns, status.st_size)
+    except OSError:
+        stamp = None
+    key = (dxf, stamp, project.unit, project.band_number)
+    if REUSE_MODEL and key in _FACE_COUNT_CACHE:
+        return _FACE_COUNT_CACHE[key]
     probe = rd.read_model(project.dxf_path, unit=project.unit,
                           band_number=project.band_number, verbose=False)
-    return len(probe.mesh)
+    _FACE_COUNT_CACHE[key] = len(probe.mesh)
+    return _FACE_COUNT_CACHE[key]
 
 
 def main():

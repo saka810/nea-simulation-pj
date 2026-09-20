@@ -1506,6 +1506,50 @@ def analyse_shells(triangles, tol=1.0e-9):
 # 本体
 # ------------------------------------------------------------------------------
 
+def apply_absorption(model, absorption_table=None, default_absorption=None,
+                     band_number=None, verbose=True):
+    """**読み込み済みのモデルに吸音率を貼り直す**（幾何は触らない）。→ model
+
+    ★★**同じモデルを何度も読み直さないため**（2026-09-20。高速化の提案 ①）。
+    実案件（階段教室・779 三角形）で `read_model` は **1 回 1.74 秒**かかるのに、
+    1 条件を回すのに **17 回**読んでいた（音源 × 受音点ごとに 1 回ずつなど）。
+    F-6 で「音線追跡は受音点をまたいで 1 回」にしたのと同じ考えがここにも要る。
+
+    ★**重い工程はすべて材料に依らない**（DXF の解析・三角形分割・法線・
+    同一平面グループ・容積・表面積・開いた辺）。材料に依るのは
+    **各面に吸音率を貼るところだけ**なので、そこだけやり直せばよい。
+
+    ★`Mesh.material` は**触らない**。`read_dxffile` はそこにレイヤ名
+    （面ごとの指定があればその材料名）を入れており、**吸音率の値では変わらない**。
+    だからパッチの切れ目も動かない（経路キャッシュが無効にならない）。
+
+    ★**`layer_materials`（レイヤ → 引けた材料のキー）は作り直す。**
+    『吸音率と理論値.csv』の材料別の集計がここから決まるため。
+    """
+    if model is None:
+        return model
+    if band_number is None:
+        # ★**いま貼ってある吸音率の長さ**から決める（モデルは band_number を持たない）。
+        #   既定 8 で決め打ちすると、6 バンドで回しているときに列がずれる
+        band_number = (len(model.mesh[0].absorption_coefficient)
+                       if model.mesh is not None and len(model.mesh)
+                       else DEFAULT_BAND_NUMBER)
+    if isinstance(absorption_table, str):
+        absorption_table = read_absorption_csv(absorption_table, band_number)
+
+    unresolved = set()
+    model.layer_materials = {}
+    for face in model.mesh:
+        face.absorption_coefficient = _resolve_absorption(
+            face.material, absorption_table, default_absorption, band_number,
+            unresolved, model.layer_materials)
+    if unresolved and verbose:
+        used = 0.1 if default_absorption is None else default_absorption
+        print(f"[read_dxffile] 警告: 吸音率が未指定のレイヤ {sorted(unresolved)} "
+              f"→ {used} を使用")
+    return model
+
+
 def read_model(file_name, unit=None, absorption_table=None, default_absorption=None,
                orient_normals="cad", reference_point=None, band_number=DEFAULT_BAND_NUMBER,
                source_layers=DEFAULT_SOURCE_LAYERS,

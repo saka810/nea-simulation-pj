@@ -43,6 +43,7 @@ def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref
             absorption_csv=None, absorption_kind=None, layer_assignment=None,
             band_number=rd.DEFAULT_BAND_NUMBER, band_width="1/1",
             band_start=None, material_library=None, absorption_table=None,
+            model=None,
             unit=None, orient_normals="cad", two_sided=False, volume=None,
             atmosphere=None, raylog_filename=None, raylog_max_rays=2000,
             pulse_filename=None, impulse_filename=None,
@@ -99,6 +100,12 @@ def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref
     material_library : absorption.MaterialLibrary | None
         材料一覧を直接渡す場合（GUI から編集したものなど）。
         指定すると absorption_csv より優先される。
+    model : read_dxffile.DxfModel | None
+        ★**読み込み済みのモデル**（2026-09-20。高速化の提案 ①）。渡すと DXF を
+        読み直さず、**吸音率だけ貼り直して**使う（`rd.apply_absorption`）。
+        実案件（階段教室）は 1 回読むのに 1.74 秒かかり、1 条件で 17 回読んでいた。
+        ★**このプロシージャはモデルを書き換えない**（読むだけ）ので、
+        受音点をまたいで同じものを渡してよい
     absorption_table : dict | None
         ★**出来あいの吸音率テーブル**（{レイヤ名またはキー: 垂直入射吸音率}）。
         渡すと `material_library` から組み立て直さずにそのまま使う。
@@ -229,10 +236,21 @@ def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref
 
     # 室形状・吸音率・音源・受音点をまとめて DXF から読む
     # 元コード132〜283行目に対応
-    report("モデルを読み込み中")
-    model = rd.read_model(dxf_filename, unit=unit, absorption_table=absorption_table,
-                          orient_normals=orient_normals, band_number=band_number,
-                          flip_faces=flip_faces, face_materials=face_materials)
+    #
+    # ★★**読み込み済みのモデルを渡されたら読み直さない**（2026-09-20。
+    #   高速化の提案 ①）。重い工程（DXF の解析・三角形分割・法線・同一平面
+    #   グループ・容積・表面積）は**材料に依らない**ので、吸音率だけ貼り直す。
+    #   実案件では 1 回 1.74 秒 × 17 回 ＝ 30 秒がここに消えていた
+    if model is None:
+        report("モデルを読み込み中")
+        model = rd.read_model(dxf_filename, unit=unit,
+                              absorption_table=absorption_table,
+                              orient_normals=orient_normals,
+                              band_number=band_number,
+                              flip_faces=flip_faces, face_materials=face_materials)
+    else:
+        report("モデルを使い回し中（吸音率だけ貼り直します）")
+        rd.apply_absorption(model, absorption_table, band_number=band_number)
     mesh = model.mesh
 
     # 作図ミスの洗い出し（TODO B-10）。計算に入る前に指摘するほうが早い

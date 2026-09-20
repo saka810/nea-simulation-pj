@@ -6309,6 +6309,140 @@ def test_point_order_changed():
     shutil.rmtree(folder, ignore_errors=True)
 
 
+def test_model_reuse():
+    """[57] ★★モデルを 1 回だけ読む（2026-09-20。高速化の提案 ①）。
+
+    実案件（階段教室・779 三角形）は 1 回読むのに **1.74 秒**かかるのに、
+    1 条件を回すのに **17 回**読んでいた（音源 × 受音点ごとに 1 回ずつなど）。
+    F-6「音線追跡は受音点をまたいで 1 回」と同じ考えをモデルの読み込みにも当てる。
+    """
+    print()
+    print("[57] モデルを 1 回だけ読む（高速化の提案 ①）")
+    import shutil
+    import tempfile
+
+    import project as pj
+    import read_dxffile as rd
+    import run_project
+
+    # ---- ① 吸音率だけ貼り直せる（幾何は触らない）----
+    model = rd.read_model(TEST_DXF, band_number=6, verbose=False)
+    before_material = [m.material for m in model.mesh]
+    before_vertexes = np.array([m.vertexes for m in model.mesh])
+    before_alpha = np.array([m.absorption_coefficient for m in model.mesh])
+
+    layer = model.mesh[0].material
+    rd.apply_absorption(model, {layer: np.full(6, 0.9)}, band_number=6,
+                        verbose=False)
+    after_alpha = np.array([m.absorption_coefficient for m in model.mesh])
+    check("★そのレイヤの吸音率が変わる",
+          np.allclose(after_alpha[0], 0.9), f"{after_alpha[0][0]:.3f}")
+    check("★★`Mesh.material` は変わらない（パッチの切れ目が動かない）",
+          [m.material for m in model.mesh] == before_material)
+    check("★頂点（幾何）は 1 つも動かない",
+          np.array_equal(np.array([m.vertexes for m in model.mesh]),
+                         before_vertexes))
+    check("表に無いレイヤは既定値に戻る（読み直したときと同じ）",
+          np.allclose(after_alpha[-1], 0.1) or after_alpha[-1][0] != 0.9,
+          f"{after_alpha[-1][0]:.3f}")
+    check("バンド数はモデルに貼ってある長さから決める（6 のまま）",
+          after_alpha.shape[1] == before_alpha.shape[1] == 6,
+          f"{after_alpha.shape}")
+
+    # ---- ② 使い回してよいかの鍵 ----
+    folder = tempfile.mkdtemp(prefix="geosim_reuse_")
+    shutil.copy(TEST_DXF, os.path.join(folder, "使い回し室.dxf"))
+    project = pj.Project(folder, name="使い回し室", dxf="使い回し室.dxf",
+                         band_number=6, rays=600, nref=4, radius=0.3,
+                         max_time=0.4, statistical=True, volume=6.0)
+    project.ensure_dirs()
+    key = run_project._geometry_key(project)
+    check("同じ設定なら鍵は同じ", key == run_project._geometry_key(project))
+
+    project.band_number = 8
+    check("★バンド数が変われば鍵も変わる",
+          run_project._geometry_key(project) != key)
+    project.band_number = 6
+    project.orient_normals = "flip"
+    check("★法線の扱いが変われば鍵も変わる",
+          run_project._geometry_key(project) != key)
+    project.orient_normals = "auto"
+
+    import point_order as po
+    po.save(project, sources=[0], receivers=[0], model=None)
+    check("★測定点の並びを変えれば鍵も変わる",
+          run_project._geometry_key(project) != key)
+    os.remove(po.path(project))
+    check("戻せば鍵も戻る", run_project._geometry_key(project) == key)
+
+    # ★吸音率の値は鍵に入れない（F-9 の経路キャッシュと同じ約束）
+    project.absorption_csv = SAMPLE_ABSORPTION
+    check("★★吸音率の指定を変えても鍵は変わらない（幾何は同じ）",
+          run_project._geometry_key(project) == key)
+    project.absorption_csv = None
+
+    # ---- ③ 通しで回して、読み込みが 1 回になり結果が変わらないこと ----
+    def measure(reuse, target):
+        run_project.REUSE_MODEL = reuse
+        run_project.clear_model_cache()
+        counted = {"n": 0}
+        original = rd.read_model
+
+        def spy(*args, **kwargs):
+            counted["n"] += 1
+            return original(*args, **kwargs)
+
+        rd.read_model = spy
+        sub = pj.Project(target, name="使い回し室", dxf="使い回し室.dxf",
+                         band_number=6, rays=600, nref=4, radius=0.3,
+                         max_time=0.4, statistical=True, volume=6.0)
+        sub.ensure_dirs()
+        try:
+            run_project.run(sub, verbose=False, make_figures=False)
+        finally:
+            rd.read_model = original
+            run_project.REUSE_MODEL = True
+        return counted["n"], sub
+
+    plain_dir = tempfile.mkdtemp(prefix="geosim_noreuse_")
+    shutil.copy(TEST_DXF, os.path.join(plain_dir, "使い回し室.dxf"))
+    without, plain = measure(False, plain_dir)
+    with_reuse, reused = measure(True, folder)
+    check("★★読み込みが 1 回になる", with_reuse == 1,
+          f"使い回しなし {without} 回 → あり {with_reuse} 回")
+    check("減っている（読み直しをやめた分）", with_reuse < without)
+
+    import filecmp
+    names = sorted(f for f in os.listdir(reused.path("結果", "rec1"))
+                   if f.endswith(".csv"))
+    same = all(filecmp.cmp(os.path.join(reused.path("結果", "rec1"), n),
+                           os.path.join(plain.path("結果", "rec1"), n),
+                           shallow=False) for n in names)
+    check("★★結果は 1 バイトも変わらない", same, f"{len(names)} ファイル")
+
+    # ---- ④ 条件をまたいでも使い回す（提案 ②。吸音率は鍵に入れないので只）----
+    counted = {"n": 0}
+    original = rd.read_model
+
+    def spy(*args, **kwargs):
+        counted["n"] += 1
+        return original(*args, **kwargs)
+
+    rd.read_model = spy
+    try:
+        # ★控えは消さない。材料だけ変えて**もう 1 条件**回す
+        reused.absorption_csv = SAMPLE_ABSORPTION
+        run_project.run(reused, verbose=False, make_figures=False)
+    finally:
+        rd.read_model = original
+    check("★★材料を変えた 2 条件目は 1 回も読まない（条件をまたいで使い回す）",
+          counted["n"] == 0, f"{counted['n']} 回")
+
+    run_project.clear_model_cache()
+    shutil.rmtree(folder, ignore_errors=True)
+    shutil.rmtree(plain_dir, ignore_errors=True)
+
+
 def main():
     print("geosim 数値検証")
     print(f"  Python {sys.version.split()[0]} / numpy {np.__version__}")
@@ -6336,7 +6470,7 @@ def main():
                test_dxf_faces, test_open_edges,
                test_multiple_sources, test_point_order, test_layer_controls,
                test_rt_any, test_safety_factor_reaches_calculation,
-               test_decay_floor, test_point_order_changed):
+               test_decay_floor, test_point_order_changed, test_model_reuse):
         fn()
 
     failed = [name for name, ok in _results if not ok]
