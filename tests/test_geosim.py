@@ -12,6 +12,7 @@ pytest は使わず、素の Python で走る（依存を増やさないため�
   無い場合は既定の吸音率で走る（結果の判定には影響しない項目だけを見る）。
 """
 
+import csv
 import inspect
 import io
 import os
@@ -6443,6 +6444,159 @@ def test_model_reuse():
     shutil.rmtree(plain_dir, ignore_errors=True)
 
 
+def test_triangle_cleanup():
+    """[58] ★三角形の形を直し、面積の無いものを落とす（2026-09-20）。
+
+    不具合報告 ⑬ の対応（2026-09-16）で残っていた宿題。実案件（階段教室）の
+    変換後の DXF に**面積 0 の三角形が 4 枚・最小角 1° 未満が 113 枚**あった。
+    ★**枚数は n 角形なら必ず n-2 枚で減らせない**ので、変えられるのは**形**だけ。
+    """
+    print()
+    print("[58] 三角形の形を直し、面積の無いものを落とす")
+    import dxf_faces as df
+
+    def quality(triangles):
+        angles, areas = [], []
+        for a, b, c in triangles:
+            a, b, c = (np.asarray(v, dtype=float) for v in (a, b, c))
+            areas.append(0.5 * float(np.linalg.norm(np.cross(b - a, c - a))))
+            angles.append(rd.triangle_min_angle(a, b, c))
+        return np.array(areas), np.array(angles)
+
+    # 実案件の `床_1F` に近い形（外周 13 点のドーナツ ＋ 穴 4 点）
+    outer = [(0, 0, 0), (20, 0, 0), (20, 4, 0), (24, 4, 0), (24, 18, 0),
+             (17, 18, 0), (17, 22, 0), (5, 22, 0), (5, 18, 0), (0, 18, 0),
+             (0, 12, 0), (-3, 12, 0), (-3, 4, 0)]
+    hole = [(6, 6, 0), (14, 6, 0), (14, 14, 0), (6, 14, 0)]
+
+    real = df.ear_clip_2d
+    df.ear_clip_2d = lambda ring: real(ring, pick_best=False)
+    try:
+        first = df.triangles_with_holes([outer, hole])
+    finally:
+        df.ear_clip_2d = real
+    best = df.triangles_with_holes([outer, hole])
+
+    area_first, angle_first = quality(first)
+    area_best, angle_best = quality(best)
+    check("枚数は変わらない（n 角形は n-2 枚が理論的な最小）",
+          len(first) == len(best), f"{len(first)} 枚 / {len(best)} 枚")
+    check("面積も変わらない（形を直すだけ）",
+          np.isclose(area_first.sum(), area_best.sum()),
+          f"{area_first.sum():.4f} / {area_best.sum():.4f}")
+    check("★★細長さが改善する（最小角の中央値）",
+          np.median(angle_best) > np.median(angle_first),
+          f"{np.median(angle_first):.2f}° → {np.median(angle_best):.2f}°")
+    check("★いちばん悪い三角形も良くなる",
+          angle_best.min() > angle_first.min(),
+          f"{angle_first.min():.2f}° → {angle_best.min():.2f}°")
+
+    # ★穴は開いたまま（面積が「外周 − 穴」と合うこと。2026-09-09 の約束）
+    want = 27.0 * 22.0 - 0.0     # 外周の面積は下で数える
+    from dxf_faces import signed_area_2d
+    outer_area = abs(signed_area_2d([(x, y) for x, y, _z in outer]))
+    hole_area = abs(signed_area_2d([(x, y) for x, y, _z in hole]))
+    check("★穴は開いたまま（面積 = 外周 − 穴）",
+          np.isclose(area_best.sum(), outer_area - hole_area),
+          f"{area_best.sum():.2f} / {outer_area - hole_area:.2f}")
+
+    # ---- ★面積の無い三角形は書き出さない ----
+    check("面積の無い三角形は 1 枚も無い", bool((area_best > 0.0).all()))
+    kept = [t for t in best
+            if rd.face_normal(np.asarray(t[0], dtype=float),
+                              np.asarray(t[1], dtype=float),
+                              np.asarray(t[2], dtype=float)) is not None]
+    check("★法線が決まらない三角形が残らない（交差判定の無駄な枝を作らない）",
+          len(kept) == len(best), f"{len(best) - len(kept)} 枚")
+
+    # ★一直線に並んだ点があっても、面積 0 の耳は切らない（質で選ぶので選ばれない）
+    flat = [(0, 0, 0), (5, 0, 0), (10, 0, 0), (10, 10, 0), (0, 10, 0)]
+    df.triangles_with_holes.dropped = 0
+    tris = df.triangles_with_holes([flat])
+    areas, _angles = quality(tris)
+    check("一直線の点があっても面積は合う（100 m2）",
+          np.isclose(areas.sum(), 100.0), f"{areas.sum():.4f}")
+    check("★面積 0 の三角形ができない", bool((areas > df.DEGENERATE_AREA).all()),
+          f"最小 {areas.min():.3e}")
+
+    # ★落とす仕掛けそのもの（万一できてしまったときの保険）
+    check("落とした枚数を数えている",
+          isinstance(df.triangles_with_holes.dropped, int))
+    check("しきい値は面積で決める（1e-9 m2）",
+          df.DEGENERATE_AREA == 1.0e-9, str(df.DEGENERATE_AREA))
+
+
+def test_conditions_shelf():
+    """[59] ★★条件の一括実行は音源ごとの棚も見る（2026-09-20）。
+
+    不具合報告 ⑪ ⑫ と同型で、最後に 1 か所だけ残っていたもの
+    （2026-09-16 の申し送り「`run_conditions()` の Excel 作り直しは棚を選ばない」）。
+    音源が 2 点以上あると結果は `結果/srcM/recN/` に入るのに、比較表と
+    条件ごとの Excel だけ `結果/` 直下を見ていたので、**何も作られなかった**。
+    """
+    print()
+    print("[59] 条件の一括実行が音源ごとの棚を見る")
+    import shutil
+    import tempfile
+
+    import project as pj
+    import source_mix as sx
+    import summary as sm
+
+    folder = tempfile.mkdtemp(prefix="geosim_shelf_")
+    project = pj.Project(folder, name="棚室", dxf="棚室.dxf", band_number=6)
+    project.ensure_dirs()
+
+    bands = [125.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0]
+    conditions = [("条件表.xlsx", "現状"), ("条件表.xlsx", "対策案")]
+
+    # 音源 2 点 × 受音点 1 点ぶんの「まとめ表」を棚の中に作る
+    for shelf, offset in (("src1", 0.0), ("src2", 0.5)):
+        for _file_name, sheet in conditions:
+            sub = sx.tagged(project, tag=shelf)
+            sub.condition_csv = "条件表.xlsx"
+            sub.condition_sheet = sheet
+            root = sm.results_root(sub)
+            os.makedirs(root, exist_ok=True)
+            base = 1.0 + offset + (0.2 if sheet == "対策案" else 0.0)
+            sm._write(os.path.join(root, sub.prefixed(sm.REVERBERATION_FILE)),
+                      bands, [("平均", "T30_s",
+                               [base + 0.01 * k for k in range(len(bands))])])
+
+    check("棚が 2 つ見える", project.source_folders() == ["src1", "src2"],
+          str(project.source_folders()))
+
+    # ★直したいのはここ：棚を選ばないと「結果がまだありません」で終わる
+    plain = sm.write_condition_summary(project, conditions, verbose=False)
+    check("★★棚を選ばないと比較表は作れない（これが不具合の姿）", plain is None,
+          str(plain))
+
+    made = {}
+    for shelf in project.source_folders():
+        made[shelf] = sm.write_condition_summary(
+            sx.tagged(project, tag=shelf), conditions, verbose=False)
+    check("★棚ごとに比較表ができる", all(made.values()), str(made))
+    for shelf, path in made.items():
+        check(f"  {shelf} の比較表はその棚の中にある",
+              os.path.dirname(path) == os.path.join(folder, "結果", shelf),
+              os.path.relpath(path, folder))
+
+    # 中身も棚ごとに違う（src1 と src2 の値を取り違えていない）
+    def first_value(path):
+        with open(path, encoding="utf-8-sig", newline="") as handle:
+            rows = [r for r in csv.reader(handle) if r]
+        return float(rows[1][3])
+
+    check("★棚ごとに中身が違う（取り違えていない）",
+          not np.isclose(first_value(made["src1"]), first_value(made["src2"])),
+          f"src1 {first_value(made['src1']):.2f} / src2 {first_value(made['src2']):.2f}")
+    check("条件が 2 つとも載る",
+          len({r[0] for r in list(csv.reader(
+              open(made["src1"], encoding="utf-8-sig")))[1:] if r}) == 2)
+
+    shutil.rmtree(folder, ignore_errors=True)
+
+
 def main():
     print("geosim 数値検証")
     print(f"  Python {sys.version.split()[0]} / numpy {np.__version__}")
@@ -6470,7 +6624,8 @@ def main():
                test_dxf_faces, test_open_edges,
                test_multiple_sources, test_point_order, test_layer_controls,
                test_rt_any, test_safety_factor_reaches_calculation,
-               test_decay_floor, test_point_order_changed, test_model_reuse):
+               test_decay_floor, test_point_order_changed, test_model_reuse,
+               test_triangle_cleanup, test_conditions_shelf):
         fn()
 
     failed = [name for name, ok in _results if not ok]

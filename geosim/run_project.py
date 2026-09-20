@@ -472,32 +472,55 @@ def run_conditions(project, conditions=None, verbose=True, make_figures=True,
         project.source = np.asarray(results[0]["soundsource_point"]).tolist()
     project.save()
 
-    # 条件を横に並べた比較表。**全条件が終わってから**でないと作れない
-    comparison = None
-    try:
-        comparison = sm.write_condition_summary(project, done, verbose=verbose)
-    except Exception as error:
-        print(f"[run] 条件の比較表を作れませんでした: "
-              f"{type(error).__name__}: {error}")
+    # 条件を横に並べた比較表。**全条件が終わってから**でないと作れない。
+    # ★★**音源ごとの棚も回す**（2026-09-20）。音源が 2 点以上あると結果は
+    #   `結果/srcM/recN/` に入るのに、ここは棚を選んでいなかったので
+    #   `結果/` 直下のまとめ表を探して「結果がまだありません」で終わっていた
+    #   （不具合報告 ⑪ ⑫ と同型の、最後に残っていた 1 か所）。
+    #   合成の棚（`合成_平均` など）も同じように比較したいので一緒に回す
+    import source_mix as sx
+
+    shelves = project.source_folders() or [None]
+    comparisons = {}
+    for tag in shelves:
+        base = sx.tagged(project, tag=tag) if tag else project
+        try:
+            comparisons[tag] = sm.write_condition_summary(base, done,
+                                                          verbose=verbose)
+        except Exception as error:
+            comparisons[tag] = None
+            print(f"[run] 条件の比較表を作れませんでした"
+                  f"{f'（{tag}）' if tag else ''}: "
+                  f"{type(error).__name__}: {error}")
 
     # 比較表ができたので、条件ごとの Excel を作り直して比較シートを入れる
     # （条件ごとの Excel は計算の途中で書いているので、まだ比較表が無かった）
-    if comparison is not None:
-        try:
-            import workbook as wb
+    made = 0
+    try:
+        import workbook as wb
+        for tag in shelves:
+            if comparisons.get(tag) is None:
+                continue
             for file_name, sheet in done:
-                sub = pj.Project(project.folder,
-                                 **{k: getattr(project, k) for k in pj.DEFAULTS})
+                # ★**棚を引き継ぐ**（`pj.DEFAULTS` に `source_tag` は入らないので、
+                #   素直に組み直すと棚が落ちて `結果/` 直下を見てしまう）
+                sub = sx.tagged(project, tag=tag)
                 sub.condition_csv = file_name
                 sub.condition_sheet = sheet or ""
                 wb.write(sub, verbose=False)
-            if verbose:
-                print(f"[run] 条件ごとの Excel に比較シートを入れました"
-                      f"（{len(done)} 件）")
-        except Exception as error:
-            print(f"[run] 結果一式（Excel）を作れませんでした: "
-                  f"{type(error).__name__}: {error}")
-    return {"conditions": done, "results": results, "comparison": comparison}
+                made += 1
+        if verbose and made:
+            print(f"[run] 条件ごとの Excel に比較シートを入れました（{made} 件"
+                  f"{f' / 棚 {len(shelves)} 個' if shelves != [None] else ''}）")
+    except Exception as error:
+        print(f"[run] 結果一式（Excel）を作れませんでした: "
+              f"{type(error).__name__}: {error}")
+    # ★戻り値は従来どおり**1 つ**（棚を選んでいないときのもの）にしておく。
+    #   呼び出し側（画面・テスト）がパスを 1 つ期待しているため
+    comparison = comparisons.get(None) or next(
+        (v for v in comparisons.values() if v), None)
+    return {"conditions": done, "results": results, "comparison": comparison,
+            "comparisons": comparisons}
 
 
 def log_path(project):
