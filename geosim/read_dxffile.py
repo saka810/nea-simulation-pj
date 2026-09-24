@@ -1925,6 +1925,14 @@ def read_model(file_name, unit=None, absorption_table=None, default_absorption=N
                      else np.mean([np.mean(t, axis=0) for t in triangles], axis=0))
             model.enclosure = encloses_point(triangles, probe)
         enclosed = model.is_closed or (model.enclosure or 0.0) >= ENCLOSURE_THRESHOLD
+        # ★★**自由端は開いていれば必ず数える**（2026-09-20。不具合報告 ㉒）。
+        #   以前は下の「容積を出すとき」の中でしか数えていなかったので、
+        #   **囲まれていない開いたモデルでは `free_edges` が既定値の [] のまま**だった。
+        #   `[]` は「自由端が無い」ではなく「数えていない」の意味になっていて、
+        #   `check_model` がそれを信じると**開いたモデルに「面は閉じています」と言う**
+        #   （test2.dxf：床と壁 2 面。`open_edges.py` は自由端 11 本と正しく数える）
+        if not model.is_closed:
+            model.free_edges = uncovered_open_edges(triangles)
         if enclosed:
             model.volume = abs(volume_from_normals(
                 triangles, [f.normal for f in model.mesh]))
@@ -1934,7 +1942,6 @@ def read_model(file_name, unit=None, absorption_table=None, default_absorption=N
             #   覆われていない自由端があると、宙に浮いた片面の板などが混ざっていて
             #   値が黙って狂うので、必ず知らせる
             if not model.is_closed:
-                model.free_edges = uncovered_open_edges(triangles)
                 if model.free_edges:
                     length = sum(float(np.linalg.norm(b - a)) for a, b in model.free_edges)
                     model.volume_note = (
@@ -2048,26 +2055,39 @@ def check_model(model, absorption_table=None, verbose=True,
     #   一面反射板の検討もふつうにある）。`closed_expected` で言ってもらい、
     #   **「閉じている」と言われたときだけ作図ミスとして扱う**。
     #   何も言われなければ（None）、どちらの可能性もあると伝える
-    if not model.is_closed and closed_expected is not False:
-        level = "info" if (model.open_edges < 4 or closed_expected is None) \
-            else "warning"
-        tail = ("。**閉じた室を想定しているので作図ミスです**"
-                if closed_expected else
-                "（閉じた室のつもりなら作図ミス。"
-                "一面反射板などなら問題ありません）")
-        add(level, f"開いた辺が {model.open_edges} 本あります" + tail)
+    #
+    # ★★**判定は「自由端」だけで行う**（2026-09-20。不具合報告 ㉒）。
+    #   以前はここだけ**開いた辺の総数**（`open_edges`・`is_closed`）で判定していたので、
+    #   **T字接合しか無い閉じた室でも「作図ミスです」と出ていた**
+    #   （視聴覚室で 68 本・4 かたまり。壁を下部・上部・天井裏に割ってあるだけ）。
+    #   開いた辺は 2 種類あって混ぜない（2026-08-19 の約束）：
+    #     ・自由端 … 他の辺に覆われていない。宙に浮いた板・面の抜け（作図ミスの候補）
+    #     ・T字接合 … 他の辺に覆われている。面は閉じている（壁を帯で割っただけ）
+    #   毎回「作図ミス」と出ると、本当の自由端が出たときに見分けがつかない
+    t_joints = max(int(model.open_edges) - len(model.free_edges), 0)
     if model.free_edges:
         length = sum(float(np.linalg.norm(b - a)) for a, b in model.free_edges)
         body = (f"自由端（他の辺に覆われていない開いた辺）が "
                 f"{len(model.free_edges)} 本・計 {length:.2f} m あります。"
                 f"宙に浮いた片面の板や面の抜けです")
+        where = "`python open_edges.py <DXF>` で場所を確かめられます"
         if closed_expected is False:
             # 閉じていないモデルとして扱う設定。★それでも**容積は目安**になる
             add("info", body + "（閉じていないモデルとして扱う設定なので"
                                "想定どおりです。ただし容積は目安になります）")
+        elif closed_expected:
+            add("warning", body + "。**閉じた室を想定しているので作図ミスです**。"
+                                  "容積は目安になります。" + where)
         else:
-            add("warning", body + "。容積は目安になります。"
-                                  "`python open_edges.py <DXF>` で場所を確かめられます")
+            add("warning", body + "（閉じた室のつもりなら作図ミス。"
+                                  "一面反射板などなら問題ありません）。"
+                                  "容積は目安になります。" + where)
+    if t_joints:
+        # ★T字接合は**作図ミスではない**。数だけ知らせる（情報）
+        closed_note = ("自由端は無いので**面は閉じています**"
+                       if not model.free_edges else "面の継ぎ目で、作図ミスではありません")
+        add("info", f"T字接合（他の辺に覆われた開いた辺）が {t_joints} 本あります。"
+                    f"壁を帯や開口で分割したときにできる継ぎ目で、{closed_note}")
     if not model.winding_consistent:
         add("warning", "巻き順が一貫していません"
                        "（隣り合う面で法線が反対を向いている箇所があります）")

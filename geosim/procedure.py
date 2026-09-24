@@ -43,7 +43,7 @@ def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref
             absorption_csv=None, absorption_kind=None, layer_assignment=None,
             band_number=rd.DEFAULT_BAND_NUMBER, band_width="1/1",
             band_start=None, material_library=None, absorption_table=None,
-            model=None,
+            model=None, absorption_stages=None,
             unit=None, orient_normals="cad", two_sided=False, volume=None,
             atmosphere=None, raylog_filename=None, raylog_max_rays=2000,
             pulse_filename=None, impulse_filename=None,
@@ -106,6 +106,10 @@ def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref
         実案件（階段教室）は 1 回読むのに 1.74 秒かかり、1 条件で 17 回読んでいた。
         ★**このプロシージャはモデルを書き換えない**（読むだけ）ので、
         受音点をまたいで同じものを渡してよい
+    absorption_stages : dict | None
+        ★吸音率の各段（カタログ値・安全率・上限の丸め）。『吸音率と理論値.csv』に
+        書くためだけに使う（計算には効かない）。`run_project` が
+        `condition_table.absorption_stages()` で作って渡す（不具合報告 ㉑）
     absorption_table : dict | None
         ★**出来あいの吸音率テーブル**（{レイヤ名またはキー: 垂直入射吸音率}）。
         渡すと `material_library` から組み立て直さずにそのまま使う。
@@ -306,7 +310,14 @@ def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref
             # **1 枚にまとめて書く**（材料別の吸音率 → 平均吸音率 → 理論値）。
             # 以前は rt_statistical.csv と surface.csv に分けていた
             import project as pj
-            pj.write_room_csv(room_filename, statistical_result, frequencies)
+            # ★★**音線追跡が実際に使った垂直入射吸音率**も残す（不具合報告 ㉑）。
+            #   モデルの面から取るので、計算そのものの値と食い違わない
+            normal = {}
+            for face in mesh:
+                normal.setdefault(face.material,
+                                  np.asarray(face.absorption_coefficient, dtype=float))
+            pj.write_room_csv(room_filename, statistical_result, frequencies,
+                              normal=normal, stages=absorption_stages)
             print(f"[統計残響] 材料別の吸音率・平均吸音率・理論値: {room_filename}")
 
     # ★吸音材だけ変えた計算は、保存した経路から再開できる（F-9）。

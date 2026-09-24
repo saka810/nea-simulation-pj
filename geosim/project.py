@@ -918,8 +918,16 @@ ROOM_SECTION_MEAN = "平均吸音率"
 #   ᾱ → A → V → T と読めるように**理論値の直前**に置く
 ROOM_SECTION_SPEC = "室の諸元"
 ROOM_SECTION_STATISTICAL = "残響時間理論値"
-ROOM_SECTIONS = (ROOM_SECTION_MATERIALS, ROOM_SECTION_MEAN,
-                 ROOM_SECTION_SPEC, ROOM_SECTION_STATISTICAL)
+# ★★**吸音率の各段**（2026-09-20。不具合報告 ㉑）。「材料別の吸音率」は
+#   **統計式が使う乱入射の値**（安全率と上限の丸めを通したあと）で、
+#   カタログ値も**音線追跡が実際に使った垂直入射の値**もどこにも残っていなかった
+ROOM_SECTION_CATALOG = "材料別の吸音率（カタログ値）"
+ROOM_SECTION_FACTOR = "安全率"
+ROOM_SECTION_NORMAL = "材料別の吸音率（垂直入射）"
+ROOM_SECTION_CLIPPED = "上限に丸めた帯域"
+ROOM_SECTIONS = (ROOM_SECTION_MATERIALS, ROOM_SECTION_CATALOG,
+                 ROOM_SECTION_FACTOR, ROOM_SECTION_NORMAL, ROOM_SECTION_CLIPPED,
+                 ROOM_SECTION_MEAN, ROOM_SECTION_SPEC, ROOM_SECTION_STATISTICAL)
 
 # 「平均吸音率」の区分に入れる行。**平均吸音率だけでなく等価吸音面積も入れる**。
 # 統計残響式は A = Sᾱ（Sabine）／-S ln(1-ᾱ)（Eyring）から T を出すので、
@@ -941,7 +949,8 @@ ROOM_SPEC_ROWS = (("容積_m3", "volume"),
                   ("平均自由行程_4V/S_m", "mean_free_path"))
 
 
-def write_room_csv(filename, statistical, frequencies=None):
+def write_room_csv(filename, statistical, frequencies=None, normal=None,
+                   stages=None):
     """室の吸音と残響時間理論値を**1 つの CSV**にする。
 
     元は `rt_statistical.csv`（統計残響式）と `surface.csv`（材料別の面積・吸音率）
@@ -964,9 +973,22 @@ def write_room_csv(filename, statistical, frequencies=None):
 
     **周波数は横**（`table.py` の共通ルール。「区分付きの表」の形）。
 
+    ★★**吸音率の各段も並べる**（2026-09-20。不具合報告 ㉑）。
+    「材料別の吸音率」は**統計式が使う乱入射の値**（安全率と上限の丸めを通したあと）。
+    そのすぐ下に、渡されたものだけ足す：
+
+        材料別の吸音率（カタログ値）,壁B（残響室法）,,0.05,0.10,0.45,…  ← 吸音率シートの値
+        安全率,壁B,0.8,                                              ← 掛けたレイヤだけ
+        材料別の吸音率（垂直入射）,壁B,,0.026,0.051,0.24,…            ← ★音線追跡が使った値
+        上限に丸めた帯域,天井_GW,,,,0.99,0.99,…                      ← 丸める前の値（丸めた帯域だけ）
+
     引数:
         statistical … `reverberation.statistical_reverberation()` の戻り値
                       （`['surface']` に材料別の面積・吸音率が入っている）
+        normal      … {材料: (nb,)} **音線追跡が実際に使った垂直入射吸音率**
+                      （`procedure` がモデルの面から取る＝計算そのものの値）
+        stages      … `condition_table.absorption_stages()` の戻り値
+                      （カタログ値・安全率・丸め。`run_project` が作る）
     """
     import table as tb
 
@@ -977,6 +999,30 @@ def write_room_csv(filename, statistical, frequencies=None):
     rows = [(ROOM_SECTION_MATERIALS, name, area, alpha)
             for name, area, alpha in zip(surface["names"], surface["areas"],
                                          surface["absorption"])]
+    # ★吸音率の各段（不具合報告 ㉑）。渡されたものだけ足す（無ければ従来どおり）
+    stages = stages or {}
+    names = list(surface["names"])
+    for name in names:
+        stage = stages.get(name)
+        if stage is not None:
+            kind = "残響室法" if stage["kind"] != "normal" else "垂直入射"
+            rows.append((ROOM_SECTION_CATALOG, f"{name}（{kind}）", None,
+                         stage["catalog"]))
+    for name in names:
+        stage = stages.get(name)
+        if stage is not None and stage.get("factor"):
+            rows.append((ROOM_SECTION_FACTOR, name, stage["factor"], None))
+    if normal:
+        for name in names:
+            if name in normal:
+                rows.append((ROOM_SECTION_NORMAL, name, None,
+                             np.asarray(normal[name], dtype=float)))
+    for name in names:
+        stage = stages.get(name)
+        if stage is not None and np.any(stage["clipped"]):
+            # ★丸める前の値を、丸めた帯域だけに書く（ほかは空欄）
+            before = np.where(stage["clipped"], stage["after"], np.nan)
+            rows.append((ROOM_SECTION_CLIPPED, name, None, before))
     for label, key in ROOM_MEAN_ROWS:
         # 面積の欄は平均吸音率の行だけ埋める（総表面積）。他は帯域の値だけ
         area = surface["total_area"] if key == "mean_absorption" else None

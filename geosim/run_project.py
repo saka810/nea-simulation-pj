@@ -63,6 +63,55 @@ def _freeze_condition_name(project, verbose=True):
               f"（結果ファイル名にもこの名前が付きます）")
 
 
+_STALE_WARNED = set()
+
+
+def _warn_stale_points(project, verbose=True):
+    """`project.json` の音源・受音点が **DXF と食い違っていたら知らせる**。→ 食い違いの一覧
+
+    ★★2026-09-20（不具合報告 ⑲）。以前は計算のたびに**使った音源を
+    `project.json` へ書き戻していた**ので、一度でも計算した室にはその値が残っている。
+    `_sources()` は `project.json` を DXF より優先するので、**CAD で音源を動かしても
+    古い位置のまま回る**（実案件で 100 万本・40 分が無駄になった。警告も出なかった）。
+
+    書き戻しはもうしないが、**過去の実行で書かれた値は残り続ける**ので、ここで見張る。
+    ★**勝手に消さない**（利用者がわざと指定している場合がある）。知らせるだけ。
+    ★同じ食い違いは 1 回だけ言う（条件の一括実行で条件の数だけ出ないように）。
+    """
+    found = []
+    wanted = [("音源", "source", "source_points"),
+              ("受音点", "receiver", "receiver_points")]
+    if all(getattr(project, key, None) is None for _l, key, _a in wanted):
+        return found
+    try:
+        model = _model_for(project, verbose=False)
+    except Exception:
+        return found            # 読めなければ本計算の側で理由が出る
+    for label, key, attr in wanted:
+        given = getattr(project, key, None)
+        points = list(getattr(model, attr, None) or [])
+        if given is None or not points:
+            continue
+        given = np.asarray(given, dtype=float).reshape(-1)[:3]
+        if any(np.allclose(given, np.asarray(q, dtype=float), atol=1.0e-6)
+               for q in points):
+            continue
+        found.append((label, key, given, points))
+        mark = (os.path.abspath(project.dxf_path or ""), key,
+                tuple(np.round(given, 6)))
+        if verbose and mark not in _STALE_WARNED:
+            _STALE_WARNED.add(mark)
+            shown = " / ".join(str(np.round(np.asarray(q, dtype=float), 3).tolist())
+                               for q in points[:4])
+            print(f"[run] ★★project.json の{label}が DXF と違います"
+                  f"（project.json: {np.round(given, 3).tolist()} ／ DXF: {shown}"
+                  f"{' …' if len(points) > 4 else ''}）")
+            print(f"[run]   ★いまは **project.json の{label}**で計算します。"
+                  f"DXF を更新したのなら、project.json の \"{key}\" を null に"
+                  f"戻してください（null なら DXF から取ります）")
+    return found
+
+
 def _stem_is_named(project):
     """条件表のファイル名そのものが条件名になっているか（`条件A.xlsx` など）。"""
     stem = os.path.splitext(os.path.basename(project.condition_path or ""))[0]
@@ -87,6 +136,7 @@ def run(project, verbose=True, make_figures=True, progress=None,
     if save_settings:
         project.save()  # 実行した条件を必ず残す（あとで再現できるように）
     _freeze_condition_name(project, verbose=verbose)
+    _warn_stale_points(project, verbose=verbose)
 
     dxf = project.dxf_path
     if not dxf or not os.path.exists(dxf):
@@ -101,8 +151,7 @@ def run(project, verbose=True, make_figures=True, progress=None,
                             make_figures=make_figures, progress=progress,
                             reuse_paths=reuse_paths)
     return _run_source(project, verbose=verbose, make_figures=make_figures,
-                       progress=progress, reuse_paths=reuse_paths,
-                       save_settings=save_settings)
+                       progress=progress, reuse_paths=reuse_paths)
 
 
 def _sources(project, model=None):
@@ -173,7 +222,7 @@ def _run_sources(project, sources, verbose=True, make_figures=True,
                   f"{np.round(point, 3).tolist()} → 結果/{sub.source_folder}/")
         results.append(_run_source(
             sub, verbose=verbose, make_figures=make_figures,
-            reuse_paths=reuse_paths, save_settings=False, write_points=False,
+            reuse_paths=reuse_paths, write_points=False,
             progress=_prefixed(progress, f"音源{order + 1}/{len(sources)} ")))
 
     _write_points(project, model=results[0].get("model"), sources=sources,
@@ -196,7 +245,7 @@ def _sub_source(project, order, point):
 
 
 def _run_source(project, verbose=True, make_figures=True, progress=None,
-                reuse_paths=True, save_settings=True, write_points=True):
+                reuse_paths=True, write_points=True):
     """**音源 1 点ぶん**の計算（受音点は全部）。従来の `run()` の中身。"""
     receivers = _receivers(project)
     if len(receivers) <= 1:
@@ -204,10 +253,8 @@ def _run_source(project, verbose=True, make_figures=True, progress=None,
         result = _run_one(_sub_project(project, 0),
                           receivers[0] if receivers else None,
                           verbose=verbose, make_figures=make_figures,
-                          write_back=False,
                           head_azimuth=project.head_azimuth_for(0),
-                          reuse_paths=reuse_paths, progress=progress,
-                          save_settings=save_settings)
+                          reuse_paths=reuse_paths, progress=progress)
         if write_points:
             _write_points(project, receivers, result.get("model"), verbose=verbose)
         _write_summaries(project, verbose=verbose)
@@ -224,9 +271,9 @@ def _run_source(project, verbose=True, make_figures=True, progress=None,
                 print(f"[run] ── 受音点 {k + 1}/{len(receivers)}"
                       f"（保存した経路から再開）")
             results.append(_run_one(sub, point, verbose=verbose,
-                                    make_figures=make_figures, write_back=False,
+                                    make_figures=make_figures,
                                     head_azimuth=project.head_azimuth_for(k),
-                                    reuse_paths=True, save_settings=save_settings,
+                                    reuse_paths=True,
                                     statistical_result=shared_statistical,
                                     progress=_prefixed(progress,
                                                        f"受音点{k + 1}/{len(receivers)} ")))
@@ -258,10 +305,10 @@ def _run_source(project, verbose=True, make_figures=True, progress=None,
         # ★project.json は 1 つだけなので受音点は書き戻さない。
         #   書き戻すと `receiver` が 1 点に固定され、次回から 1 点しか回らなくなる
         results.append(_run_one(sub, point, verbose=verbose,
-                                make_figures=make_figures, write_back=False,
+                                make_figures=make_figures,
                                 head_azimuth=project.head_azimuth_for(k),
                                 traced_history=None if traced is None else traced[k],
-                                reuse_paths=False, save_settings=save_settings,
+                                reuse_paths=False,
                                 statistical_result=shared_statistical,
                                 progress=_prefixed(progress,
                                                    f"受音点{k + 1}/{len(receivers)} ")))
@@ -467,9 +514,9 @@ def run_conditions(project, conditions=None, verbose=True, make_figures=True,
         done.append((file_name, sheet))
 
     # 設定を 1 回だけ残す。★条件は**呼ばれたときのまま**（一括で回した最後の条件に
-    #   すり替えない）。音源だけは DXF から取った値を書き戻しておく
-    if results and results[0].get("soundsource_point") is not None:
-        project.source = np.asarray(results[0]["soundsource_point"]).tolist()
+    #   すり替えない）。
+    # ★★**音源は書き戻さない**（2026-09-20。不具合報告 ⑲）。書き戻すと次の実行で
+    #   `_sources()` がそれを DXF より優先し、CAD で音源を動かしても効かなくなる
     project.save()
 
     # 条件を横に並べた比較表。**全条件が終わってから**でないと作れない。
@@ -860,9 +907,8 @@ def _sub_project(project, index):
 
 
 def _run_one(project, receiver, verbose=True, make_figures=True,
-             write_back=True, head_azimuth=None, traced_history=None,
-             reuse_paths=True, statistical_result=None, progress=None,
-             save_settings=True):
+             head_azimuth=None, traced_history=None,
+             reuse_paths=True, statistical_result=None, progress=None):
     project.ensure_dirs()
     # 前回の結果を消してから回す。条件を変えたときに古いファイルが残っていると、
     # 今回の条件の値だと思って読んでしまう。
@@ -896,6 +942,8 @@ def _run_one(project, receiver, verbose=True, make_figures=True,
         # ★★**読み込み済みのモデルを渡す**（2026-09-20。高速化の提案 ①）。
         #   渡さないと受音点ごと・音源ごとに DXF を読み直す（実案件で 1 回 1.74 秒）
         model=_model_for(project, verbose=False),
+        # ★吸音率の各段（カタログ値・安全率・丸め）を結果に残す（不具合報告 ㉑）
+        absorption_stages=_absorption_stages_for(project),
         band_number=project.band_number,
         # ★帯域の幅（1/1 か 1/3）と下端（2026-08-26）
         band_width=getattr(project, "band_width", "1/1"),
@@ -955,16 +1003,19 @@ def _run_one(project, receiver, verbose=True, make_figures=True,
         if verbose:
             print(f"[run] 図を {len(written)} 枚書き出しました → {project.figure_dir()}")
 
-    # 実際に使った音源・受音点を project.json に残す（DXF から取った場合も分かるように）
-    # ★顔の向きは**結果に持たせる**（受音点ごとに違うため）。
-    #   project に書き戻すと、複数受音点のときにリストが 1 点ぶんの数値に潰れる
+    # ★顔の向きは**結果に持たせる**（受音点ごとに違うため）
     results["head_azimuth"] = (project.head_azimuth_for(0)
                                if head_azimuth is None else float(head_azimuth))
-    project.source = results["soundsource_point"].tolist()
-    if write_back:
-        project.receiver = results["receiver_point"].tolist()
-    if save_settings:
-        project.save()
+    # ★★**`project.json` には何も書かない**（2026-09-20。不具合報告 ⑲ ⑳）。
+    #   ここに来る `project` は**受音点ごとの子**（`_sub_project`）で、
+    #   親と同じ `project.json` を指している。以前はここで
+    #     ・使った音源を `project.source` に書き戻して保存していた → 次の実行で
+    #       `_sources()` がそれを DXF より優先し、**CAD で音源を動かしても
+    #       古い位置のまま回り続けた**（実案件で 100 万本・40 分が無駄になった）
+    #     ・子の `head_azimuth`（その点の**数値**）で保存していた → 親の
+    #       **リストが最後の 1 点の値に潰れた**
+    #   設定は親の `run()` が頭で 1 回だけ保存している。使った位置は
+    #   `結果/<室>_測定点.csv` に残るので、記録としてはそれで足りる
     return results
 
 
@@ -1194,6 +1245,29 @@ def _absorption_table_for(project, verbose=False):
     return ct.absorption_table(library, _assignment_for(project),
                                factors=ct.factors_for(project, verbose=verbose),
                                band_number=project.band_number, warn=verbose)
+
+
+def _absorption_stages_for(project):
+    """吸音率の各段（カタログ値 → 安全率 → 丸め）。作れなければ None（不具合報告 ㉑）。
+
+    ★**書き出し専用**（計算には効かない）。失敗しても計算は止めない。
+    """
+    import condition_table as ct
+
+    try:
+        library = _library_for(project, verbose=False)
+        if library is None:
+            return None
+        model = _model_for(project, verbose=False)
+        layers = sorted({face.material for face in model.mesh})
+        return ct.absorption_stages(library, _assignment_for(project),
+                                    factors=ct.factors_for(project, verbose=False),
+                                    band_number=project.band_number,
+                                    layers=layers)
+    except Exception as error:
+        print(f"[run] 吸音率の各段を作れませんでした（結果に載せません）: "
+              f"{type(error).__name__}: {error}")
+        return None
 
 
 def _update_condition_table(project, model, verbose=True):

@@ -3432,8 +3432,11 @@ def test_conditions_batch():
           f"（最後の条件 {found[-1][1]!r} になっていたら不具合）")
     check("  条件表の指定も勝手に変わらない",
           saved["condition_csv"] in ("", None), repr(saved["condition_csv"]))
-    check("  音源だけは DXF から取った値が残る",
-          saved["source"] is not None, str(saved["source"]))
+    # ★★音源は書き戻さない（2026-09-20。不具合報告 ⑲）。以前はここで
+    #   「DXF から取った値が残る」ことを確かめていたが、それが不具合の原因だった
+    #   （次の実行で DXF より優先され、CAD で音源を動かしても効かなくなる）
+    check("  ★音源も書き戻さない（書くと DXF の更新が効かなくなる。⑲）",
+          saved["source"] is None, str(saved["source"]))
     check("設定を書かせない切り替えがある（`save_settings`）",
           "save_settings" in run_project.run.__code__.co_varnames)
 
@@ -6597,6 +6600,184 @@ def test_conditions_shelf():
     shutil.rmtree(folder, ignore_errors=True)
 
 
+def test_reports_19_to_22():
+    """[60] 不具合報告 ⑲〜㉒（2026-09-20 修正）。
+
+    ⑲ 一度計算した室は、DXF で音源を動かしても古い音源で回り続ける
+    ⑳ head_azimuth のリストが実行後に 1 点ぶんの数値へ潰れる
+       （⑲ ⑳ は同じ根っこ：受音点ごとの子が親の project.json を上書きしていた）
+    ㉑ 計算に使った垂直入射吸音率が結果のどこにも残らない
+    ㉒ T字接合を自由端と区別せず「作図ミス」と断じる
+    """
+    print()
+    print("[60] 不具合報告 ⑲〜㉒")
+    import json
+    import shutil
+    import tempfile
+
+    import condition_table as ct
+    import project as pj
+    import run_project
+
+    try:
+        from openpyxl import load_workbook
+    except ImportError:
+        check("openpyxl が入っている（条件表 xlsx に要る）", False,
+              "pip install -r requirements.txt")
+        return
+
+    folder = tempfile.mkdtemp(prefix="geosim_19_22_")
+    shutil.copy(TEST_DXF, os.path.join(folder, "報告室.dxf"))
+
+    # ---- 条件表：安全率つきの層と、上限を超える材料（GW 0.99）を用意する ----
+    library = ab.MaterialLibrary()
+    library.add("GW", [0.30, 0.60, 0.99, 0.99, 0.99, 0.99], kind="random")
+    library.add_alias("11", "GW")
+    project = pj.Project(folder, name="報告室", dxf="報告室.dxf", band_number=6,
+                         rays=400, nref=3, radius=0.3, max_time=0.3,
+                         statistical=True, volume=6.0)
+    project.absorption_kind = "random"
+    # ⑳ の確かめ：正面方向をリストで入れておく
+    project.head_azimuth = [45.0]
+    project.ensure_dirs()
+    model = rd.read_model(project.dxf_path, band_number=6, verbose=False)
+    path = ct.create(project, model, library, verbose=False)
+    book = load_workbook(path)
+    sheet = book[ct.FIRST_SHEET]
+    columns = {label: i + 1 for i, label in enumerate(c.value for c in sheet[1])}
+    layers = []
+    for row in range(2, ct.LAYER_SLOTS + 2):
+        name = sheet.cell(row=row, column=columns[ct.COLUMN_LAYER]).value
+        if not name:
+            break
+        layers.append(name)
+        sheet.cell(row=row, column=columns[ct.COLUMN_NUMBER]).value = 11
+    factored = layers[0]
+    sheet.cell(row=2, column=columns[ct.COLUMN_FACTOR]).value = 0.8
+    book.save(path)
+
+    run_project.clear_model_cache()
+    run_project.run(project, verbose=False, make_figures=False)
+    with open(project.path(pj.PROJECT_FILE), encoding="utf-8") as handle:
+        saved = json.load(handle)
+
+    # ---- ⑲ 音源を project.json に書き戻さない ----
+    check("★★⑲ 計算しても project.json に音源を書き戻さない",
+          saved.get("source") is None, str(saved.get("source")))
+    check("⑲ 受音点も書き戻さない", saved.get("receiver") is None,
+          str(saved.get("receiver")))
+
+    # ---- ⑳ head_azimuth のリストが潰れない ----
+    check("★★⑳ head_azimuth のリストが潰れない（数値にならない）",
+          saved.get("head_azimuth") == [45.0], str(saved.get("head_azimuth")))
+
+    # ---- ⑲ 過去の実行で書かれた古い音源に気づく ----
+    stale = pj.Project.load(folder)
+    real = np.asarray(model.source_points[0], dtype=float)
+    stale.source = (real + np.array([0.2, 0.0, 0.0])).tolist()
+    noticed = io.StringIO()
+    keep, sys.stdout = sys.stdout, noticed
+    try:
+        run_project._STALE_WARNED.clear()
+        found = run_project._warn_stale_points(stale, verbose=True)
+    finally:
+        sys.stdout = keep
+    check("★★⑲ project.json の音源が DXF と違えば知らせる",
+          len(found) == 1 and found[0][1] == "source", str(found))
+    check("⑲ 直し方（null に戻す）まで言う", "null" in noticed.getvalue())
+    stale.source = real.tolist()
+    check("⑲ DXF と同じ位置なら何も言わない（わざと指定した場合）",
+          run_project._warn_stale_points(stale, verbose=False) == [])
+
+    # ---- ㉑ 吸音率の各段が結果に残る ----
+    room = project.existing_result_path("room")
+    with open(room, encoding="utf-8-sig", newline="") as handle:
+        rows = [r for r in csv.reader(handle) if r]
+    sections = {}
+    for r in rows[1:]:
+        sections.setdefault(r[0], {})[r[1]] = r
+    check("★★㉑ 音線追跡が使った垂直入射吸音率が残る",
+          pj.ROOM_SECTION_NORMAL in sections, str(list(sections)))
+    normal_row = sections.get(pj.ROOM_SECTION_NORMAL, {}).get(factored)
+    used = None
+    for face in run_project._model_for(project).mesh:
+        if face.material == factored:
+            used = np.asarray(face.absorption_coefficient, dtype=float)
+            break
+    check("★㉑ その値は計算に使った値そのもの（モデルの面と一致）",
+          normal_row is not None and used is not None
+          and np.allclose([float(v) for v in normal_row[3:]], used, atol=1e-5),
+          f"{normal_row[3:6] if normal_row else None}")
+    check("㉑ カタログ値（吸音率シートの値）も残る",
+          any(k.startswith(factored) for k in
+              sections.get(pj.ROOM_SECTION_CATALOG, {})),
+          str(list(sections.get(pj.ROOM_SECTION_CATALOG, {}))[:3]))
+    factor_row = sections.get(pj.ROOM_SECTION_FACTOR, {}).get(factored)
+    check("★㉑ 安全率は掛けたレイヤだけ載る（値は 3 列目）",
+          factor_row is not None and np.isclose(float(factor_row[2]), 0.8)
+          and len(sections.get(pj.ROOM_SECTION_FACTOR, {})) == 1,
+          str(sections.get(pj.ROOM_SECTION_FACTOR)))
+    # 安全率 0.8 の層は 0.99×0.8 = 0.792 なので丸めない。ほかの層は 0.99 を丸める
+    clipped = sections.get(pj.ROOM_SECTION_CLIPPED, {})
+    check("★★㉑ 上限に丸めた層が分かる（安全率なしの 0.99 は丸められる）",
+          any(name != factored for name in clipped), str(list(clipped)))
+    check("㉑ 安全率で上限を下回った層は丸めの行に出ない", factored not in clipped)
+    other = next((name for name in clipped if name != factored), None)
+    if other:
+        values = clipped[other][3:]
+        check("㉑ 丸めた帯域だけに丸める前の値（0.99）が入る",
+              values[0] == "" and values[1] == "" and np.isclose(float(values[2]), 0.99),
+              str(values))
+    check("㉑ 統計式が使う行（材料別の吸音率）はそのまま残る（読み手を壊さない）",
+          pj.read_room_csv(room) is not None
+          and pj.read_room_csv(room)["surface"]["names"] == sorted(layers),
+          str(pj.read_room_csv(room)["surface"]["names"]))
+
+    # ---- ㉒ T字接合だけなら「作図ミス」と言わない ----
+    base = rd.read_model(TEST_DXF, band_number=6, verbose=False)
+
+    def messages(open_edges, free_edges, closed):
+        base.open_edges = open_edges
+        base.free_edges = free_edges
+        base.is_closed = (open_edges == 0)
+        return rd.check_model(base, verbose=False, closed_expected=closed)
+
+    t_only = messages(68, [], True)
+    check("★★㉒ T字接合だけなら「作図ミス」と言わない",
+          not any("作図ミスです" in i["message"] for i in t_only),
+          str([i["message"][:30] for i in t_only]))
+    check("㉒ T字接合は情報として数だけ出す（面は閉じていると言う）",
+          any(i["level"] == "info" and "T字接合" in i["message"]
+              and "閉じています" in i["message"] for i in t_only))
+    edge = (np.zeros(3), np.array([1.0, 0.0, 0.0]))
+    with_free = messages(70, [edge, edge], True)
+    check("★㉒ 自由端があれば今までどおり「作図ミス」と言う",
+          any(i["level"] == "warning" and "作図ミスです" in i["message"]
+              for i in with_free))
+    check("㉒ そのときも T字接合は別に数える（68 本）",
+          any("T字接合" in i["message"] and "68 本" in i["message"]
+              for i in with_free))
+    # ★★根っこ：開いたモデルでは free_edges を**数えていなかった**（[] のまま）。
+    #   [] が「自由端が無い」に見えるので、判定を寄せると開いたモデルに
+    #   「面は閉じています」と言ってしまう。test2.dxf（床＋壁 2 面）で確かめる
+    import open_edges as oe
+    opened = rd.read_model(os.path.join(ROOT, "test2.dxf"), verbose=False)
+    check("★★㉒ 開いたモデルでも自由端を数える（数えていない [] と区別する）",
+          len(opened.free_edges) == 11, f"{len(opened.free_edges)} 本")
+    check("㉒ open_edges.py と同じ数になる（物差しが 1 つになった）",
+          len(opened.free_edges) == len(oe.collect(opened)[oe.FREE]))
+    check("★㉒ 開いたモデルに『面は閉じています』と言わない",
+          not any("閉じています" in i["message"]
+                  for i in rd.check_model(opened, verbose=False,
+                                          closed_expected=True)))
+    check("㉒ 閉じていない想定なら自由端も注意止まり",
+          not any(i["level"] == "warning" and "自由端" in i["message"]
+                  for i in messages(70, [edge, edge], False)))
+
+    run_project.clear_model_cache()
+    shutil.rmtree(folder, ignore_errors=True)
+
+
 def main():
     print("geosim 数値検証")
     print(f"  Python {sys.version.split()[0]} / numpy {np.__version__}")
@@ -6625,7 +6806,8 @@ def main():
                test_multiple_sources, test_point_order, test_layer_controls,
                test_rt_any, test_safety_factor_reaches_calculation,
                test_decay_floor, test_point_order_changed, test_model_reuse,
-               test_triangle_cleanup, test_conditions_shelf):
+               test_triangle_cleanup, test_conditions_shelf,
+               test_reports_19_to_22):
         fn()
 
     failed = [name for name, ok in _results if not ok]

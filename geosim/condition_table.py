@@ -519,6 +519,48 @@ def absorption_table(library, assignment, factors=None, band_number=None,
     return table
 
 
+def absorption_stages(library, assignment, factors=None, band_number=None,
+                      layers=()):
+    """材料ごとに「**カタログ値 → 安全率 → 上限の丸め**」の各段を返す（不具合報告 ㉑）。
+
+    {レイヤ: {"material": 材料名, "kind": "random" | "normal",
+              "catalog": (nb,) カタログ値（吸音率シートの値そのもの）,
+              "factor":  安全率（無ければ None）,
+              "after":   (nb,) 安全率を掛けたあと（まだ垂直入射に直す前）,
+              "clipped": (nb,) bool 上限（局所反応の 0.951）に丸めた帯域}}
+
+    ★★**なぜ要るか**（2026-09-20。不具合報告 ㉑）。結果の『吸音率と理論値.csv』の
+    「材料別の吸音率」は**統計式が使う乱入射の値**で、しかも**安全率と上限の丸めを
+    通したあと**を垂直入射から戻したもの。★**カタログ値も、音線追跡が実際に使った
+    垂直入射の値も、どこにも残っていなかった**ので、
+      ・残響室法を垂直入射に直したかを結果から確かめられない
+      ・上限に丸めたこと（GW 0.99 → 0.951）が実行ログにしか出ない
+      ・安全率を入れた条件と入れない条件の違いを表で追えない
+    という状態だった。掛ける順番（カタログ → 安全率 → 垂直入射）は
+    `absorption_table()` と同じにしてあるので、ここで返す値と計算の値は食い違わない。
+    """
+    factors = factors or {}
+    stages = {}
+    for layer in layers:
+        key = resolve_material(layer, library, assignment)
+        material = library.get(key) if key else None
+        if material is None:
+            continue
+        bands = band_number or material.band_number
+        catalog = np.asarray(material.resample(bands), dtype=float)
+        factor = factors.get(layer)
+        after = catalog * float(factor) if factor else catalog.copy()
+        if material.kind == ab.KIND_NORMAL:
+            clipped = np.zeros(after.shape, dtype=bool)
+        else:
+            clipped = after > ab.STATISTICAL_MAX
+        stages[layer] = {"material": material.name, "kind": material.kind,
+                         "catalog": catalog,
+                         "factor": float(factor) if factor else None,
+                         "after": after, "clipped": clipped}
+    return stages
+
+
 # ------------------------------------------------------------------------------
 # 作る・更新する
 # ------------------------------------------------------------------------------
