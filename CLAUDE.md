@@ -77,13 +77,16 @@
   - ビューアは 2 本並存：`view_model.py`（HTML+WebGL を書き出す。依存なし・共有向き）と
     `view_model_gui.py`（PyVista のネイティブウィンドウ。Python から操作しやすい）。
     **どちらか片方に寄せない**（用途が違う）。
+    ★**HTML 版は三角形の辺を描かず、計算で使う同一平面パッチの外周だけを描く**
+    （2026-09-24 ユーザー指摘「計算をこのモデルで行っていると勘違いしてしまいます」。
+    割り方は本計算と同じ `mesh_method.coplanar_patches`）
 - `requirements.txt` / `requirements-lock.txt` / `.python-version` … 実行環境の定義（上記参照）
 - `fortran\` … 移植元の Fortran コード。**`.gitignore` で除外されており Git 管理外**。
   別端末には自動で配られないので、参照するコードの内容を履歴や `PROGRAM_STRUCTURE.md` 側に
   書き残しておくと他端末で追いやすい。
 - `PROGRAM_STRUCTURE.md` … 各モジュールの役割・Fortran との変数対応・実装状況・既知のバグ一覧。
   **コードに手を入れたらこの文書も合わせて更新する。**
-- `tests\test_geosim.py` … 数値検証（1100 項目）。pytest 不要、素の Python で走る。
+- `tests\test_geosim.py` … 数値検証（1106 項目）。pytest 不要、素の Python で走る。
   **数式に関わるコードを変更したら必ず走らせる**：`.venv\Scripts\python tests\test_geosim.py`
 - `TODO.md` … 作業一覧（A〜G にグルーピング）。着手・完了したらチェックボックスを更新する。
 - `docs\pdf\` … **docs の Markdown を PDF にしたもの**（2026-08-23 ユーザー要望

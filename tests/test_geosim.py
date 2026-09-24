@@ -6778,6 +6778,47 @@ def test_reports_19_to_22():
     shutil.rmtree(folder, ignore_errors=True)
 
 
+def test_html_viewer_patches():
+    """[61] HTML ビューアは三角形の辺を描かず、計算で使うパッチの外周を描く（2026-09-24）。
+
+    ユーザー指摘「計算上三角形要素で見てないのであれば，三角形要素の表示はやめてほしい。
+    計算をこのモデルで行っていると勘違いしてしまいます」。
+    """
+    print()
+    print("[61] HTML ビューアの面の見せ方")
+    import mesh_method as mm
+    import view_model as vm
+
+    box = rd.read_model(TEST_DXF, band_number=6, verbose=False)
+    data = vm.build_payload(box)
+    edges = len(data["edges"]) // 6
+    arrows = len(data["arrows"]) // 18
+    check("★★直方体（12 三角形）は外周 24 本だけ（対角線 6 本を描かない）",
+          edges == 24, f"{edges} 本")
+    check("法線の矢印は面（パッチ）ごとに 1 本（6 本）", arrows == 6, f"{arrows} 本")
+    patches = mm.PatchArrays(box.mesh).count
+    check("★面の数は計算（PatchArrays）と同じ", data["patchCount"] == patches
+          and sum(L["count"] for L in data["layers"]) == patches,
+          f"{data['patchCount']} / {patches}")
+    check("概要に三角形の枚数を出さない", "三角形" not in data["summary"],
+          data["summary"].splitlines()[0])
+    check("塗りは全部の三角形ぶん残る（面が欠けない）",
+          len(data["positions"]) // 9 == len(box.mesh))
+
+    flat = rd.read_model(os.path.join(ROOT, "test2.dxf"), band_number=6, verbose=False)
+    data = vm.build_payload(flat)
+    segs = np.array(data["edges"]).reshape(-1, 2, 3)
+    inner = 0
+    for tri in flat.mesh:
+        v = np.asarray(tri.vertexes, dtype=float)
+        for a, b in ((0, 1), (1, 2), (2, 0)):
+            if not any(np.allclose(s, [v[a], v[b]]) or np.allclose(s, [v[b], v[a]])
+                       for s in segs):
+                inner += 1
+    check("9 角形の床も内部の分割線を描かない", inner > 0 and len(segs) < 3 * len(flat.mesh),
+          f"外周 {len(segs)} 本 / 描かなかった辺 {inner} 本")
+
+
 def main():
     print("geosim 数値検証")
     print(f"  Python {sys.version.split()[0]} / numpy {np.__version__}")
@@ -6807,7 +6848,7 @@ def main():
                test_rt_any, test_safety_factor_reaches_calculation,
                test_decay_floor, test_point_order_changed, test_model_reuse,
                test_triangle_cleanup, test_conditions_shelf,
-               test_reports_19_to_22):
+               test_reports_19_to_22, test_html_viewer_patches):
         fn()
 
     failed = [name for name, ok in _results if not ok]

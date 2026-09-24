@@ -5,8 +5,8 @@ matplotlib / pyvista を入れずに済ませているのは、この環境に�
 （`pip install` を前提にしたくない）。将来 GUI を Web ベースにするならこれが土台になる。
 
 表示内容:
-  ・三角形要素（辺を描くので分割が見える）
-  ・法線ベクトル（矢印）
+  ・面（**計算で使う同一平面パッチの外周だけ**を線で描く。三角形の辺は描かない）
+  ・法線ベクトル（矢印。パッチごとに 1 本）
   ・**法線の裏側を別色で塗る** ← 向きの誤りが一目で分かる
   ・レイヤ別の色分け・表示切り替え
   ・音源 / 受音点
@@ -24,6 +24,7 @@ import webbrowser
 
 import numpy as np
 
+import mesh_method as mm
 import read_dxffile as rd
 
 # レイヤの色（順に割り当て）。彩度を抑えて法線の裏色（赤）と混ざらないようにしている
@@ -36,6 +37,16 @@ LAYER_PALETTE = [
 def _hex_to_rgb(code):
     code = code.lstrip("#")
     return [int(code[i:i + 2], 16) / 255.0 for i in (0, 2, 4)]
+
+
+def _summary_text(model, patch_of_face):
+    """画面に出す概要。★三角形の枚数は出さず、**計算で使う面（パッチ）の数**を出す
+    （三角形で計算していると誤解させないため。2026-09-24 ユーザー指摘）。"""
+    count = int(np.max(patch_of_face)) + 1 if len(patch_of_face) else 0
+    lines = [f"面（計算で使う同一平面パッチ）: {count} 面"]
+    lines += [line for line in model.summary().splitlines()
+              if not line.startswith(("三角形", "レイヤ別の枚数"))]
+    return "\n".join(lines)
 
 
 def build_payload(model, normal_ratio=0.06):
@@ -53,10 +64,22 @@ def build_payload(model, normal_ratio=0.06):
     diag = float(np.linalg.norm(hi - lo)) or 1.0
     arrow_len = diag * normal_ratio
 
+    # ★★**三角形の辺は描かない**（2026-09-24 ユーザー指摘「計算上三角形要素で
+    #   見てないのであれば，三角形要素の表示はやめてほしい。計算をこのモデルで
+    #   行っていると勘違いしてしまいます」）。交差判定は同一平面パッチ単位
+    #   （`mesh_method.PatchArrays`）なので、**計算と同じ割り方**
+    #   （`coplanar_patches`。同一平面＋連結＋同じ材料＋同じ向き）で
+    #   パッチを作り、その外周だけを線にする。面の塗りは三角形のまま（WebGL の都合）
+    triangles = [np.asarray(t.vertexes, dtype=float) for t in mesh]
+    face_normals = np.array([np.asarray(t.normal, dtype=float) for t in mesh])
+    patch_of_face = mm.coplanar_patches(
+        [tuple(v) for v in triangles], face_normals, [t.material for t in mesh])
+
     positions, normals, colors = [], [], []
     edges = []
     arrows = []
     ranges = []
+    patch_counts = {}
 
     # レイヤごとに固めて並べる。こうすると「レイヤの表示切り替え」が
     # 描画範囲を飛ばすだけで済み、シェーダ側に細工が要らない
@@ -65,23 +88,41 @@ def build_payload(model, normal_ratio=0.06):
         face_start = len(positions) // 3
         edge_start = len(edges) // 3
         arrow_start = len(arrows) // 3
+        faces = [j for j, m in enumerate(mesh) if m.material == name]
 
-        for t in (m for m in mesh if m.material == name):
-            v = np.asarray(t.vertexes, dtype=float)
-            n = np.asarray(t.normal, dtype=float)
-
+        for j in faces:
+            v = triangles[j]
+            n = face_normals[j]
             for k in range(3):
                 positions.extend(v[k].tolist())
                 normals.extend(n.tolist())
                 colors.extend(rgb)
 
-            # 三角形の辺（分割が見えるように）
-            for a, b in ((0, 1), (1, 2), (2, 0)):
-                edges.extend(v[a].tolist())
-                edges.extend(v[b].tolist())
+        # パッチごとに外周（パッチの中で 1 回しか現れない辺）と法線の矢印を 1 本
+        patches = sorted({int(patch_of_face[j]) for j in faces})
+        patch_counts[name] = len(patches)
+        for p in patches:
+            members = [j for j in faces if patch_of_face[j] == p]
+            seen = {}
+            for j in members:
+                v = triangles[j]
+                for a, b in ((0, 1), (1, 2), (2, 0)):
+                    ka, kb = tuple(np.round(v[a], 9)), tuple(np.round(v[b], 9))
+                    key = (ka, kb) if ka <= kb else (kb, ka)
+                    seen[key] = seen.get(key, 0) + 1
+            for (ka, kb), count in seen.items():
+                if count == 1:
+                    edges.extend(ka)
+                    edges.extend(kb)
 
-            # 法線の矢印（重心から法線方向へ）。矢じりは 2 本の短い線で作る
-            centre = v.mean(axis=0)
+            # 矢印の根元は**いちばん大きい三角形の重心**（パッチの重心は
+            # L 字やドーナツだと面の外に出る）
+            areas = [0.5 * float(np.linalg.norm(np.cross(triangles[j][1] - triangles[j][0],
+                                                         triangles[j][2] - triangles[j][0])))
+                     for j in members]
+            big = members[int(np.argmax(areas))]
+            n = face_normals[big]
+            centre = triangles[big].mean(axis=0)
             tip = centre + n * arrow_len
             arrows.extend(centre.tolist())
             arrows.extend(tip.tolist())
@@ -109,18 +150,19 @@ def build_payload(model, normal_ratio=0.06):
         "edges": edges,
         "arrows": arrows,
         "layers": [dict({"name": name, "color": layer_color[name],
-                         "count": model.layer_counts.get(name, 0)}, **ranges[i])
+                         "count": patch_counts.get(name, 0)}, **ranges[i])
                    for i, name in enumerate(layers)],
         "source": [p.tolist() for p in model.source_points],
         "receiver": [p.tolist() for p in model.receiver_points],
         "bbox": [lo.tolist(), hi.tolist()],
         "arrowLength": arrow_len,
-        "summary": model.summary(),
-        "triangleCount": len(mesh),
+        "summary": _summary_text(model, patch_of_face),
+        "patchCount": int(patch_of_face.max()) + 1 if len(patch_of_face) else 0,
     }
 
 
-HTML_TEMPLATE = r"""<title>__TITLE__</title>
+HTML_TEMPLATE = r"""<meta charset="utf-8">
+<title>__TITLE__</title>
 <style>
 :root{
   --bg:#0E1319; --panel:#161D26; --panel-2:#1D2732; --rule:#2A3542;
@@ -182,7 +224,7 @@ kbd{
 
     <h2>表示</h2>
     <label class="row"><input type="checkbox" id="cbFaces" checked><span>面</span></label>
-    <label class="row"><input type="checkbox" id="cbEdges" checked><span>三角形の辺</span></label>
+    <label class="row"><input type="checkbox" id="cbEdges" checked><span>面の輪郭（計算で使う面の単位）</span></label>
     <label class="row"><input type="checkbox" id="cbNormals" checked><span>法線ベクトル</span></label>
     <label class="row"><input type="checkbox" id="cbBack" checked><span>法線の裏側を赤で塗る</span></label>
     <label class="row"><input type="checkbox" id="cbPoints" checked><span>音源・受音点</span></label>
