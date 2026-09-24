@@ -75,7 +75,9 @@ COLOUR_LABEL = {"reflection": "反射回数", "energy": "エネルギー [dB]",
                 "time": "到来時刻 [ms]"}
 COLOUR_BAR_TITLE = {"reflection": "Reflection order", "energy": "Energy [dB]",
                     "time": "Arrival time [ms]"}
-COLOUR_CMAP = {"reflection": "viridis", "energy": "plasma", "time": "cividis"}
+# ★到来時刻は**反転して 0 s に近いほど黄色**（2026-09-24。不具合報告 ㉔）。
+#   音線の画面（`view_rays.RAY_CMAP`）と Tab で行き来するので向きをそろえる
+COLOUR_CMAP = {"reflection": "viridis", "energy": "plasma", "time": "cividis_r"}
 
 IMAGE_COLOR = "#ffd166"         # 虚音源の点（色分けしないとき）
 RECEIVER_COLOR = "#4cc9f0"

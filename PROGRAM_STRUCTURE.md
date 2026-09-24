@@ -778,6 +778,9 @@ python view_rays.py ..\test.dxf ..\結果\test_raylog.npz --mode particles --mov
 
 反射経路を折れ線で描く。点ごとにスカラーを持たせるので、1 本の線の中で色が変わる。
 `--color` で `energy`（バンド平均の dB）/ `time` / `reflection` / `ray` を選ぶ。
+★`time` は**反転した配色**（`plasma_r`。0 s に近いほど黄色。2026-09-24 ユーザー要望・不具合報告 ㉔）。
+初期反射を読む画面なので早い音を明るくし、`energy` の「強いほど黄色」と向きをそろえた。
+虚音源（`view_images.COLOUR_CMAP`）の `time` も同じ向き（`cividis_r`）。
 受音した経路は太い黄色で重ね描きする（`--received-only` のときは全部が受音経路なので出さない）。
 
 > **`--max-reflection` は「その回数までで折れ線を打ち切る」動作**。
