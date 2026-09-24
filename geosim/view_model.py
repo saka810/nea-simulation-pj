@@ -132,7 +132,7 @@ HTML_TEMPLATE = r"""<title>__TITLE__</title>
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);overflow:hidden}
 #wrap{position:fixed;inset:0;display:flex}
-canvas{flex:1;display:block;cursor:grab;background:var(--bg)}
+canvas{flex:1;min-width:0;min-height:0;display:block;cursor:grab;background:var(--bg)}
 canvas.dragging{cursor:grabbing}
 
 #panel{
