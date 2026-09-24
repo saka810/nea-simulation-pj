@@ -80,13 +80,20 @@
     ★**HTML 版は三角形の辺を描かず、計算で使う同一平面パッチの外周だけを描く**
     （2026-09-24 ユーザー指摘「計算をこのモデルで行っていると勘違いしてしまいます」。
     割り方は本計算と同じ `mesh_method.coplanar_patches`）
+    ★**PyVista 版（結果・モデル・虚音源の画面）も同じ**（同日「GUI の結果画面も」）。
+    辺は前から消してあったが**法線の矢印が三角形の数だけ立っていた**。いまは
+    矢印も外周も計算の割り方でパッチごと（`vg.calculation_patches` /
+    `patch_normal_arrows`。根元は `mm.anchor_faces`＝いちばん大きい三角形の重心）。
+    パネルの「三角形 N 枚」も「面 N 枚（計算の単位）」にした。
+    面の確認画面は**面グループごとに 1 本**（`y` の三角形単位では全部）。
+    ★グループ内で向き・色が違う三角形はその分だけ別に立てる（裏返りを見落とさない）
 - `requirements.txt` / `requirements-lock.txt` / `.python-version` … 実行環境の定義（上記参照）
 - `fortran\` … 移植元の Fortran コード。**`.gitignore` で除外されており Git 管理外**。
   別端末には自動で配られないので、参照するコードの内容を履歴や `PROGRAM_STRUCTURE.md` 側に
   書き残しておくと他端末で追いやすい。
 - `PROGRAM_STRUCTURE.md` … 各モジュールの役割・Fortran との変数対応・実装状況・既知のバグ一覧。
   **コードに手を入れたらこの文書も合わせて更新する。**
-- `tests\test_geosim.py` … 数値検証（1106 項目）。pytest 不要、素の Python で走る。
+- `tests\test_geosim.py` … 数値検証（1111 項目）。pytest 不要、素の Python で走る。
   **数式に関わるコードを変更したら必ず走らせる**：`.venv\Scripts\python tests\test_geosim.py`
 - `TODO.md` … 作業一覧（A〜G にグルーピング）。着手・完了したらチェックボックスを更新する。
 - `docs\pdf\` … **docs の Markdown を PDF にしたもの**（2026-08-23 ユーザー要望

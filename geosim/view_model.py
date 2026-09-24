@@ -75,6 +75,8 @@ def build_payload(model, normal_ratio=0.06):
     patch_of_face = mm.coplanar_patches(
         [tuple(v) for v in triangles], face_normals, [t.material for t in mesh])
 
+    anchor = mm.anchor_faces(triangles, patch_of_face)
+
     positions, normals, colors = [], [], []
     edges = []
     arrows = []
@@ -115,12 +117,8 @@ def build_payload(model, normal_ratio=0.06):
                     edges.extend(ka)
                     edges.extend(kb)
 
-            # 矢印の根元は**いちばん大きい三角形の重心**（パッチの重心は
-            # L 字やドーナツだと面の外に出る）
-            areas = [0.5 * float(np.linalg.norm(np.cross(triangles[j][1] - triangles[j][0],
-                                                         triangles[j][2] - triangles[j][0])))
-                     for j in members]
-            big = members[int(np.argmax(areas))]
+            # 矢印の根元は**いちばん大きい三角形の重心**（`mm.anchor_faces`）
+            big = anchor[p]
             n = face_normals[big]
             centre = triangles[big].mean(axis=0)
             tip = centre + n * arrow_len

@@ -650,6 +650,16 @@ L 字・ドーナツで面の外に出る）。レイヤ欄の数と概要も**�
 三角形の枚数・形の行は出さない。塗りは WebGL の都合で三角形のまま（見た目には出ない）。
 テスト [61]。
 
+★**`view_model_gui` / `face_editor` も同じ扱い**（2026-09-24 ユーザー指摘
+「GUI の結果画面も三角形の表示になってないか確認して」）。辺は 2026-08-24 に
+消してあったが、**法線の矢印が三角形ごとに立っていた**ので分割が見えていた。
+`build_plotter` は `calculation_patches()`（＝`coplanar_patches`）で割り、外周
+（`patch_outline_segments(labels=…)`）と矢印（`patch_normal_arrows`）を
+パッチ単位で描く。以前の外周は `coplanar_groups`（1°/1 mm・向きを区別しない）で、
+計算（0.1°/0.1 mm・向き別）と区切りが食い違いえた。`face_editor` は選択の単位＝
+面グループごとに 1 本（`_arrow_faces`。グループ内で向き・色が違えば別に立てる）。
+根元は共通の `mesh_method.anchor_faces`。三角形ごとの `normal_arrows` は参照実装として残す。
+
 ★**キャンバスには `min-width:0; min-height:0` が要る**（2026-09-24。不具合報告 ㉓）。
 キャンバスはフレックスの子で、描くたびに `canvas.width = clientWidth × devicePixelRatio`
 と**実寸を書き換える**。フレックスの子の既定の最小幅（`min-width:auto`）は

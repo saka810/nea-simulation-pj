@@ -9,8 +9,8 @@
                        将来の GUI 統合（G-7）に発展させやすい。
 
 表示内容:
-  ・三角形要素（辺を描くので分割が見える）
-  ・法線ベクトル（矢印）
+  ・面（**計算で使う同一平面パッチの外周だけ**を線で描く。三角形の辺は描かない）
+  ・法線ベクトル（矢印。パッチごとに 1 本）
   ・**法線の裏側を赤で塗る** ← 向きの誤りが一目で分かる
   ・レイヤ別の色分け・チェックボックスで表示切り替え
   ・音源 / 受音点
@@ -51,8 +51,9 @@ import sys
 import numpy as np
 import pyvista as pv
 
+import mesh_method as mm
 import read_dxffile as rd
-from view_model import LAYER_PALETTE
+from view_model import LAYER_PALETTE, _summary_text
 
 # 法線の裏側の色。HTML 版と同じ赤にしてある
 BACK_COLOR = "#C24540"
@@ -1877,8 +1878,36 @@ def triangles_to_polydata(triangles):
     return poly
 
 
+def patch_normal_arrows(triangles, labels, length):
+    """**パッチごとに 1 本**、法線方向の矢印を作る（`labels` は三角形ごとのパッチ番号）。
+
+    ★三角形ごとに立てると**分割がそのまま見える**（2026-09-24 ユーザー指摘
+    「GUI の結果画面も三角形の表示になってないか確認して」。辺は消してあったが
+    矢印が三角形の数だけ立っていた）。根元はパッチの中でいちばん大きい三角形の重心。
+    """
+    anchor = mm.anchor_faces([t.vertexes for t in triangles], labels)
+    faces = [anchor[key] for key in sorted(anchor)]
+    centres = np.array([np.mean(np.asarray(triangles[j].vertexes, dtype=float), axis=0)
+                        for j in faces])
+    cloud = pv.PolyData(centres)
+    cloud.point_data["normal"] = np.array(
+        [np.asarray(triangles[j].normal, dtype=float) for j in faces])
+    return cloud.glyph(orient="normal", scale=False, factor=length,
+                       geom=pv.Arrow(tip_length=0.3, tip_radius=0.09,
+                                     shaft_radius=0.03))
+
+
+def calculation_patches(triangles):
+    """計算（`mesh_method.PatchArrays`）と同じ割り方のパッチ番号 (M,)。"""
+    return mm.coplanar_patches(
+        [tuple(np.asarray(t.vertexes, dtype=float)) for t in triangles],
+        np.array([np.asarray(t.normal, dtype=float) for t in triangles]),
+        [t.material for t in triangles])
+
+
 def normal_arrows(poly, length):
-    """面の重心から法線方向に伸びる矢印を作る。"""
+    """面の重心から法線方向に伸びる矢印を作る（**三角形ごと**。参照実装として残す。
+    画面では `patch_normal_arrows` を使う）。"""
     centres = poly.cell_centers()
     centres.point_data["normal"] = poly.cell_data["normal"]
     return centres.glyph(orient="normal", scale=False, factor=length,
@@ -1890,7 +1919,7 @@ PATCH_EDGE_COLOR = "#8b93a3"    # 同一平面パッチの外周（三角形の�
 
 
 def patch_outline_actor(plotter, triangles, colour=PATCH_EDGE_COLOR,
-                        width=1.0, opacity=0.75):
+                        width=1.0, opacity=0.75, labels=None):
     """**同一平面パッチの外周だけ**を線で重ねる。→ actor（引けなければ None）
 
     ★面は「同一平面パッチ」を 1 枚として見せる（2026-08-21 ユーザー指摘
@@ -1899,13 +1928,20 @@ def patch_outline_actor(plotter, triangles, colour=PATCH_EDGE_COLOR,
     （2026-08-24 に結果の画面でそうなっていると指摘を受けた）。
 
     面そのものは三角形のまま描く（当たり判定や色分けはそのまま使える）。
+
+    ★割り方は**計算と同じ**（`calculation_patches`。2026-09-24）。以前は
+    面の確認画面と同じ `coplanar_groups`（1°/1 mm）で、計算（0.1°/0.1 mm・向き別）と
+    区切りが食い違いうる。`labels` を渡せばその割り方を使う
     """
     if not len(triangles):
         return None
     try:
+        if labels is None:
+            labels = calculation_patches(triangles)
         segments = rd.patch_outline_segments(
             np.array([np.asarray(t.vertexes, dtype=float) for t in triangles]),
-            np.array([np.asarray(t.normal, dtype=float) for t in triangles]))
+            np.array([np.asarray(t.normal, dtype=float) for t in triangles]),
+            labels=labels)
     except Exception as error:
         print(f"[view] パッチの外周を描けませんでした: "
               f"{type(error).__name__}: {error}")
@@ -1956,12 +1992,18 @@ def build_plotter(model, title="モデルビューア", off_screen=False,
     plotter, panel = make_plotter(title, window_size, off_screen, panel=panel,
                                   screen=screen)
 
+    # ★面の区切りは**計算と同じ割り方**（外周も法線の矢印もこれで描く）
+    patch_of_face = calculation_patches(mesh)
+    patch_count = int(patch_of_face.max()) + 1 if len(patch_of_face) else 0
+
     face_actors = {}
     arrow_actors = {}
     edge_actors = {}
     for i, name in enumerate(layers):
         colour = LAYER_PALETTE[i % len(LAYER_PALETTE)]
-        faces = [t for t in mesh if t.material == name]
+        members = [j for j, t in enumerate(mesh) if t.material == name]
+        faces = [mesh[j] for j in members]
+        labels = patch_of_face[members]
         poly = triangles_to_polydata(faces)
         alpha = float(layer_opacity.get(name, opacity))
 
@@ -1977,8 +2019,8 @@ def build_plotter(model, title="モデルビューア", off_screen=False,
                              "opacity": alpha * BACKFACE_OPACITY_RATIO},
         )
         # 面が薄くても形が分かるよう、外周は面より濃いめに残す
-        edge_actors[name] = patch_outline_actor(plotter, faces)
-        arrows = normal_arrows(poly, arrow_len)
+        edge_actors[name] = patch_outline_actor(plotter, faces, labels=labels)
+        arrows = patch_normal_arrows(faces, labels, arrow_len)
         arrow_actors[name] = plotter.add_mesh(arrows, color="#f2f4f8",
                                               lighting=False)
         arrow_actors[name].SetVisibility(show_normals)
@@ -2000,11 +2042,11 @@ def build_plotter(model, title="モデルビューア", off_screen=False,
 
     if panel is None:
         # パネルが無いときだけ 3D の上に文字を重ねる（画像書き出しなど）
-        plotter.add_text(f"{title}\n三角形 {len(mesh)} 枚 / レイヤ {len(layers)}",
+        plotter.add_text(f"{title}\n面 {patch_count} 枚 / レイヤ {len(layers)}",
                          position="upper_left", font_size=11,
                          color=TEXT_COLOR, font_file=font)
         if show_summary:
-            plotter.add_text(model.summary(), position=(12, 12), font_size=8,
+            plotter.add_text(_summary_text(model, patch_of_face), position=(12, 12), font_size=8,
                              color="#9aa2b1", font_file=font)
 
     # ---- 視点プリセット（VTK 既定の w/s/r/q とぶつからないキーを選ぶ） ----
@@ -2026,7 +2068,8 @@ def build_plotter(model, title="モデルビューア", off_screen=False,
     # ---- 左パネルにレイヤの表示切り替えを並べる ----
     if panel is not None:
         panel.screen_title(f"{title}")
-        panel.text(f"三角形 {len(mesh)} 枚 / レイヤ {len(layers)}", size=9)
+        # ★三角形の枚数は出さない（三角形で計算していると誤解させないため）
+        panel.text(f"面 {patch_count} 枚（計算の単位） / レイヤ {len(layers)}", size=9)
         # ★★**一括の切り替えを結果の画面にも出す**（2026-09-15 ユーザー指摘
         #   「全レイヤー ON・OFF を追加した気がしましたが、結果の音線の確認の
         #   画面ではそれが反映されていませんか？」）。2026-09-06 に面の確認画面へ

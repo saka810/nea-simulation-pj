@@ -6818,6 +6818,31 @@ def test_html_viewer_patches():
     check("9 角形の床も内部の分割線を描かない", inner > 0 and len(segs) < 3 * len(flat.mesh),
           f"外周 {len(segs)} 本 / 描かなかった辺 {inner} 本")
 
+    # ---- GUI（結果・モデル・虚音源の画面と面の確認画面）も同じ（2026-09-24） ----
+    import view_model_gui as vg
+    import face_editor as fe
+    labels = vg.calculation_patches(box.mesh)
+    arrows = vg.patch_normal_arrows(box.mesh, labels, 0.1)
+    one = vg.patch_normal_arrows(box.mesh[:1], labels[:1], 0.1).n_points
+    check("★★GUI の法線の矢印もパッチごとに 1 本（直方体で 6 本ぶん）",
+          arrows.n_points == 6 * one, f"{arrows.n_points // max(one, 1)} 本")
+    check("GUI の面の区切りは計算（PatchArrays）と同じ",
+          int(labels.max()) + 1 == mm.PatchArrays(box.mesh).count)
+    segments = rd.patch_outline_segments(
+        np.array([np.asarray(m.vertexes, dtype=float) for m in box.mesh]),
+        np.array([np.asarray(m.normal, dtype=float) for m in box.mesh]), labels=labels)
+    check("GUI の外周も計算の割り方で 24 本（対角線なし）", len(segments) == 24,
+          f"{len(segments)} 本")
+    editor = fe.FaceEditor(flat)
+    every = np.arange(editor.count)
+    picked = editor._arrow_faces(every, editor.normals(), editor.face_colours())
+    check("★面の確認画面も面グループごとに 1 本（test2.dxf は 2 面）",
+          len(picked) == len(editor.groups), f"{len(picked)} 本 / {editor.count} 三角形")
+    editor.flipped.add(int(editor.groups[0][0]))
+    picked = editor._arrow_faces(every, editor.normals(), editor.face_colours())
+    check("★グループの中で裏返った三角形があればその分は別に立てる（見落とさない）",
+          len(picked) == len(editor.groups) + 1, f"{len(picked)} 本")
+
 
 def main():
     print("geosim 数値検証")

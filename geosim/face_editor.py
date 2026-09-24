@@ -91,6 +91,7 @@ T 字接合だと分かる（実際に視聴覚室モデルでそう判断でき
 import numpy as np
 import pyvista as pv
 
+import mesh_method as mm
 import read_dxffile as rd
 import view_camera
 import view_model_gui as vg
@@ -635,13 +636,16 @@ class FaceEditor:
         """
         centres = np.array([np.mean(t, axis=0) for t in self.triangles])
         length = float(np.linalg.norm(self.model.extents[1] - self.model.extents[0])) * 0.04
-        vectors = self.normals() * length
+        normals = self.normals()
+        vectors = normals * length
         colours = self.face_colours()
         self.arrows = []
         for k, name in enumerate(self.layers):
             faces = np.nonzero(self.layer_of == k)[0]
             if not len(faces):
                 continue
+            if self.by_group:
+                faces = self._arrow_faces(faces, normals, colours)
             cloud = pv.PolyData(centres[faces])
             cloud["vector"] = vectors[faces]
             cloud.point_data["rgb"] = colours[faces]
@@ -658,6 +662,24 @@ class FaceEditor:
             if self.registry is not None and name in self.registry:
                 self.registry[name]["arrow"] = actor
             self.arrows.append(actor)
+
+    def _arrow_faces(self, faces, normals, colours):
+        """面グループ単位のとき、矢印を立てる三角形を**グループごとに 1 本**へ絞る。
+
+        ★三角形ごとに立てると分割がそのまま見える（2026-09-24 ユーザー指摘
+        「計算上三角形要素で見てないのであれば，三角形要素の表示はやめてほしい」）。
+        ただしグループの中で**向きや色（判定・材料・選択）が違う三角形**があれば
+        それぞれに 1 本ずつ残す（1 本にまとめると裏返った面を見落とす）。
+        三角形単位（`y`）のときは呼ばない（全部に立てる）。
+        """
+        labels = []
+        for j in faces:
+            g = int(self.group_of[j])
+            first = self.groups[g][0]
+            side = 1 if float(np.dot(normals[j], normals[first])) >= 0.0 else -1
+            labels.append((g, side, tuple(int(c) for c in colours[j])))
+        anchor = mm.anchor_faces([self.triangles[j] for j in faces], labels)
+        return np.array(sorted(faces[i] for i in anchor.values()), dtype=np.int64)
 
     def _say(self, message):
         """パネル下部に一言出す（キーを押しても何も起きない理由を伝えるため）。"""

@@ -1231,7 +1231,7 @@ COPLANAR_ANGLE_DEGREES = 1.0
 COPLANAR_DISTANCE = 1.0e-3
 
 
-def patch_outline_segments(triangles, normals, angle_degrees=None):
+def patch_outline_segments(triangles, normals, angle_degrees=None, labels=None):
     """**同一平面パッチの外周**を線分 (M,2,3) で返す。
 
     三角形の辺を全部引くと網目になって形が読めないので、
@@ -1241,16 +1241,23 @@ def patch_outline_segments(triangles, normals, angle_degrees=None):
     **形が見えない**（2026-08-24 ユーザー指摘「壁が見えなくなっている」）。
     測定点の配置図（`plots.measurement_points`）と虚音源の画面
     （`view_images`）で共用している。
+
+    `labels` を渡すとその割り方（例：計算の `mesh_method.coplanar_patches`）で外周を取る。
+    ★結果の画面は**計算と同じ割り方**で描く（2026-09-24。見えている区切りが
+    計算の単位と食い違わないように）
     """
     triangles = np.asarray(triangles, dtype=float)
     normals = np.asarray(normals, dtype=float)
     if not len(triangles):
         return np.zeros((0, 2, 3))
     kwargs = {} if angle_degrees is None else {"angle_degrees": angle_degrees}
-    try:
-        groups = coplanar_groups(triangles, normals, **kwargs)
-    except Exception:
-        groups = np.arange(len(triangles))
+    if labels is not None:
+        groups = np.asarray(labels)
+    else:
+        try:
+            groups = coplanar_groups(triangles, normals, **kwargs)
+        except Exception:
+            groups = np.arange(len(triangles))
 
     segments = []
     for group in np.unique(groups):

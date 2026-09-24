@@ -282,6 +282,26 @@ def coplanar_patches(triangles, normals, materials=None,
     return patch
 
 
+def anchor_faces(triangles, labels):
+    """ラベル（パッチ・面グループ）ごとに**いちばん大きい三角形**の番号を返す。
+    → {ラベル: 三角形の番号}
+
+    ★法線の矢印を**面ごとに 1 本**立てる根元に使う（2026-09-24 ユーザー指摘
+    「計算上三角形要素で見てないのであれば，三角形要素の表示はやめてほしい」）。
+    三角形ごとに立てると分割がそのまま見えてしまう。パッチの重心は
+    L 字やドーナツだと面の外に出るので、面の上に必ず載る最大の三角形の重心を使う。
+    HTML 版（`view_model`）と PyVista 版（`view_model_gui` / `face_editor`）で共用。
+    """
+    best = {}
+    for j, (label, tri) in enumerate(zip(labels, triangles)):
+        v = np.asarray(tri, dtype=float)
+        area = 0.5 * float(np.linalg.norm(np.cross(v[1] - v[0], v[2] - v[0])))
+        key = label if not isinstance(label, np.integer) else int(label)
+        if key not in best or area > best[key][0]:
+            best[key] = (area, j)
+    return {key: j for key, (area, j) in best.items()}
+
+
 # 本番でどちらを使うか。**音線追跡とバックトレースで必ず同じもの**を使うこと
 # （反射面の番号を突き合わせるので、片方だけパッチにすると経路が全部却下される）。
 # 三角形版に戻したいときはここを FaceArrays にする
