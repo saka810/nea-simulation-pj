@@ -488,7 +488,7 @@ function renderSources() {
   if (!items.length) {
     const li = document.createElement("li");
     li.className = "hint";
-    li.textContent = "ドライソース/ フォルダに音声ファイルがありません";
+    li.textContent = "ドライソース/ に音声ファイルがありません。音声は Git に入っていないので、ドライソース/README.md の手順で OneDrive からコピーしてください（画面へ落としても使えます）";
     list.append(li);
   }
   for (const item of items) {
