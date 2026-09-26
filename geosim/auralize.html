@@ -60,7 +60,8 @@ header {
 .output { display: flex; align-items: center; gap: 16px; flex: none; }
 .output label { color: var(--sage); font-size: 13px; }
 .volume { display: flex; align-items: center; gap: 10px; }
-.volume output { width: 58px; text-align: right; }
+/* ★幅を固定して折り返さない（-40.0 dB まで入る幅。数字が変わっても枠の高さが動かない） */
+.volume output { flex: none; width: 8.5ch; white-space: nowrap; text-align: right; }
 input[type=range] { accent-color: var(--brass); width: 150px; }
 .meter { position: relative; width: 150px; height: 10px; background: var(--felt); border-radius: 2px; overflow: hidden; border: 1px solid var(--line); }
 .meter canvas { display: block; width: 100%; height: 100%; }
@@ -213,7 +214,7 @@ footer .status { margin-left: auto; }
     <div class="volume">
       <label for="volume">出力</label>
       <input type="range" id="volume" min="-40" max="12" step="0.5" value="0">
-      <output id="volumeText">0.0 dB</output>
+      <output id="volumeText">±0.0 dB</output>
     </div>
     <div class="meter" title="出力のピーク"><canvas id="meter" width="150" height="10"></canvas></div>
     <div class="clip" id="clip" title="0 dBFS を超えました（クリックで消す）"></div>
@@ -382,7 +383,7 @@ function setChannels(value) {
 
 function setVolume() {
   const db = Number($("volume").value);
-  $("volumeText").textContent = `${db > 0 ? "+" : ""}${db.toFixed(1)} dB`;
+  $("volumeText").textContent = `${db > 0 ? "+" : db < 0 ? "−" : "±"}${Math.abs(db).toFixed(1)} dB`;
   if (A.master) ramp(A.master.gain, Math.pow(10, db / 20), 0.03);
 }
 
