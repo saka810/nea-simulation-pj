@@ -591,13 +591,13 @@ function renderCards() {
     b.disabled = !r;
     b.setAttribute("aria-pressed", String(c === S.condition));
     const refText = reference ? `${conditionLabel(reference.condition)} ${reference.source} ${reference.receiver}`.trim() : "最初の条件";
-    b.title = r ? `${r.id}\nT30・EDT：500 Hz と 1 kHz の平均\n音量：${refText} の応答を 0 dB とした大きさ（条件どうしの比はそのまま）` : "この受音点・音源位置の結果がありません";
+    b.title = r ? `${r.id}\nT20・T30・EDT：500 Hz と 1 kHz の平均\n音量：${refText} の応答を 0 dB とした大きさ（条件どうしの比はそのまま）` : "この受音点・音源位置の結果がありません";
     const num = i < 9 ? `<span class="num">${i + 1}</span>` : "";
     const fact = (label, value, unit) => value == null ? "" : `<span>${label} <b>${value}</b>${unit}</span>`;
     const info = r ? infos.get(r.id) : null;
     const level = r ? levels.get(r.id) : null;
     const facts = !r ? "結果なし"
-      : fact("T30", info?.t30?.toFixed(2), " s") + fact("EDT", info?.edt?.toFixed(2), " s")
+      : fact("T20", info?.t20?.toFixed(2), " s") + fact("T30", info?.t30?.toFixed(2), " s") + fact("EDT", info?.edt?.toFixed(2), " s")
         + fact("音量", level == null ? null : (level > 0 ? "+" : "") + level.toFixed(1), " dB")
         + (r && loading.has(r.id) ? `<span class="busy">読み込み中…</span>` : "");
     b.innerHTML = `${num}<span class="name"></span>${decaySvg(r)}

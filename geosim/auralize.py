@@ -286,7 +286,7 @@ class Catalog:
         return round(float(20 * np.log10(norm * gain)), 1) if norm > 0 else None
 
     def info(self, identifiers):
-        """カードに出す T30 / EDT（中音域の平均）。`rt.csv` だけ読む（小さい）。"""
+        """カードに出す T20 / T30 / EDT（中音域の平均）。`rt.csv` だけ読む（小さい）。"""
         import table
 
         def one(identifier):
@@ -299,7 +299,8 @@ class Catalog:
             rt_path = item["path"][:-len(IR_SUFFIX)] + "rt.csv"
             frequencies, rows = table.read_frequency_table(rt_path)
             value = {key: mid_value(frequencies, rows.get(row))
-                     for key, row in (("t30", "T30_s"), ("edt", "EDT_s"))}
+                     for key, row in (("t20", "T20_s"), ("t30", "T30_s"),
+                                     ("edt", "EDT_s"))}
             with self.lock:
                 self.infos[identifier] = value
             return identifier, value

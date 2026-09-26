@@ -6844,6 +6844,13 @@ def test_auralize():
               abs(len(at48) - len(t) * 48000 / 44100) <= 1
               and abs(20 * np.log10(g48 / g44)) < 0.05,
               f"{len(at48)} 点 / 差 {20 * np.log10(g48 / g44):+.3f} dB")
+        rt = os.path.join(folder, pj.RESULT_DIR, "src1", "rec1", "室_条件A_rt.csv")
+        with open(rt, "w", encoding="utf-8-sig") as f:
+            f.write("項目,250,500,1000,2000\nEDT_s,9,0.8,1.0,9\n"
+                    "T20_s,9,1.1,1.3,9\nT30_s,9,1.2,1.6,9\n")
+        got = cat.info(["結果/src1/rec1/室_条件A_ir.csv"])["結果/src1/rec1/室_条件A_ir.csv"]
+        check("カードの T20 / T30 / EDT は rt.csv の 500 Hz と 1 kHz の平均",
+              got == {"t20": 1.2, "t30": 1.4, "edt": 0.9}, str(got))
         cat.KEEP = 2
         cat.cache.clear()
         for r in cat.results:
