@@ -72,7 +72,7 @@ select { background: var(--raised); border: 1px solid var(--line); border-radius
 .quiet:hover { color: var(--ivory); border-color: var(--sage); }
 
 /* ---- 本体 ------------------------------------------------------------ */
-main { display: grid; grid-template-columns: 250px 1fr; min-height: 0; }
+main { display: grid; grid-template-columns: 290px 1fr; min-height: 0; }
 aside {
   border-right: 1px solid var(--line);
   padding: 20px 0;
@@ -92,6 +92,15 @@ aside h2, .room h2 { font-size: 13px; font-weight: 700; color: var(--sage); marg
 .sources .size { color: var(--sage); font-size: 12px; }
 .sources .where { font-size: 11px; color: var(--sage); }
 .mic-note { margin: 6px 20px 0; font-size: 12px; color: var(--sage); }
+.howl { margin: 12px 16px 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-m); display: grid; gap: 4px; }
+.howl h3 { margin: 0 0 4px; font-size: 12px; font-weight: 700; color: var(--sage); }
+.howl .row { display: flex; align-items: center; gap: 8px; cursor: pointer; white-space: nowrap; }
+.howl .row input[type=checkbox] { accent-color: var(--brass); }
+.howl .value { margin-left: auto; display: inline-flex; align-items: center; gap: 4px; color: var(--sage); font-size: 12px; }
+.howl input[type=number] { width: 56px; background: var(--felt-deep); border: 1px solid var(--line); border-radius: var(--radius-s); padding: 2px 4px; text-align: right; }
+.howl .sub { margin: 0 0 6px; font-size: 11px; color: var(--sage); line-height: 1.45; }
+.lamp { width: 8px; height: 8px; border-radius: 50%; background: var(--line); }
+.lamp.on { background: var(--verdigris); box-shadow: 0 0 6px var(--verdigris); }
 .choice { padding: 0 20px; display: grid; gap: 4px; }
 .choice label { display: flex; gap: 8px; align-items: center; cursor: pointer; }
 .choice input { accent-color: var(--brass); }
@@ -238,7 +247,18 @@ footer .status { margin-left: auto; }
       <h2>マイク</h2>
       <ul class="sources"><li><button id="micButton" aria-pressed="false"><span>マイク入力を畳み込む</span></button></li></ul>
       <div class="choice" id="micDeviceRow" hidden style="margin-top:6px"><select id="micDevice"></select></div>
-      <p class="mic-note">スピーカで鳴らすとハウリングします。ヘッドホンで聴いてください。</p>
+      <p class="mic-note">ヘッドホンで聴くのが確かです。スピーカで鳴らすときは、マイクを口元に付け、背中をスピーカに向けたうえで、下の対策を入れてください。</p>
+      <div class="howl">
+        <h3>ハウリング対策（スピーカのとき）</h3>
+        <label class="row"><input type="checkbox" id="shiftOn"> 周波数シフト
+          <span class="value"><input type="number" id="shiftHz" min="1" max="20" step="0.5" value="5"> Hz</span></label>
+        <p class="sub">出す音を少し上へずらし、戻ってきた音が積み上がらないようにします（余裕 6 dB ほど）。声ならほぼ分かりません。音楽は音程のずれに気づくことがあります。</p>
+        <label class="row"><input type="checkbox" id="gateOn"> ゲート <span class="lamp" id="gateLamp" title="マイクが開いているか"></span>
+          <span class="value"><input type="number" id="gateDb" min="-90" max="0" step="1" value="-50"> dB</span></label>
+        <p class="sub">話していない間はマイクを閉じます。<span id="gateLevel">入力 — dB</span>。話していないときの入力より少し上にしてください。</p>
+        <label class="row"><input type="checkbox" id="aecOn"> エコーキャンセル</label>
+        <p class="sub">ブラウザの機能です。テレビ会議向けなので、長い響きを削ったりにじませたりすることがあります。聴き比べて決めてください。切り替えるとマイクをつなぎ直します。</p>
+      </div>
     </section>
     <section>
       <h2>聴き方</h2>
@@ -308,6 +328,107 @@ footer .status { margin-left: auto; }
   <button id="startButton">音を出せるようにする</button>
 </div></div>
 
+<script type="text/plain" id="workletCode">
+// ============================================================================
+// 音声処理（AudioWorklet。音の流れの中で 128 サンプルずつ呼ばれる）
+// ============================================================================
+
+// ---- 周波数シフト ----------------------------------------------------------
+// ★ハウリング対策。出す音を数 Hz だけずらすと、一周して戻ってきた音が
+//   同じ周波数で積み上がらなくなる（PA の定番。約 6 dB の余裕）。
+//   ヒルベルト変換（FIR）で解析信号 x + j·H[x] を作り、e^{j2πft} を掛けて実部を取る：
+//     y = x·cos φ − H[x]·sin φ     （f > 0 で上へずれる）
+//   ヒルベルト FIR は奇数番目だけ 2/(πn)（ブラックマン窓）。元の信号は同じだけ遅らせる
+class FrequencyShifter extends AudioWorkletProcessor {
+  static get parameterDescriptors() { return [{ name: "shift", defaultValue: 5, minValue: -50, maxValue: 50 }]; }
+  constructor() {
+    super();
+    const N = 511, M = (N - 1) / 2;
+    this.N = N; this.M = M;
+    this.h = new Float32Array(N);
+    for (let i = 0; i < N; i++) {
+      const n = i - M;
+      if (n % 2 !== 0) {
+        const w = 0.42 - 0.5 * Math.cos(2 * Math.PI * i / (N - 1)) + 0.08 * Math.cos(4 * Math.PI * i / (N - 1));
+        this.h[i] = 2 / (Math.PI * n) * w;
+      }
+    }
+    this.buffers = [];
+    this.pos = 0;
+    this.phase = 0;
+  }
+  process(inputs, outputs, parameters) {
+    const input = inputs[0], output = outputs[0];
+    if (!input.length) return true;
+    const N = this.N, M = this.M, h = this.h;
+    while (this.buffers.length < input.length) this.buffers.push(new Float32Array(N));
+    const shift = parameters.shift[0];
+    const step = 2 * Math.PI * shift / sampleRate;
+    const frames = input[0].length;
+    let phase = this.phase, pos = this.pos;
+    for (let k = 0; k < frames; k++) {
+      const c = Math.cos(phase), sn = Math.sin(phase);
+      for (let ch = 0; ch < input.length; ch++) {
+        const buf = this.buffers[ch];
+        buf[pos] = input[ch][k];
+        // H[x] と、M だけ遅らせた元の信号。★係数が 0 でないのは n = i − M が奇数の所
+        //   ＝ M（255）が奇数なので **i が偶数**の所（奇数の i を回すと全部 0 になる）
+        let hx = 0;
+        for (let i = 0; i < N; i += 2) {
+          let j = pos - i; if (j < 0) j += N;
+          hx += h[i] * buf[j];
+        }
+        let d = pos - M; if (d < 0) d += N;
+        if (output[ch]) output[ch][k] = buf[d] * c - hx * sn;
+      }
+      phase += step;
+      if (phase > Math.PI) phase -= 2 * Math.PI;
+      pos = pos + 1 === N ? 0 : pos + 1;
+    }
+    this.phase = phase; this.pos = pos;
+    return true;
+  }
+}
+registerProcessor("frequency-shifter", FrequencyShifter);
+
+// ---- マイクのゲート --------------------------------------------------------
+// 話していない間はマイクを閉じる（無音の間にハウリングが育たないように）。
+// 包絡（実効値）がしきい値を超えたら 5 ms で開き、下回ってから 0.25 s 待って 0.15 s で閉じる
+class MicGate extends AudioWorkletProcessor {
+  static get parameterDescriptors() { return [{ name: "threshold", defaultValue: -50, minValue: -90, maxValue: 0 }, { name: "enabled", defaultValue: 0, minValue: 0, maxValue: 1 }]; }
+  constructor() {
+    super();
+    this.env = 0; this.gain = 1; this.hold = 0; this.sent = -1; this.count = 0;
+  }
+  process(inputs, outputs, parameters) {
+    const input = inputs[0], output = outputs[0];
+    if (!input.length) return true;
+    const enabled = parameters.enabled[0] >= 0.5;
+    const threshold = Math.pow(10, parameters.threshold[0] / 20);
+    const frames = input[0].length;
+    const attackEnv = Math.exp(-1 / (0.005 * sampleRate)), releaseEnv = Math.exp(-1 / (0.08 * sampleRate));
+    const open = 1 / (0.005 * sampleRate), close = 1 / (0.15 * sampleRate), holdFrames = 0.25 * sampleRate;
+    for (let k = 0; k < frames; k++) {
+      let v = 0;
+      for (let ch = 0; ch < input.length; ch++) v = Math.max(v, Math.abs(input[ch][k]));
+      const a = v > this.env ? attackEnv : releaseEnv;
+      this.env = a * this.env + (1 - a) * v;
+      if (!enabled) { this.gain = 1; }
+      else if (this.env >= threshold) { this.hold = holdFrames; this.gain = Math.min(1, this.gain + open); }
+      else if (this.hold > 0) { this.hold--; }
+      else { this.gain = Math.max(0, this.gain - close); }
+      for (let ch = 0; ch < input.length; ch++) if (output[ch]) output[ch][k] = input[ch][k] * this.gain;
+    }
+    // 開いているか・入力の大きさを画面へ（間引いて送る）
+    if (++this.count % 8 === 0) {
+      const state = this.gain > 0.5 ? 1 : 0;
+      this.port.postMessage({ open: state, level: this.env > 0 ? 20 * Math.log10(this.env) : -120 });
+    }
+    return true;
+  }
+}
+registerProcessor("mic-gate", MicGate);
+</script>
 <script>
 "use strict";
 // ============================================================================
@@ -360,6 +481,14 @@ function initAudio() {
   A.wet.connect(A.pre);
   A.pre.connect(A.master);
   routeLimiter();
+  // ★ハウリング対策の処理（AudioWorklet）。読み込みは非同期なので、できたら差し込む
+  const code = document.getElementById("workletCode").textContent;
+  A.worklet = ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([code], { type: "application/javascript" })))
+    .then(() => {
+      A.shifter = new AudioWorkletNode(ctx, "frequency-shifter", { outputChannelCount: [2] });
+      routeShift();
+    })
+    .catch((error) => toast(`ハウリング対策の処理を読み込めませんでした（${error.message}）`, true));
   A.analyser.connect(ctx.destination);
   setChannels(document.querySelector("input[name=channels]:checked").value);
   setVolume();
@@ -367,6 +496,21 @@ function initAudio() {
   setupOutputDevices();
   requestAnimationFrame(tick);
   $("status").textContent = `出力 ${ctx.sampleRate} Hz`;
+}
+
+// 周波数シフトは**マイクを畳み込んでいるときだけ**出力の手前に挟む
+// （ドライソースの再生までずらす理由は無い。音程が変わるだけ）
+function routeShift() {
+  if (!A.pre) return;
+  const on = !!(A.shifter && S.mic && $("shiftOn").checked);
+  A.pre.disconnect();
+  if (A.shifter) A.shifter.disconnect();
+  if (on) {
+    A.shifter.parameters.get("shift").value = Number($("shiftHz").value) || 5;
+    A.pre.connect(A.shifter).connect(A.master);
+  } else {
+    A.pre.connect(A.master);
+  }
 }
 
 function routeLimiter() {
@@ -726,7 +870,10 @@ function stopNode() {
 }
 function stopPlayback() { stopNode(); S.playing = false; updateTransport(); }
 function pause() { S.cursor = position(); stopPlayback(); }
-function toggle() { S.playing ? pause() : play(); }
+function toggle() {
+  if (S.mic) { toggleMicPause(); return; }
+  S.playing ? pause() : play();
+}
 
 function position() {
   if (!S.playing || !S.dry) return S.cursor;
@@ -742,8 +889,10 @@ function position() {
 function replayIfPlaying() { if (S.playing) play(position()); }
 
 function updateTransport() {
-  $("playText").textContent = S.playing ? "停止" : "再生";
-  $("playIcon").innerHTML = S.playing ? '<path d="M3 2h4v12H3zM9 2h4v12H9z"/>' : '<path d="M4 2l10 6-10 6z"/>';
+  const running = S.mic ? !S.mic.paused : S.playing;
+  $("playText").textContent = running ? "停止" : (S.mic ? "再開" : "再生");
+  $("playIcon").innerHTML = running ? '<path d="M3 2h4v12H3zM9 2h4v12H9z"/>' : '<path d="M4 2l10 6-10 6z"/>';
+  $("play").title = S.mic ? "マイクの畳み込みを一時停止 / 再開（Space）。マイクはつないだまま" : "再生 / 一時停止（Space）";
   $("loop").setAttribute("aria-pressed", String(S.loop));
   $("clearSel").disabled = !S.sel;
   $("rangeText").innerHTML = S.sel
@@ -759,26 +908,45 @@ function formatTime(t) {
 // ============================================================================
 // マイク
 // ============================================================================
+//   マイク → 解析（波形・入力の大きさ。一時停止中も動かす）
+//          → ゲート → 一時停止の音量 → inputBus（畳み込みへ）
 async function startMic() {
   initAudio();
   if (ctx.state === "suspended") ctx.resume();
   try {
+    await A.worklet;
     const deviceId = $("micDevice").value;
+    // エコーキャンセルだけ選べる。雑音抑圧・自動音量はいつも切る（響きの尾を削られるため）
     const stream = await navigator.mediaDevices.getUserMedia({ audio: {
-      echoCancellation: false, noiseSuppression: false, autoGainControl: false,
+      echoCancellation: $("aecOn").checked, noiseSuppression: false, autoGainControl: false,
       ...(deviceId ? { deviceId: { exact: deviceId } } : {}) } });
-    stopMic();
+    const wasPaused = S.mic?.paused ?? false;
+    stopMic(true);
     stopPlayback();
     const node = new MediaStreamAudioSourceNode(ctx, { mediaStream: stream });
     const analyser = new AnalyserNode(ctx, { fftSize: 2048 });
-    node.connect(A.input); node.connect(analyser);
-    S.mic = { stream, node, analyser, trace: new Float32Array(600) };
+    const pauseGain = new GainNode(ctx, { gain: wasPaused ? 0 : 1 });
+    let gate = null;
+    if (A.shifter) {
+      gate = new AudioWorkletNode(ctx, "mic-gate");
+      gate.port.onmessage = (e) => showGate(e.data);
+      node.connect(gate).connect(pauseGain);
+    } else {
+      node.connect(pauseGain);
+    }
+    node.connect(analyser);
+    pauseGain.connect(A.input);
+    S.mic = { stream, node, analyser, gate, pauseGain, paused: wasPaused, trace: new Float32Array(600) };
+    applyGate();
+    routeShift();
     $("micButton").setAttribute("aria-pressed", "true");
     $("waveTitle").textContent = "マイク入力";
     const latency = ((ctx.baseLatency || 0) + (ctx.outputLatency || 0)) * 1000;
     $("waveMeta").textContent = `遅れの目安 ${latency.toFixed(0)} ms（ブラウザが報告する値）`;
     $("stageEmpty").hidden = true;
-    ["play", "toStart", "loop", "clearSel"].forEach((id) => $(id).disabled = true);
+    ["toStart", "loop", "clearSel"].forEach((id) => $(id).disabled = true);
+    $("play").disabled = false;
+    updateTransport();
     renderSources();
     await listMicDevices();
   } catch (error) {
@@ -786,17 +954,47 @@ async function startMic() {
   }
 }
 
-function stopMic() {
+function stopMic(reconnecting = false) {
   if (!S.mic) return;
-  S.mic.node.disconnect(); S.mic.stream.getTracks().forEach((t) => t.stop());
+  S.mic.node.disconnect(); S.mic.gate?.disconnect(); S.mic.pauseGain.disconnect();
+  S.mic.stream.getTracks().forEach((t) => t.stop());
   S.mic = null;
+  if (reconnecting) return;
+  routeShift();
   $("micButton").setAttribute("aria-pressed", "false");
+  $("gateLamp").classList.remove("on");
+  $("gateLevel").textContent = "入力 — dB";
   if (S.dry) {
     $("waveTitle").textContent = S.dry.name;
     $("waveMeta").textContent = formatTime(S.dry.buffer.duration);
     ["play", "toStart", "loop"].forEach((id) => $(id).disabled = false);
+  } else {
+    $("play").disabled = true;
   }
+  updateTransport();
   drawWave();
+}
+
+// ★マイクのまま一時停止する（設定を確かめる間など）。マイクはつないだまま、
+//   畳み込みへ送る音だけ止める。入力の波形と大きさは見え続ける
+function toggleMicPause() {
+  if (!S.mic) return;
+  S.mic.paused = !S.mic.paused;
+  ramp(S.mic.pauseGain.gain, S.mic.paused ? 0 : 1);
+  updateTransport();
+}
+
+function applyGate() {
+  const gate = S.mic?.gate;
+  if (!gate) return;
+  gate.parameters.get("enabled").value = $("gateOn").checked ? 1 : 0;
+  gate.parameters.get("threshold").value = Number($("gateDb").value) || -50;
+  if (!$("gateOn").checked) $("gateLamp").classList.remove("on");
+}
+
+function showGate({ open, level }) {
+  $("gateLamp").classList.toggle("on", $("gateOn").checked && open === 1 && !S.mic?.paused);
+  $("gateLevel").textContent = `入力 ${level < -99 ? "—" : level.toFixed(0)} dB`;
 }
 
 async function listMicDevices() {
@@ -1007,10 +1205,16 @@ function drawMicTrace(g) {
   for (const v of data) peak = Math.max(peak, Math.abs(v));
   trace.copyWithin(0, 1); trace[trace.length - 1] = peak;
   const mid = H / 2, scale = H / 2 - 10, step = W / trace.length;
-  g.fillStyle = "#d6a443";
+  g.fillStyle = S.mic.paused ? "#8a6d33" : "#d6a443";
   for (let k = 0; k < trace.length; k++) { const h = trace[k] * scale; g.fillRect(k * step, mid - h, Math.max(1, step - .5), Math.max(1, 2 * h)); }
   g.fillStyle = "#8f9c95"; g.font = "12px " + getComputedStyle(document.body).fontFamily;
   g.fillText("マイクの入力（ピークの流れ）", 12, 20);
+  if (S.mic.paused) {
+    g.fillStyle = "#ece6d5"; g.font = "700 18px " + getComputedStyle(document.body).fontFamily;
+    g.textAlign = "center";
+    g.fillText("一時停止中（マイクはつないだまま。畳み込みへは送っていません）", W / 2, 34);
+    g.textAlign = "start";
+  }
 }
 
 function drawMeter() {
@@ -1119,6 +1323,11 @@ $("volume").addEventListener("input", setVolume);
 $("limiter").addEventListener("change", () => ctx && routeLimiter());
 $("clip").addEventListener("click", () => { clipped = false; $("clip").classList.remove("on"); });
 $("micButton").addEventListener("click", () => S.mic ? stopMic() : startMic());
+$("shiftOn").addEventListener("change", routeShift);
+$("shiftHz").addEventListener("change", () => { if (A.shifter) A.shifter.parameters.get("shift").value = Number($("shiftHz").value) || 5; });
+$("gateOn").addEventListener("change", applyGate);
+$("gateDb").addEventListener("change", applyGate);
+$("aecOn").addEventListener("change", () => { if (S.mic) startMic(); });
 $("micDevice").addEventListener("change", () => S.mic && startMic());
 $("outputDevice").addEventListener("change", async (e) => {
   try { await ctx.setSinkId(e.target.value); } catch (error) { toast(`出力先を変えられませんでした（${error.message}）`, true); }
@@ -1136,6 +1345,8 @@ $("rescan").addEventListener("click", async () => {
 });
 
 document.addEventListener("keydown", (e) => {
+  if (e.target instanceof Element && e.target.matches("input[type=number], input[type=text]")) return;   // 数字を打っている
+  if (e.target instanceof Element && e.target.matches("input[type=checkbox], input[type=radio]") && e.key === " ") return;
   if (e.target instanceof Element && e.target.matches("input[type=range], select") && !/^[ rRlL]$/.test(e.key)) return;
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   if (e.key === " ") { e.preventDefault(); toggle(); }
