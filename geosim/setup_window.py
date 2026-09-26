@@ -18,6 +18,8 @@
 """
 
 import os
+import subprocess
+import sys
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
@@ -370,6 +372,9 @@ class SetupWindow:
             ("測定点の並び…", self._on_point_order),
             ("面を確認…（法線・吸音材）", self._on_normals),
             ("前回の結果を見る", self._on_view),
+            # ★可聴化（2026-09-26 ユーザー要望）。ブラウザの窓で開くので、
+            #   この画面は閉じずに並べて使える
+            ("可聴化…", self._on_auralize),
             # ★同じフォルダの条件表を全部回す（2026-08-21 ユーザー要望）。
             #   経路は吸音に依らないので 2 件目以降は一瞬で終わる（F-9）
             ("全条件を一括 ▶▶", self._on_run_all),
@@ -838,6 +843,26 @@ class SetupWindow:
             return
         self.action = "view"
         self.root.destroy()
+
+    def _on_auralize(self):
+        """インパルス応答をドライソースに畳み込んで聴く画面（`auralize.py`）を開く。
+
+        ★**この画面は閉じない**（別のプロセスで立ち上げ、ブラウザの窓で開く）。
+        条件を直して計算し直したら、可聴化の画面の「結果を読み直す」で取り込める。
+        """
+        error = self._collect()
+        if error:
+            messagebox.showerror("入力を確認してください", error)
+            return
+        if not pj.has_results(self.project):
+            messagebox.showinfo("結果がありません",
+                                f"{self.project.folder} にまだ計算結果がありません。\n"
+                                f"「計算する ▶」を先に実行してください。")
+            return
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "auralize.py")
+        subprocess.Popen([sys.executable, script, self.project.folder],
+                         cwd=os.path.dirname(script))
+        self.status.config(text="可聴化の画面をブラウザで開きます（結果を読むので少し待ちます）")
 
     def _on_run(self):
         error = self._collect()

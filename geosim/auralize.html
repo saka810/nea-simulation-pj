@@ -1,0 +1,1117 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>可聴化</title>
+<!--
+  可聴化の画面（auralize.py が配る）。音は Web Audio の ConvolverNode で
+  リアルタイムに畳み込む。設計の約束：
+  ・色は意味で分ける：真鍮 = 元の音（ドライ）、緑青 = 室の響き
+  ・条件どうしの音量の比は保つ（normalize = false。係数はサーバが 1 つだけ掛ける）
+  ・切り替えは「温めておいた畳み込み」の音量を渡すだけ（履歴を持ったまま即座に替わる）
+-->
+<style>
+:root {
+  --felt: #232d29;
+  --felt-deep: #1b2320;
+  --raised: #2e3a35;
+  --line: #3d4b45;
+  --ivory: #ece6d5;
+  --sage: #8f9c95;
+  --brass: #d6a443;
+  --brass-dim: #8a6d33;
+  --verdigris: #6cb3a1;
+  --verdigris-dim: #3e6f63;
+  --alarm: #e0664f;
+  --radius-s: 4px;
+  --radius-m: 8px;
+  --font: "BIZ UDPGothic", "BIZ UDPゴシック", "Yu Gothic UI", "Meiryo", sans-serif;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { height: 100%; margin: 0; }
+body {
+  background: var(--felt);
+  color: var(--ivory);
+  font-family: var(--font);
+  font-size: 14px;
+  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  min-height: 100vh;
+}
+button, input, select { font: inherit; color: inherit; }
+button { cursor: pointer; }
+:focus-visible { outline: 2px solid var(--brass); outline-offset: 2px; }
+
+/* ---- 上の帯 ---------------------------------------------------------- */
+header {
+  display: flex; align-items: center; gap: 24px;
+  padding: 14px 24px;
+  border-bottom: 1px solid var(--line);
+  background: var(--felt-deep);
+}
+.title { display: flex; align-items: baseline; gap: 14px; min-width: 0; flex: 1 1 0; }
+.title h1 { margin: 0; font-size: 22px; font-weight: 700; letter-spacing: .08em; white-space: nowrap; }
+.title .project { color: var(--sage); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.output { display: flex; align-items: center; gap: 16px; flex: none; }
+.output label { color: var(--sage); font-size: 13px; }
+.volume { display: flex; align-items: center; gap: 10px; }
+.volume output { width: 58px; text-align: right; }
+input[type=range] { accent-color: var(--brass); width: 150px; }
+.meter { position: relative; width: 150px; height: 10px; background: var(--felt); border-radius: 2px; overflow: hidden; border: 1px solid var(--line); }
+.meter canvas { display: block; width: 100%; height: 100%; }
+.clip { width: 12px; height: 12px; border-radius: 50%; background: var(--line); }
+.clip.on { background: var(--alarm); box-shadow: 0 0 8px var(--alarm); }
+select { background: var(--raised); border: 1px solid var(--line); border-radius: var(--radius-s); padding: 4px 8px; max-width: 220px; }
+.quiet { background: none; border: 1px solid var(--line); border-radius: var(--radius-s); padding: 4px 10px; color: var(--sage); }
+.quiet:hover { color: var(--ivory); border-color: var(--sage); }
+
+/* ---- 本体 ------------------------------------------------------------ */
+main { display: grid; grid-template-columns: 250px 1fr; min-height: 0; }
+aside {
+  border-right: 1px solid var(--line);
+  padding: 20px 0;
+  overflow-y: auto;
+  display: flex; flex-direction: column; gap: 28px;
+}
+aside h2, .room h2 { font-size: 13px; font-weight: 700; color: var(--sage); margin: 0 0 8px; padding: 0 20px; letter-spacing: .06em; }
+.room h2 { padding: 0; }
+.sources { list-style: none; margin: 0; padding: 0; }
+.sources button {
+  display: flex; width: 100%; justify-content: space-between; align-items: baseline; gap: 8px;
+  background: none; border: 0; border-left: 3px solid transparent;
+  padding: 7px 20px 7px 17px; text-align: left;
+}
+.sources button:hover { background: var(--raised); }
+.sources button[aria-pressed=true] { border-left-color: var(--brass); background: var(--raised); color: var(--brass); }
+.sources .size { color: var(--sage); font-size: 12px; }
+.sources .where { font-size: 11px; color: var(--sage); }
+.mic-note { margin: 6px 20px 0; font-size: 12px; color: var(--sage); }
+.choice { padding: 0 20px; display: grid; gap: 4px; }
+.choice label { display: flex; gap: 8px; align-items: center; cursor: pointer; }
+.choice input { accent-color: var(--brass); }
+.hint { padding: 0 20px; font-size: 12px; color: var(--sage); }
+.drop-hint { padding: 0 20px; font-size: 12px; color: var(--sage); }
+
+.work { display: grid; grid-template-rows: auto auto 1fr; min-width: 0; min-height: 0; }
+
+/* ---- 波形 ------------------------------------------------------------ */
+.wave { padding: 20px 28px 8px; }
+.wave-head { display: flex; align-items: baseline; gap: 16px; margin-bottom: 10px; }
+.wave-head h3 { margin: 0; font-size: 26px; font-weight: 700; color: var(--brass); }
+.wave-head .meta { color: var(--sage); }
+.legend { margin-left: auto; display: flex; gap: 18px; font-size: 12px; color: var(--sage); }
+.legend span::before { content: ""; display: inline-block; width: 18px; height: 8px; border-radius: 2px; margin-right: 6px; vertical-align: 1px; }
+.legend .dry::before { background: var(--brass); }
+.legend .wet::before { background: var(--verdigris); opacity: .7; }
+.stage { position: relative; height: clamp(150px, 28vh, 280px); background: var(--felt-deep); border-radius: var(--radius-m); border: 1px solid var(--line); overflow: hidden; cursor: crosshair; touch-action: none; }
+.stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+.stage .empty { position: absolute; inset: 0; display: grid; place-items: center; color: var(--sage); text-align: center; padding: 20px; }
+.overview { position: relative; height: 34px; margin-top: 6px; background: var(--felt-deep); border-radius: var(--radius-s); border: 1px solid var(--line); cursor: grab; }
+.overview canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+
+.transport { display: flex; align-items: center; gap: 10px; padding: 12px 28px 18px; flex-wrap: wrap; }
+.transport button.key {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  height: 40px; min-width: 44px; padding: 0 14px;
+  background: var(--raised); border: 1px solid var(--line); border-radius: var(--radius-m);
+}
+.transport button.key:hover { border-color: var(--sage); }
+.transport button.key[aria-pressed=true] { background: var(--brass); color: var(--felt-deep); border-color: var(--brass); }
+.transport button.play { min-width: 64px; background: var(--brass); color: var(--felt-deep); border-color: var(--brass); font-weight: 700; }
+.transport button:disabled { opacity: .4; cursor: default; }
+.transport svg { width: 16px; height: 16px; fill: currentColor; }
+.clock { font-size: 22px; margin-left: 8px; letter-spacing: .02em; }
+.clock small { color: var(--sage); font-size: 14px; }
+.range { color: var(--sage); margin-left: auto; }
+.range b { color: var(--ivory); font-weight: 400; }
+
+/* ---- 室の響き -------------------------------------------------------- */
+.room { border-top: 1px solid var(--line); padding: 18px 28px 24px; overflow-y: auto; min-height: 0; }
+.room-bar { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 28px; margin-bottom: 16px; }
+.switch {
+  display: inline-grid; grid-template-columns: 1fr 1fr; width: 188px; height: 44px;
+  background: var(--felt-deep); border: 1px solid var(--line); border-radius: 22px; padding: 3px; position: relative;
+}
+.switch button { position: relative; z-index: 1; background: none; border: 0; border-radius: 19px; color: var(--sage); font-weight: 700; }
+.switch::before {
+  content: ""; position: absolute; top: 3px; bottom: 3px; left: 3px; width: calc(50% - 3px);
+  border-radius: 19px; background: var(--brass); transition: transform .18s ease, background .18s ease;
+}
+.switch.wet::before { transform: translateX(100%); background: var(--verdigris); }
+.switch button[aria-pressed=true] { color: var(--felt-deep); }
+.pills { display: flex; flex-wrap: wrap; gap: 6px; }
+.pills button { background: var(--raised); border: 1px solid var(--line); border-radius: 16px; padding: 4px 12px; min-width: 52px; }
+.pills button[aria-pressed=true] { border-color: var(--verdigris); color: var(--verdigris); background: #2f4540; }
+.group { display: grid; gap: 0; }
+
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(196px, 1fr)); gap: 10px; }
+.card {
+  position: relative; text-align: left;
+  background: var(--raised); border: 1px solid var(--line); border-radius: var(--radius-m);
+  padding: 12px 14px 10px; display: grid; gap: 6px;
+}
+.card:hover { border-color: var(--sage); }
+.card[aria-pressed=true] { border-color: var(--verdigris); background: #2c423c; box-shadow: inset 0 0 0 1px var(--verdigris); }
+.card:disabled { opacity: .35; cursor: default; }
+.card .name { font-size: 16px; font-weight: 700; padding-right: 22px; overflow-wrap: anywhere; }
+.card .num { position: absolute; top: 10px; right: 12px; font-size: 12px; color: var(--sage); }
+.card svg { width: 100%; height: 42px; display: block; }
+.card .facts { display: flex; flex-wrap: wrap; gap: 2px 12px; font-size: 12px; color: var(--sage); padding-right: 10px; }
+.card .facts span { white-space: nowrap; }
+.card .facts b { color: var(--ivory); font-weight: 400; }
+.card .warm { position: absolute; right: 12px; bottom: 12px; width: 6px; height: 6px; border-radius: 50%; background: transparent; }
+.card .warm.on { background: var(--verdigris); }
+.nothing { color: var(--sage); padding: 20px 0; }
+
+footer { display: flex; gap: 22px; padding: 8px 24px; border-top: 1px solid var(--line); background: var(--felt-deep); color: var(--sage); font-size: 12px; flex-wrap: wrap; }
+footer kbd { font-family: inherit; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 3px; padding: 0 5px; color: var(--ivory); margin-right: 4px; }
+footer .status { margin-left: auto; }
+
+.toast {
+  position: fixed; left: 50%; bottom: 48px; transform: translateX(-50%);
+  background: var(--raised); border: 1px solid var(--line); border-left: 4px solid var(--verdigris);
+  padding: 10px 16px; border-radius: var(--radius-s); max-width: min(640px, 92vw); display: none;
+}
+.toast.error { border-left-color: var(--alarm); }
+.toast.show { display: block; }
+.dropping .stage { outline: 2px dashed var(--brass); outline-offset: -6px; }
+
+.start {
+  position: fixed; inset: 0; background: rgba(20, 27, 24, .82); display: grid; place-items: center; z-index: 10;
+}
+.start div { max-width: 460px; text-align: center; display: grid; gap: 16px; padding: 24px; }
+.start p { margin: 0; color: var(--sage); }
+.start button { justify-self: center; background: var(--brass); color: var(--felt-deep); border: 0; border-radius: var(--radius-m); padding: 12px 28px; font-weight: 700; font-size: 16px; }
+
+@media (max-width: 860px) {
+  main { grid-template-columns: 1fr; }
+  aside { border-right: 0; border-bottom: 1px solid var(--line); max-height: 260px; }
+  header { flex-wrap: wrap; }
+  .output { margin-left: 0; flex-wrap: wrap; }
+}
+@media (prefers-reduced-motion: reduce) { .switch::before { transition: none; } }
+</style>
+</head>
+<body>
+<header>
+  <div class="title">
+    <h1>可聴化</h1>
+    <span class="project" id="project">読み込み中…</span>
+  </div>
+  <div class="output">
+    <select id="outputDevice" title="出力先" hidden></select>
+    <div class="volume">
+      <label for="volume">出力</label>
+      <input type="range" id="volume" min="-40" max="12" step="0.5" value="0">
+      <output id="volumeText">0.0 dB</output>
+    </div>
+    <div class="meter" title="出力のピーク"><canvas id="meter" width="150" height="10"></canvas></div>
+    <div class="clip" id="clip" title="0 dBFS を超えました（クリックで消す）"></div>
+    <label class="choice" style="padding:0"><span><input type="checkbox" id="limiter" checked> 振り切れ防止</span></label>
+    <button class="quiet" id="rescan" title="計算し直した結果を読み込む">結果を読み直す</button>
+  </div>
+</header>
+
+<main>
+  <aside>
+    <section>
+      <h2>音源</h2>
+      <ul class="sources" id="sources"></ul>
+      <p class="drop-hint">ほかの音声ファイルは画面へ落とすと並びます</p>
+    </section>
+    <section>
+      <h2>マイク</h2>
+      <ul class="sources"><li><button id="micButton" aria-pressed="false"><span>マイク入力を畳み込む</span></button></li></ul>
+      <div class="choice" id="micDeviceRow" hidden style="margin-top:6px"><select id="micDevice"></select></div>
+      <p class="mic-note">スピーカで鳴らすとハウリングします。ヘッドホンで聴いてください。</p>
+    </section>
+    <section>
+      <h2>聴き方</h2>
+      <div class="choice">
+        <label><input type="radio" name="channels" value="1" checked> モノラル（点音源として）</label>
+        <label><input type="radio" name="channels" value="2"> 録音のステレオのまま</label>
+      </div>
+      <p class="hint" style="margin-top:8px">インパルス応答は 1 ch（無指向の受音点）です。</p>
+    </section>
+  </aside>
+
+  <div class="work">
+    <section class="wave">
+      <div class="wave-head">
+        <h3 id="waveTitle">音源を選んでください</h3>
+        <span class="meta" id="waveMeta"></span>
+        <div class="legend"><span class="dry">元の音</span><span class="wet" title="元の音の二乗平均を応答のエネルギーで畳み込んだ見積もり（位相は見ていない）">室の響き（包絡の目安）</span></div>
+      </div>
+      <div class="stage" id="stage">
+        <canvas id="waveCanvas"></canvas>
+        <canvas id="overlayCanvas"></canvas>
+        <div class="empty" id="stageEmpty">左の一覧から音源を選ぶと、ここに波形が出ます。<br>ドラッグで範囲を選び、クリックで再生位置を決めます。</div>
+      </div>
+      <div class="overview" id="overview"><canvas id="overviewCanvas"></canvas></div>
+    </section>
+
+    <div class="transport">
+      <button class="key play" id="play" disabled title="再生 / 一時停止（Space）"><svg viewBox="0 0 16 16" id="playIcon"><path d="M4 2l10 6-10 6z"/></svg><span id="playText">再生</span></button>
+      <button class="key" id="toStart" disabled title="先頭（範囲があれば範囲の頭）へ（Home）"><svg viewBox="0 0 16 16"><path d="M3 2h2v12H3zM14 2v12L6 8z"/></svg></button>
+      <button class="key" id="loop" aria-pressed="false" disabled title="ループ（L）"><svg viewBox="0 0 16 16"><path d="M4 5h7V3l4 3.5L11 10V8H4a1 1 0 0 0-1 1v1H1V9a4 4 0 0 1 3-4zm8 6H5v2l-4-3.5L5 6v2h7a1 1 0 0 0 1-1V6h2v1a4 4 0 0 1-3 4z"/></svg>ループ</button>
+      <button class="key" id="clearSel" disabled title="範囲を解除（Esc）">範囲を解除</button>
+      <div class="clock"><span id="clockNow">0:00.00</span> <small>/ <span id="clockAll">0:00.00</span></small></div>
+      <div class="range" id="rangeText"></div>
+    </div>
+
+    <section class="room">
+      <div class="room-bar">
+        <div class="group">
+          <h2>室の響き</h2>
+          <div class="switch" id="switch">
+            <button id="dryButton" aria-pressed="true" title="元の音だけ（R で切り替え）">元の音</button>
+            <button id="wetButton" aria-pressed="false" title="室の響きを畳み込む（R で切り替え）">響きあり</button>
+          </div>
+        </div>
+        <div class="group" id="receiverGroup"><h2>受音点</h2><div class="pills" id="receivers"></div></div>
+        <div class="group" id="sourceGroup"><h2>音源位置</h2><div class="pills" id="positions"></div></div>
+      </div>
+      <h2>条件</h2>
+      <div class="cards" id="cards"></div>
+    </section>
+  </div>
+</main>
+
+<footer>
+  <span><kbd>Space</kbd>再生・停止</span>
+  <span><kbd>R</kbd>響きの切り替え</span>
+  <span><kbd>1</kbd>〜<kbd>9</kbd>条件</span>
+  <span><kbd>L</kbd>ループ</span>
+  <span><kbd>Esc</kbd>範囲を解除</span>
+  <span><kbd>ホイール</kbd>拡大・縮小</span>
+  <span class="status" id="status"></span>
+</footer>
+
+<div class="toast" id="toast" role="status"></div>
+<div class="start" id="start"><div>
+  <p>ブラウザは、画面を一度押すまで音を出せない決まりになっています。</p>
+  <button id="startButton">音を出せるようにする</button>
+</div></div>
+
+<script>
+"use strict";
+// ============================================================================
+// 状態
+// ============================================================================
+const $ = (id) => document.getElementById(id);
+const S = {
+  catalog: null,
+  conditions: [], receivers: [], positions: [],
+  condition: null, receiver: null, position: null,
+  wet: false,
+  // 再生
+  dry: null,            // { id, name, buffer, mono(Float32Array) }
+  playing: false, node: null, offset: 0, startedAt: 0,
+  loop: false, sel: null, cursor: 0,
+  view: { start: 0, end: 1 },
+  // マイク
+  mic: null,            // { stream, node, analyser }
+};
+let ctx = null;
+const A = {};           // 音の部品
+const irCache = new Map();    // id -> AudioBuffer（ctx の周波数に合わせたもの）
+const irData = new Map();     // id -> Float32Array（包絡の計算用）
+const slots = new Map();      // id -> { conv, gain, used }
+const dryCache = new Map();   // id -> AudioBuffer
+const SLOT_LIMIT = 12;        // 温めておく畳み込みの数（CPU と相談）
+const FADE = 0.04;            // 切り替えのクロスフェード [s]
+
+// ============================================================================
+// 音の配線
+//   入力（再生 or マイク）→ inputBus ─┬─ dryGain ────────────┐
+//                                   └─ 畳み込み×N → wetBus ─┴→ preMaster → master → 振り切れ防止 → 解析 → 出力
+// ============================================================================
+function initAudio() {
+  if (ctx) return;
+  ctx = new AudioContext({ latencyHint: "interactive" });
+  A.input = new GainNode(ctx, { channelCount: 1, channelCountMode: "explicit", channelInterpretation: "speakers" });
+  A.dry = new GainNode(ctx, { gain: 1 });
+  A.wet = new GainNode(ctx, { gain: 0 });
+  A.pre = new GainNode(ctx);
+  A.master = new GainNode(ctx, { gain: 1 });
+  A.limiter = new DynamicsCompressorNode(ctx, { threshold: -1, knee: 0, ratio: 20, attack: 0.002, release: 0.12 });
+  A.analyser = new AnalyserNode(ctx, { fftSize: 2048 });
+  A.input.connect(A.dry).connect(A.pre);
+  A.wet.connect(A.pre);
+  A.pre.connect(A.master);
+  routeLimiter();
+  A.analyser.connect(ctx.destination);
+  setChannels(document.querySelector("input[name=channels]:checked").value);
+  setVolume();
+  applyWet(true);
+  setupOutputDevices();
+  requestAnimationFrame(tick);
+  $("status").textContent = `出力 ${ctx.sampleRate} Hz`;
+}
+
+function routeLimiter() {
+  A.master.disconnect();
+  A.limiter.disconnect();
+  if ($("limiter").checked) { A.master.connect(A.limiter).connect(A.analyser); }
+  else { A.master.connect(A.analyser); }
+}
+
+function setChannels(value) {
+  if (!A.input) return;
+  A.input.channelCount = Number(value);
+}
+
+function setVolume() {
+  const db = Number($("volume").value);
+  $("volumeText").textContent = `${db > 0 ? "+" : ""}${db.toFixed(1)} dB`;
+  if (A.master) ramp(A.master.gain, Math.pow(10, db / 20), 0.03);
+}
+
+function ramp(param, value, time = FADE) {
+  const now = ctx.currentTime;
+  param.cancelScheduledValues(now);
+  param.setValueAtTime(param.value, now);
+  param.linearRampToValueAtTime(value, now + time);
+}
+
+// ---- 響きの ON / OFF --------------------------------------------------------
+function applyWet(immediate) {
+  $("switch").classList.toggle("wet", S.wet);
+  $("dryButton").setAttribute("aria-pressed", String(!S.wet));
+  $("wetButton").setAttribute("aria-pressed", String(S.wet));
+  if (!ctx) return;
+  const t = immediate ? 0.001 : FADE;
+  const wetOn = S.wet && currentResult();
+  ramp(A.dry.gain, wetOn ? 0 : 1, t);
+  ramp(A.wet.gain, wetOn ? 1 : 0, t);
+  drawWave();
+}
+
+// ---- 畳み込み（温めておく）--------------------------------------------------
+// ★切り替えは「すでに入力を聴き続けている畳み込み」の音量を渡すだけにする。
+//   新しく作った畳み込みは過去の入力を知らないので、響きの尾が途切れる
+async function loadIR(id) {
+  if (irCache.has(id)) return irCache.get(id);
+  const response = await fetch(`/api/ir?id=${encodeURIComponent(id)}&rate=${ctx.sampleRate}`);
+  if (!response.ok) throw new Error(`インパルス応答を読めませんでした（${id}）`);
+  const data = new Float32Array(await response.arrayBuffer());
+  const buffer = new AudioBuffer({ numberOfChannels: 1, length: Math.max(1, data.length), sampleRate: ctx.sampleRate });
+  buffer.copyToChannel(data, 0);
+  irCache.set(id, buffer);
+  irData.set(id, data);
+  return buffer;
+}
+
+async function warm(id) {
+  if (slots.has(id)) { slots.get(id).used = performance.now(); return slots.get(id); }
+  const buffer = await loadIR(id);
+  if (slots.has(id)) return slots.get(id);
+  // ★normalize = false：応答ごとに正規化すると条件どうしの音量の差が消える
+  const conv = new ConvolverNode(ctx, { disableNormalization: true });
+  conv.buffer = buffer;
+  const gain = new GainNode(ctx, { gain: 0 });
+  A.input.connect(conv).connect(gain).connect(A.wet);
+  const slot = { conv, gain, used: performance.now() };
+  slots.set(id, slot);
+  evictSlots();
+  renderCards();
+  return slot;
+}
+
+function evictSlots() {
+  const active = currentResult()?.id;
+  const order = [...slots.entries()].filter(([id]) => id !== active).sort((a, b) => a[1].used - b[1].used);
+  while (slots.size > SLOT_LIMIT && order.length) {
+    const [id, slot] = order.shift();
+    slot.gain.disconnect(); slot.conv.disconnect();
+    slots.delete(id);
+  }
+}
+
+async function activate(result) {
+  if (!ctx || !result) { applyWet(); return; }
+  try {
+    const slot = await warm(result.id);
+    if (currentResult()?.id !== result.id) return;   // 読み込み中に選び直された
+    for (const [id, s] of slots) ramp(s.gain.gain, id === result.id ? 1 : 0);
+    applyWet();
+  } catch (error) { toast(error.message, true); }
+}
+
+// 選んでいる受音点・音源位置の条件をまとめて温める（切り替えを途切れさせない）
+async function warmAround() {
+  if (!ctx) return;
+  const ids = S.conditions.map((c) => lookup(c, S.position, S.receiver)).filter(Boolean).map((r) => r.id);
+  for (const id of ids.slice(0, SLOT_LIMIT)) {
+    try { await warm(id); } catch (error) { toast(error.message, true); return; }
+  }
+}
+
+// ============================================================================
+// 結果の一覧
+// ============================================================================
+function key(c, s, r) { return `${c}\u0000${s}\u0000${r}`; }
+let resultIndex = new Map();
+function lookup(c, s, r) { return resultIndex.get(key(c, s, r)); }
+function currentResult() { return lookup(S.condition, S.position, S.receiver); }
+function conditionLabel(c) { return c || "（条件名なし）"; }
+
+async function loadCatalog(rescan) {
+  const response = await fetch(`/api/catalog${rescan ? "?rescan=1" : ""}`);
+  const data = await response.json();
+  S.catalog = data;
+  $("project").textContent = data.project;
+  $("project").title = data.folder;
+  document.title = `可聴化 ${data.project}`;
+  resultIndex = new Map(data.results.map((r) => [key(r.condition, r.source, r.receiver), r]));
+  const uniq = (list) => [...new Set(list)];
+  S.conditions = uniq(data.results.map((r) => r.condition));
+  S.receivers = uniq(data.results.map((r) => r.receiver));
+  S.positions = uniq(data.results.map((r) => r.source));
+  if (!S.conditions.includes(S.condition)) S.condition = S.conditions[0] ?? null;
+  if (!S.receivers.includes(S.receiver)) S.receiver = S.receivers[0] ?? null;
+  if (!S.positions.includes(S.position)) S.position = S.positions[0] ?? null;
+  renderSources();
+  renderPills();
+  renderCards();
+}
+
+function renderSources() {
+  const list = $("sources");
+  list.textContent = "";
+  const items = [...S.catalog.sources, ...dropped];
+  if (!items.length) {
+    const li = document.createElement("li");
+    li.className = "hint";
+    li.textContent = "ドライソース/ フォルダに音声ファイルがありません";
+    list.append(li);
+  }
+  for (const item of items) {
+    const li = document.createElement("li");
+    const b = document.createElement("button");
+    b.setAttribute("aria-pressed", String(S.dry?.id === item.id && !S.mic));
+    const name = document.createElement("span");
+    name.textContent = item.name;
+    const size = document.createElement("span");
+    size.className = item.where === "project" ? "where" : "size";
+    size.textContent = item.where === "project" ? "この案件" : item.where === "dropped" ? "持ち込み" : `${(item.bytes / 1048576).toFixed(0)} MB`;
+    b.append(name, size);
+    b.addEventListener("click", () => chooseDry(item));
+    li.append(b);
+    list.append(li);
+  }
+}
+
+function renderPills() {
+  const make = (host, group, values, current, label, onPick) => {
+    host.textContent = "";
+    $(group).hidden = values.length <= 1 && !values[0];
+    for (const v of values) {
+      const b = document.createElement("button");
+      b.textContent = label(v);
+      b.setAttribute("aria-pressed", String(v === current));
+      b.addEventListener("click", () => onPick(v));
+      host.append(b);
+    }
+  };
+  make($("receivers"), "receiverGroup", S.receivers, S.receiver, (v) => v || "—", (v) => { S.receiver = v; changed(); });
+  make($("positions"), "sourceGroup", S.positions, S.position, (v) => v || "—", (v) => { S.position = v; changed(); });
+}
+
+function changed() {
+  renderPills();
+  renderCards();
+  activate(currentResult());
+  warmAround();
+}
+
+function renderCards() {
+  const host = $("cards");
+  host.textContent = "";
+  if (!S.conditions.length) {
+    const p = document.createElement("p");
+    p.className = "nothing";
+    p.textContent = "このプロジェクトの結果にインパルス応答（…_ir.csv）がありません。先に計算してから「結果を読み直す」を押してください。";
+    host.append(p);
+    return;
+  }
+  S.conditions.forEach((c, i) => {
+    const r = lookup(c, S.position, S.receiver);
+    const b = document.createElement("button");
+    b.className = "card";
+    b.disabled = !r;
+    b.setAttribute("aria-pressed", String(c === S.condition));
+    b.title = r ? `${r.id}
+音量：全結果でいちばん大きい応答を 0 dB とした相対値` : "この受音点・音源位置の結果がありません";
+    const num = i < 9 ? `<span class="num">${i + 1}</span>` : "";
+    const fact = (label, value, unit) => value == null ? "" : `<span>${label} <b>${value}</b>${unit}</span>`;
+    b.innerHTML = `${num}<span class="name"></span>${decaySvg(r)}
+      <span class="facts">${r ? fact("T30", r.t30?.toFixed(2), " s") + fact("EDT", r.edt?.toFixed(2), " s") + fact("音量", r.level_db == null ? null : (r.level_db > 0 ? "+" : "") + r.level_db.toFixed(1), " dB") : "結果なし"}</span>
+      <span class="warm ${r && slots.has(r.id) ? "on" : ""}" title="すぐ切り替えられる状態"></span>`;
+    b.querySelector(".name").textContent = conditionLabel(c);
+    b.addEventListener("click", () => pickCondition(c));
+    host.append(b);
+  });
+}
+
+// カードの小さな減衰曲線（全帯域のシュレーダー積分。0 → -60 dB）
+function decaySvg(r) {
+  if (!r) return `<svg viewBox="0 0 100 42"></svg>`;
+  const pts = r.decay.map((v, i) => `${(i / (r.decay.length - 1) * 100).toFixed(2)},${(-v / 60 * 40 + 1).toFixed(2)}`).join(" ");
+  return `<svg viewBox="0 0 100 42" preserveAspectRatio="none" aria-hidden="true">
+    <line x1="0" y1="21" x2="100" y2="21" stroke="#3d4b45" stroke-width=".6" vector-effect="non-scaling-stroke"/>
+    <polyline points="${pts}" fill="none" stroke="#6cb3a1" stroke-width="1.6" vector-effect="non-scaling-stroke"/></svg>`;
+}
+
+function pickCondition(c) {
+  if (!lookup(c, S.position, S.receiver)) return;
+  S.condition = c;
+  if (!S.wet) S.wet = true;          // 条件を選んだら響きを聴くつもり、と読む
+  renderCards();
+  activate(currentResult());
+}
+
+// ============================================================================
+// ドライソース
+// ============================================================================
+const dropped = [];
+async function chooseDry(item) {
+  initAudio();
+  stopMic();
+  try {
+    $("waveTitle").textContent = item.name;
+    $("waveMeta").textContent = "読み込み中…";
+    let buffer = dryCache.get(item.id);
+    if (!buffer) {
+      const bytes = item.file ? await item.file.arrayBuffer()
+        : await (await fetch(`/api/dry?id=${encodeURIComponent(item.id)}`)).arrayBuffer();
+      buffer = await ctx.decodeAudioData(bytes);
+      dryCache.set(item.id, buffer);
+      if (dryCache.size > 4) dryCache.delete(dryCache.keys().next().value);
+    }
+    const wasPlaying = S.playing;
+    stopPlayback();
+    const mono = new Float32Array(buffer.length);
+    for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
+      const d = buffer.getChannelData(ch);
+      for (let i = 0; i < d.length; i++) mono[i] += d[i] / buffer.numberOfChannels;
+    }
+    let peak = 0;
+    for (let i = 0; i < mono.length; i++) peak = Math.max(peak, Math.abs(mono[i]));
+    S.dry = { id: item.id, name: item.name, buffer, mono, peak: peak || 1 };
+    S.sel = null; S.cursor = 0; S.offset = 0;
+    S.view = { start: 0, end: buffer.duration };
+    $("waveMeta").textContent = `${formatTime(buffer.duration)}　${buffer.numberOfChannels === 1 ? "モノラル" : "ステレオ"}`;
+    $("stageEmpty").hidden = true;
+    ["play", "toStart", "loop"].forEach((id) => $(id).disabled = false);
+    $("clockAll").textContent = formatTime(buffer.duration);
+    renderSources();
+    resize();
+    if (wasPlaying) play(0);
+  } catch (error) {
+    toast(`読み込めませんでした：${item.name}（${error.message}）`, true);
+    $("waveMeta").textContent = "";
+  }
+}
+
+// ============================================================================
+// 再生
+// ============================================================================
+function loopRange() {
+  if (S.sel) return [S.sel.a, S.sel.b];
+  return [0, S.dry.buffer.duration];
+}
+
+function play(from) {
+  if (!S.dry) return;
+  initAudio();
+  if (ctx.state === "suspended") ctx.resume();
+  stopNode();
+  const duration = S.dry.buffer.duration;
+  let start = from ?? S.cursor;
+  const [a, b] = loopRange();
+  if (S.loop && (start < a || start >= b)) start = a;
+  if (!S.loop && S.sel && (start < S.sel.a || start >= S.sel.b)) start = S.sel.a;
+  if (start >= duration) start = S.sel ? S.sel.a : 0;
+  const node = new AudioBufferSourceNode(ctx, { buffer: S.dry.buffer, loop: S.loop });
+  if (S.loop) { node.loopStart = a; node.loopEnd = b; }
+  node.connect(A.input);
+  if (!S.loop && S.sel) node.start(0, start, S.sel.b - start);
+  else node.start(0, start);
+  node.onended = () => {
+    if (S.node !== node) return;
+    S.playing = false; S.node = null;
+    S.cursor = S.sel ? S.sel.a : 0;
+    updateTransport();
+  };
+  S.node = node; S.playing = true; S.offset = start; S.startedAt = ctx.currentTime;
+  updateTransport();
+}
+
+function stopNode() {
+  if (S.node) { S.node.onended = null; try { S.node.stop(); } catch (_) {} S.node.disconnect(); S.node = null; }
+}
+function stopPlayback() { stopNode(); S.playing = false; updateTransport(); }
+function pause() { S.cursor = position(); stopPlayback(); }
+function toggle() { S.playing ? pause() : play(); }
+
+function position() {
+  if (!S.playing || !S.dry) return S.cursor;
+  let t = S.offset + (ctx.currentTime - S.startedAt);
+  if (S.loop) {
+    const [a, b] = loopRange();
+    if (t >= b) t = a + ((t - b) % (b - a));
+  }
+  return Math.min(t, S.dry.buffer.duration);
+}
+
+// 範囲やループを変えたら、いまの位置から鳴らし直す（止めずに）
+function replayIfPlaying() { if (S.playing) play(position()); }
+
+function updateTransport() {
+  $("playText").textContent = S.playing ? "停止" : "再生";
+  $("playIcon").innerHTML = S.playing ? '<path d="M3 2h4v12H3zM9 2h4v12H9z"/>' : '<path d="M4 2l10 6-10 6z"/>';
+  $("loop").setAttribute("aria-pressed", String(S.loop));
+  $("clearSel").disabled = !S.sel;
+  $("rangeText").innerHTML = S.sel
+    ? `範囲 <b>${formatTime(S.sel.a)}</b> 〜 <b>${formatTime(S.sel.b)}</b>（${(S.sel.b - S.sel.a).toFixed(2)} s）`
+    : (S.dry ? "ドラッグで範囲を選べます" : "");
+}
+
+function formatTime(t) {
+  const m = Math.floor(t / 60), s = t - m * 60;
+  return `${m}:${s.toFixed(2).padStart(5, "0")}`;
+}
+
+// ============================================================================
+// マイク
+// ============================================================================
+async function startMic() {
+  initAudio();
+  if (ctx.state === "suspended") ctx.resume();
+  try {
+    const deviceId = $("micDevice").value;
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: {
+      echoCancellation: false, noiseSuppression: false, autoGainControl: false,
+      ...(deviceId ? { deviceId: { exact: deviceId } } : {}) } });
+    stopMic();
+    stopPlayback();
+    const node = new MediaStreamAudioSourceNode(ctx, { mediaStream: stream });
+    const analyser = new AnalyserNode(ctx, { fftSize: 2048 });
+    node.connect(A.input); node.connect(analyser);
+    S.mic = { stream, node, analyser, trace: new Float32Array(600) };
+    $("micButton").setAttribute("aria-pressed", "true");
+    $("waveTitle").textContent = "マイク入力";
+    const latency = ((ctx.baseLatency || 0) + (ctx.outputLatency || 0)) * 1000;
+    $("waveMeta").textContent = `遅れの目安 ${latency.toFixed(0)} ms（ブラウザが報告する値）`;
+    $("stageEmpty").hidden = true;
+    ["play", "toStart", "loop", "clearSel"].forEach((id) => $(id).disabled = true);
+    renderSources();
+    await listMicDevices();
+  } catch (error) {
+    toast(`マイクを使えませんでした（${error.message}）。許可を聞かれたら「許可」を選んでください（一度拒否したときは、窓の上端の鍵のマークから変えられます）。`, true);
+  }
+}
+
+function stopMic() {
+  if (!S.mic) return;
+  S.mic.node.disconnect(); S.mic.stream.getTracks().forEach((t) => t.stop());
+  S.mic = null;
+  $("micButton").setAttribute("aria-pressed", "false");
+  if (S.dry) {
+    $("waveTitle").textContent = S.dry.name;
+    $("waveMeta").textContent = formatTime(S.dry.buffer.duration);
+    ["play", "toStart", "loop"].forEach((id) => $(id).disabled = false);
+  }
+  drawWave();
+}
+
+async function listMicDevices() {
+  const devices = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === "audioinput");
+  const select = $("micDevice");
+  const current = select.value;
+  select.textContent = "";
+  for (const d of devices) select.append(new Option(d.label || "マイク", d.deviceId));
+  if (current) select.value = current;
+  $("micDeviceRow").hidden = devices.length <= 1;
+}
+
+async function setupOutputDevices() {
+  if (!ctx.setSinkId || !navigator.mediaDevices?.enumerateDevices) return;
+  const devices = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === "audiooutput");
+  if (devices.length <= 1) return;
+  const select = $("outputDevice");
+  select.textContent = "";
+  for (const d of devices) select.append(new Option(d.label || (d.deviceId === "default" ? "既定の出力" : "出力"), d.deviceId === "default" ? "" : d.deviceId));
+  select.hidden = false;
+}
+
+// ============================================================================
+// 波形の描画
+// ============================================================================
+const stage = $("stage"), waveCanvas = $("waveCanvas"), overlay = $("overlayCanvas"), overviewCanvas = $("overviewCanvas");
+let dpr = 1, W = 0, H = 0, OW = 0, OH = 0;
+
+function resize() {
+  dpr = window.devicePixelRatio || 1;
+  W = stage.clientWidth; H = stage.clientHeight;
+  for (const c of [waveCanvas, overlay]) { c.width = W * dpr; c.height = H * dpr; }
+  OW = $("overview").clientWidth; OH = $("overview").clientHeight;
+  overviewCanvas.width = OW * dpr; overviewCanvas.height = OH * dpr;
+  drawWave(); drawOverview();
+}
+
+const tToX = (t) => (t - S.view.start) / (S.view.end - S.view.start) * W;
+const xToT = (x) => S.view.start + x / W * (S.view.end - S.view.start);
+
+// 列ごとの最小・最大（と二乗平均）
+function columns(mono, fs, t0, t1, n) {
+  const mins = new Float32Array(n), maxs = new Float32Array(n), ms = new Float32Array(n);
+  const per = (t1 - t0) * fs / n;
+  for (let k = 0; k < n; k++) {
+    let i0 = Math.floor(t0 * fs + k * per), i1 = Math.floor(t0 * fs + (k + 1) * per);
+    if (i1 <= i0) i1 = i0 + 1;
+    let lo = 0, hi = 0, sum = 0, count = 0;
+    for (let i = Math.max(0, i0); i < Math.min(mono.length, i1); i++) {
+      const v = mono[i];
+      if (v < lo) lo = v; if (v > hi) hi = v;
+      sum += v * v; count++;
+    }
+    mins[k] = lo; maxs[k] = hi; ms[k] = count ? sum / count : 0;
+  }
+  return { mins, maxs, ms };
+}
+
+// ★室の響きの包絡（目安）：元の音の二乗平均を、応答の二乗（エネルギー）と
+//   列の幅で畳み込む。位相を捨てた（互いに無相関とみなした）見積もりなので
+//   形の目安であって、実際の波形ではない。応答が長い室ほど尾が伸びて見える
+function wetEnvelope(fs, t0, n, dt) {
+  const r = currentResult();
+  const ir = r && irData.get(r.id);
+  if (!ir) return null;
+  const bins = Math.ceil(ir.length / (dt * fs));
+  if (bins > 8000 || dt * fs < 1) return null;             // 拡大しすぎ（重い）
+  const h = new Float32Array(bins);
+  const per = dt * fs;
+  for (let i = 0; i < ir.length; i++) h[Math.min(bins - 1, Math.floor(i / per))] += ir[i] * ir[i];
+  // 見えている範囲より前の音も尾として効くので、応答の長さぶん手前から取る
+  const before = columns(S.dry.mono, fs, t0 - bins * dt, t0, bins).ms;
+  const now = columns(S.dry.mono, fs, t0, t0 + n * dt, n).ms;
+  const e = new Float32Array(bins + n);
+  e.set(before, 0); e.set(now, bins);
+  const out = new Float32Array(n);
+  for (let k = 0; k < n; k++) {
+    let sum = 0;
+    const base = bins + k;
+    for (let j = 0; j < bins; j++) sum += e[base - j] * h[j];
+    out[k] = Math.sqrt(sum);
+  }
+  return out;
+}
+
+function drawWave() {
+  const g = waveCanvas.getContext("2d");
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, W, H);
+  if (S.mic || !S.dry) return;
+  const fs = S.dry.buffer.sampleRate, { start, end } = S.view;
+  const n = Math.max(1, Math.floor(W));
+  const mid = H / 2, scale = (H / 2 - 10) / S.dry.peak;
+  // 時間の目盛り
+  g.fillStyle = "#8f9c95"; g.font = "11px " + getComputedStyle(document.body).fontFamily;
+  const span = end - start, step = niceStep(span / 8);
+  g.strokeStyle = "#2b3632"; g.lineWidth = 1;
+  for (let t = Math.ceil(start / step) * step; t < end; t += step) {
+    const x = Math.round(tToX(t)) + .5;
+    g.beginPath(); g.moveTo(x, 0); g.lineTo(x, H); g.stroke();
+    g.fillText(step < 1 ? t.toFixed(step < .1 ? 2 : 1) + " s" : formatTime(t).replace(/\.\d+$/, ""), x + 4, H - 6);
+  }
+  g.beginPath(); g.moveTo(0, mid + .5); g.lineTo(W, mid + .5); g.stroke();
+
+  // 元の音
+  const samplesPerPx = span * fs / n;
+  const cols = samplesPerPx > 2 ? columns(S.dry.mono, fs, start, end, n) : null;
+  g.fillStyle = g.strokeStyle = "#d6a443";
+  if (cols) {
+    for (let k = 0; k < n; k++) {
+      const y0 = mid - cols.maxs[k] * scale, y1 = mid - cols.mins[k] * scale;
+      g.fillRect(k, y0, 1, Math.max(1, y1 - y0));
+    }
+  } else {
+    g.lineWidth = 1.2; g.beginPath();
+    const i0 = Math.floor(start * fs), i1 = Math.ceil(end * fs);
+    for (let i = Math.max(0, i0); i <= Math.min(S.dry.mono.length - 1, i1); i++) {
+      const x = tToX(i / fs), y = mid - S.dry.mono[i] * scale;
+      i === Math.max(0, i0) ? g.moveTo(x, y) : g.lineTo(x, y);
+    }
+    g.stroke();
+  }
+
+  // 室の響き（包絡の目安）。★元の音の上に半透明で重ねる（下に敷くと隠れる）。
+  //   包絡は二乗平均なので、元の音のピーク表示と並べられるように
+  //   元の音の「ピーク / 実効値」（波高率）を掛けて同じ物差しにする
+  const envelope = wetEnvelope(fs, start, n, span / n);
+  if (envelope) {
+    let crest = 1.414;
+    if (cols) {
+      let sum = 0, count = 0;
+      for (let k = 0; k < n; k++) {
+        if (cols.ms[k] > 1e-8) { sum += Math.max(cols.maxs[k], -cols.mins[k]) / Math.sqrt(cols.ms[k]); count++; }
+      }
+      if (count) crest = sum / count;
+    }
+    const y = (k, sign) => mid - sign * Math.min(H / 2 - 1, envelope[k] * crest * scale);
+    g.beginPath(); g.moveTo(0, y(0, 1));
+    for (let k = 1; k < n; k++) g.lineTo(k, y(k, 1));
+    for (let k = n - 1; k >= 0; k--) g.lineTo(k, y(k, -1));
+    g.closePath();
+    if (S.wet) { g.fillStyle = "rgba(108,179,161,.38)"; g.fill(); }
+    g.strokeStyle = S.wet ? "#8fd0bf" : "rgba(108,179,161,.55)";
+    g.lineWidth = S.wet ? 1.5 : 1; g.stroke();
+  }
+}
+
+function niceStep(raw) {
+  const p = Math.pow(10, Math.floor(Math.log10(raw)));
+  for (const m of [1, 2, 5, 10]) if (raw <= m * p) return m * p;
+  return 10 * p;
+}
+
+function drawOverview() {
+  const g = overviewCanvas.getContext("2d");
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, OW, OH);
+  if (!S.dry || S.mic) return;
+  const d = S.dry.buffer.duration, n = Math.max(1, Math.floor(OW));
+  const { mins, maxs } = columns(S.dry.mono, S.dry.buffer.sampleRate, 0, d, n);
+  const mid = OH / 2, scale = (OH / 2 - 3) / S.dry.peak;
+  g.fillStyle = "#8a6d33";
+  for (let k = 0; k < n; k++) g.fillRect(k, mid - maxs[k] * scale, 1, Math.max(1, (maxs[k] - mins[k]) * scale));
+  if (S.sel) { g.fillStyle = "rgba(236,230,213,.12)"; g.fillRect(S.sel.a / d * OW, 0, (S.sel.b - S.sel.a) / d * OW, OH); }
+  const x0 = S.view.start / d * OW, x1 = S.view.end / d * OW;
+  g.strokeStyle = "#ece6d5"; g.lineWidth = 1.5;
+  g.strokeRect(x0 + .75, .75, Math.max(3, x1 - x0) - 1.5, OH - 1.5);
+}
+
+// 毎フレーム：再生位置・範囲・メーター
+let clipped = false, meterPeak = -90, meterHold = -90, holdUntil = 0;
+function tick() {
+  const g = overlay.getContext("2d");
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, W, H);
+  if (S.mic) drawMicTrace(g);
+  else if (S.dry) {
+    if (S.sel) {
+      const x0 = tToX(S.sel.a), x1 = tToX(S.sel.b);
+      g.fillStyle = "rgba(236,230,213,.10)"; g.fillRect(x0, 0, x1 - x0, H);
+      g.fillStyle = "#ece6d5"; g.fillRect(x0 - 1, 0, 2, H); g.fillRect(x1 - 1, 0, 2, H);
+      g.fillRect(x0 - 5, 0, 10, 6); g.fillRect(x1 - 5, 0, 10, 6);
+    }
+    const now = position();
+    if (!S.playing) { g.fillStyle = "rgba(236,230,213,.55)"; g.fillRect(Math.round(tToX(S.cursor)), 0, 1, H); }
+    if (S.playing) {
+      // 拡大しているときは再生位置を追いかける（ページ送り）
+      if (now > S.view.end || now < S.view.start) {
+        const span = S.view.end - S.view.start;
+        S.view.start = Math.max(0, Math.min(now - span * 0.05, S.dry.buffer.duration - span));
+        S.view.end = S.view.start + span;
+        drawWave(); drawOverview();
+      }
+      const x = tToX(now);
+      g.fillStyle = "#ece6d5"; g.fillRect(Math.round(x) - 1, 0, 2, H);
+    }
+    $("clockNow").textContent = formatTime(now);
+  }
+  drawMeter();
+  requestAnimationFrame(tick);
+}
+
+function drawMicTrace(g) {
+  const { analyser, trace } = S.mic;
+  const data = new Float32Array(analyser.fftSize);
+  analyser.getFloatTimeDomainData(data);
+  let peak = 0;
+  for (const v of data) peak = Math.max(peak, Math.abs(v));
+  trace.copyWithin(0, 1); trace[trace.length - 1] = peak;
+  const mid = H / 2, scale = H / 2 - 10, step = W / trace.length;
+  g.fillStyle = "#d6a443";
+  for (let k = 0; k < trace.length; k++) { const h = trace[k] * scale; g.fillRect(k * step, mid - h, Math.max(1, step - .5), Math.max(1, 2 * h)); }
+  g.fillStyle = "#8f9c95"; g.font = "12px " + getComputedStyle(document.body).fontFamily;
+  g.fillText("マイクの入力（ピークの流れ）", 12, 20);
+}
+
+function drawMeter() {
+  if (!A.analyser) return;
+  const data = new Float32Array(A.analyser.fftSize);
+  A.analyser.getFloatTimeDomainData(data);
+  let peak = 0;
+  for (const v of data) peak = Math.max(peak, Math.abs(v));
+  const db = peak > 0 ? 20 * Math.log10(peak) : -90;
+  meterPeak = Math.max(db, meterPeak - 1.2);
+  if (db > meterHold || performance.now() > holdUntil) { meterHold = db; holdUntil = performance.now() + 1200; }
+  if (peak >= 0.999 && !clipped) { clipped = true; $("clip").classList.add("on"); }
+  const c = $("meter"), g = c.getContext("2d"), w = c.width, h = c.height;
+  const x = (v) => Math.max(0, Math.min(1, (v + 60) / 60)) * w;
+  g.clearRect(0, 0, w, h);
+  g.fillStyle = meterPeak > -3 ? "#e0664f" : meterPeak > -12 ? "#d6a443" : "#6cb3a1";
+  g.fillRect(0, 0, x(meterPeak), h);
+  g.fillStyle = "#ece6d5"; g.fillRect(x(meterHold) - 1, 0, 2, h);
+}
+
+// ---- 波形の操作 ----------------------------------------------------------
+let drag = null;
+stage.addEventListener("pointerdown", (e) => {
+  if (!S.dry || S.mic) return;
+  stage.setPointerCapture(e.pointerId);
+  const x = e.offsetX, t = xToT(x);
+  // 範囲の端をつかんだら、その端を動かす
+  if (S.sel && Math.abs(tToX(S.sel.a) - x) < 7) drag = { mode: "edge", fixed: S.sel.b };
+  else if (S.sel && Math.abs(tToX(S.sel.b) - x) < 7) drag = { mode: "edge", fixed: S.sel.a };
+  else drag = { mode: "new", fixed: t, x0: x };
+});
+stage.addEventListener("pointermove", (e) => {
+  if (!S.dry || S.mic) return;
+  const x = e.offsetX;
+  const nearEdge = S.sel && (Math.abs(tToX(S.sel.a) - x) < 7 || Math.abs(tToX(S.sel.b) - x) < 7);
+  stage.style.cursor = nearEdge ? "ew-resize" : "crosshair";
+  if (!drag) return;
+  if (drag.mode === "new" && Math.abs(x - drag.x0) < 4) return;
+  const t = Math.max(0, Math.min(S.dry.buffer.duration, xToT(x)));
+  S.sel = { a: Math.min(drag.fixed, t), b: Math.max(drag.fixed, t) };
+  drag.moved = true;
+  updateTransport();
+});
+stage.addEventListener("pointerup", (e) => {
+  if (!drag) return;
+  const d = drag; drag = null;
+  if (!d.moved) {
+    // クリック：その位置から（鳴っていれば止めずに）
+    const t = Math.max(0, Math.min(S.dry.buffer.duration, xToT(e.offsetX)));
+    if (S.sel && (t < S.sel.a || t > S.sel.b)) S.sel = null;
+    S.cursor = t;
+    if (S.playing) play(t);
+  } else if (S.sel && S.sel.b - S.sel.a < 0.02) {
+    S.sel = null;
+  } else {
+    S.cursor = S.sel.a;
+    if (S.playing) { const now = position(); play(now >= S.sel.a && now < S.sel.b ? now : S.sel.a); }
+  }
+  updateTransport(); drawOverview();
+});
+stage.addEventListener("wheel", (e) => {
+  if (!S.dry || S.mic) return;
+  e.preventDefault();
+  const d = S.dry.buffer.duration, span = S.view.end - S.view.start;
+  if (e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+    const shift = (e.deltaX || e.deltaY) / W * span;
+    S.view.start = Math.max(0, Math.min(d - span, S.view.start + shift));
+    S.view.end = S.view.start + span;
+  } else {
+    const t = xToT(e.offsetX), f = Math.exp(e.deltaY * 0.0015);
+    const next = Math.max(0.02, Math.min(d, span * f));
+    let a = t - (t - S.view.start) * next / span;
+    a = Math.max(0, Math.min(d - next, a));
+    S.view = { start: a, end: a + next };
+  }
+  drawWave(); drawOverview();
+}, { passive: false });
+
+let overviewDrag = null;
+$("overview").addEventListener("pointerdown", (e) => {
+  if (!S.dry) return;
+  $("overview").setPointerCapture(e.pointerId);
+  overviewDrag = true; moveView(e.offsetX);
+});
+$("overview").addEventListener("pointermove", (e) => { if (overviewDrag) moveView(e.offsetX); });
+$("overview").addEventListener("pointerup", () => { overviewDrag = null; });
+$("overview").addEventListener("dblclick", () => { if (S.dry) { S.view = { start: 0, end: S.dry.buffer.duration }; drawWave(); drawOverview(); } });
+function moveView(x) {
+  const d = S.dry.buffer.duration, span = S.view.end - S.view.start;
+  const center = x / OW * d;
+  S.view.start = Math.max(0, Math.min(d - span, center - span / 2));
+  S.view.end = S.view.start + span;
+  drawWave(); drawOverview();
+}
+
+// ============================================================================
+// 操作
+// ============================================================================
+$("play").addEventListener("click", toggle);
+$("toStart").addEventListener("click", () => { S.cursor = S.sel ? S.sel.a : 0; if (S.playing) play(S.cursor); });
+$("loop").addEventListener("click", () => { S.loop = !S.loop; updateTransport(); replayIfPlaying(); });
+$("clearSel").addEventListener("click", () => { S.sel = null; updateTransport(); drawOverview(); replayIfPlaying(); });
+$("dryButton").addEventListener("click", () => { S.wet = false; applyWet(); });
+$("wetButton").addEventListener("click", () => { S.wet = true; if (!currentResult()) toast("条件を選んでください"); activate(currentResult()); });
+$("volume").addEventListener("input", setVolume);
+$("limiter").addEventListener("change", () => ctx && routeLimiter());
+$("clip").addEventListener("click", () => { clipped = false; $("clip").classList.remove("on"); });
+$("micButton").addEventListener("click", () => S.mic ? stopMic() : startMic());
+$("micDevice").addEventListener("change", () => S.mic && startMic());
+$("outputDevice").addEventListener("change", async (e) => {
+  try { await ctx.setSinkId(e.target.value); } catch (error) { toast(`出力先を変えられませんでした（${error.message}）`, true); }
+});
+document.querySelectorAll("input[name=channels]").forEach((r) => r.addEventListener("change", (e) => setChannels(e.target.value)));
+$("rescan").addEventListener("click", async () => {
+  for (const [, s] of slots) { s.gain.disconnect(); s.conv.disconnect(); }
+  slots.clear(); irCache.clear(); irData.clear();
+  $("project").textContent = "結果を読み直しています…";
+  await loadCatalog(true);
+  activate(currentResult()); warmAround();
+  toast("結果を読み直しました");
+});
+
+document.addEventListener("keydown", (e) => {
+  if (e.target instanceof Element && e.target.matches("input[type=range], select") && !/^[ rRlL]$/.test(e.key)) return;
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  if (e.key === " ") { e.preventDefault(); toggle(); }
+  else if (e.key === "r" || e.key === "R") { S.wet = !S.wet; if (S.wet) activate(currentResult()); else applyWet(); }
+  else if (e.key === "l" || e.key === "L") { if (S.dry) { S.loop = !S.loop; updateTransport(); replayIfPlaying(); } }
+  else if (e.key === "Escape") { S.sel = null; updateTransport(); drawOverview(); replayIfPlaying(); }
+  else if (e.key === "Home") { S.cursor = S.sel ? S.sel.a : 0; if (S.playing) play(S.cursor); }
+  else if (/^[1-9]$/.test(e.key)) { const c = S.conditions[Number(e.key) - 1]; if (c !== undefined) pickCondition(c); }
+});
+
+// ほかの音声ファイルを落とす
+document.addEventListener("dragover", (e) => { e.preventDefault(); document.body.classList.add("dropping"); });
+document.addEventListener("dragleave", (e) => { if (e.target === document.documentElement || !e.relatedTarget) document.body.classList.remove("dropping"); });
+document.addEventListener("drop", (e) => {
+  e.preventDefault(); document.body.classList.remove("dropping");
+  const files = [...e.dataTransfer.files].filter((f) => /\.(wav|mp3|flac|ogg|m4a|aac)$/i.test(f.name));
+  if (!files.length) { toast("音声ファイル（wav / mp3 / flac など）を落としてください", true); return; }
+  for (const f of files) dropped.push({ id: `dropped/${f.name}/${f.size}`, name: f.name.replace(/\.[^.]+$/, ""), where: "dropped", file: f });
+  renderSources();
+  chooseDry(dropped[dropped.length - 1]);
+});
+
+let toastTimer = null;
+function toast(message, error = false) {
+  const t = $("toast");
+  t.textContent = message; t.className = `toast show${error ? " error" : ""}`;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove("show"), error ? 7000 : 3000);
+}
+
+// 最初の一押し（ブラウザは利用者の操作があるまで音を出させない）
+$("startButton").addEventListener("click", async () => {
+  initAudio();
+  await ctx.resume();
+  $("start").remove();
+  activate(currentResult());
+  warmAround();
+});
+
+// サーバへ「まだ開いている」を知らせる（窓を閉じたらサーバも止まる）
+setInterval(() => fetch("/api/ping").catch(() => {}), 5000);
+window.addEventListener("pagehide", () => navigator.sendBeacon("/api/bye"));
+window.addEventListener("resize", resize);
+
+loadCatalog(false).then(() => { resize(); updateTransport(); })
+  .catch((error) => toast(`結果の一覧を読めませんでした（${error.message}）`, true));
+</script>
+</body>
+</html>

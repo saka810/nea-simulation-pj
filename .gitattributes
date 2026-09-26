@@ -1,2 +1,4 @@
 # .bat は cmd.exe が行ごとに読む。改行が LF だとラベル・goto が崩れる端末があるので CRLF に固定する
 *.bat text eol=crlf
+# 音声は差分を取らない（可聴化のドライソース）
+*.wav binary

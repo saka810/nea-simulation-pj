@@ -6778,6 +6778,71 @@ def test_reports_19_to_22():
     shutil.rmtree(folder, ignore_errors=True)
 
 
+def test_auralize():
+    """[62] 可聴化 ― 結果の並べ方と音量の比（2026-09-26 ユーザー要望）。
+
+    ★★条件どうしの音量の比を保つ（共通の 1 つの係数）。条件ごとに正規化すると
+    「吸音を増やすと静かになる」が聞こえなくなる。
+    """
+    print()
+    print("[62] 可聴化（結果の並べ方・共通の係数・周波数の変換）")
+    import tempfile
+    import auralize as au
+    import project as pj
+    import impulse as imp
+
+    fs = 44100.0
+    t = np.arange(int(fs)) / fs
+    rng = np.random.default_rng(0)
+    base = rng.standard_normal(len(t)) * np.exp(-6.91 * t / 0.5)
+    with tempfile.TemporaryDirectory() as folder:
+        pj.Project(folder, name="室").save()
+        layout = {("src1", "rec1", "条件A"): 1.0, ("src1", "rec2", "条件A"): 0.5,
+                  ("src2", "rec1", "条件B"): 0.25}
+        for (src, rec, cond), scale in layout.items():
+            d = os.path.join(folder, pj.RESULT_DIR, src, rec)
+            os.makedirs(d)
+            imp.write_impulse_response(os.path.join(d, f"室_{cond}_ir.csv"), t, base * scale)
+        cat = au.Catalog(folder)
+        got = {(r["source"], r["receiver"], r["condition"]) for r in cat.results}
+        check("条件はファイル名から（室名の頭を外す）、音源・受音点はフォルダから",
+              got == set(layout), str(sorted(got)))
+        levels = {(r["source"], r["receiver"], r["condition"]): r["level_db"] for r in cat.results}
+        check("★★音量はいちばん大きい応答を 0 dB とした相対値（比が残る）",
+              abs(levels[("src1", "rec1", "条件A")]) < 1e-6
+              and abs(levels[("src1", "rec2", "条件A")] + 6.02) < 0.05
+              and abs(levels[("src2", "rec1", "条件B")] + 12.04) < 0.05,
+              str(levels))
+        loud = np.frombuffer(cat.ir_bytes("結果/src1/rec1/室_条件A_ir.csv", 44100), "<f4")
+        quiet = np.frombuffer(cat.ir_bytes("結果/src2/rec1/室_条件B_ir.csv", 44100), "<f4")
+        check("★★渡す応答は共通の係数だけ（2 本の比が 4 倍のまま）",
+              abs(np.linalg.norm(loud) / np.linalg.norm(quiet) - 4.0) < 1e-3
+              and abs(np.linalg.norm(loud) - 1.0) < 1e-3,
+              f"{np.linalg.norm(loud):.4f} / {np.linalg.norm(quiet):.4f}")
+        at48 = np.frombuffer(cat.ir_bytes("結果/src1/rec1/室_条件A_ir.csv", 48000), "<f4")
+        # ★畳み込みは「サンプルの和」なので、周波数を変えても**同じ音量で聞こえる**には
+        #   1 kHz の正弦波を通したときの振幅が変わらないこと（和の重みを直す）
+        def gain_at(ir, rate, f=1000.0):
+            n = np.arange(len(ir)) / rate
+            return abs(np.sum(ir * np.exp(-2j * np.pi * f * n)))
+        g44 = gain_at(loud, 44100.0)
+        g48 = gain_at(at48.astype(float), 48000.0)
+        check("★ブラウザの周波数（48 kHz）に変換しても 1 kHz の利得が変わらない",
+              abs(len(at48) - len(t) * 48000 / 44100) <= 1
+              and abs(20 * np.log10(g48 / g44)) < 0.05,
+              f"{len(at48)} 点 / 差 {20 * np.log10(g48 / g44):+.3f} dB")
+        decay = cat.results[0]["decay"]
+        slope = (decay[len(decay) // 4] - decay[0]) / (0.25 * len(t) / fs)
+        check("カードの減衰曲線（シュレーダー積分）は T = 0.5 s の傾き（-120 dB/s）",
+              abs(slope + 120) < 15, f"{slope:.1f} dB/s")
+        try:
+            au.dry_path(folder, "common/../project.json")
+            ok = False
+        except KeyError:
+            ok = True
+        check("ドライソースのフォルダの外は渡さない", ok)
+
+
 def test_html_viewer_patches():
     """[61] HTML ビューアは三角形の辺を描かず、計算で使うパッチの外周を描く（2026-09-24）。
 
@@ -6873,7 +6938,8 @@ def main():
                test_rt_any, test_safety_factor_reaches_calculation,
                test_decay_floor, test_point_order_changed, test_model_reuse,
                test_triangle_cleanup, test_conditions_shelf,
-               test_reports_19_to_22, test_html_viewer_patches):
+               test_reports_19_to_22, test_html_viewer_patches,
+               test_auralize):
         fn()
 
     failed = [name for name, ok in _results if not ok]
