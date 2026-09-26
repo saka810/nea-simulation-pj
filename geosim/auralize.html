@@ -95,7 +95,11 @@ aside h2, .room h2 { font-size: 13px; font-weight: 700; color: var(--sage); marg
 .choice label { display: flex; gap: 8px; align-items: center; cursor: pointer; }
 .choice input { accent-color: var(--brass); }
 .hint { padding: 0 20px; font-size: 12px; color: var(--sage); }
-.drop-hint { padding: 0 20px; font-size: 12px; color: var(--sage); }
+.drop-hint { padding: 0 20px; margin: 8px 0 0; font-size: 12px; color: var(--sage); }
+.drop-hint b { color: var(--ivory); font-weight: 400; }
+.source-head { display: flex; align-items: baseline; justify-content: space-between; padding-right: 20px; }
+.link { background: none; border: 0; padding: 0; color: var(--brass); font-size: 12px; text-decoration: underline; text-underline-offset: 3px; }
+.link:hover { color: var(--ivory); }
 
 .work { display: grid; grid-template-rows: auto auto 1fr; min-width: 0; min-height: 0; }
 
@@ -220,9 +224,13 @@ footer .status { margin-left: auto; }
 <main>
   <aside>
     <section>
-      <h2>音源</h2>
+      <div class="source-head">
+        <h2>音源</h2>
+        <button class="link" id="refreshSources" title="置き場を見直す（自分の音源を置いたら押す）">一覧を更新</button>
+      </div>
       <ul class="sources" id="sources"></ul>
-      <p class="drop-hint">ほかの音声ファイルは画面へ落とすと並びます</p>
+      <p class="drop-hint">自分の音源は <b>ドライソース</b> フォルダに置くと並びます（中にフォルダを作って分けても可）。画面へ落としてもそこへ保存されます。</p>
+      <p class="drop-hint"><button class="link" id="openDry">ドライソースのフォルダを開く</button></p>
     </section>
     <section>
       <h2>マイク</h2>
@@ -488,7 +496,7 @@ function renderSources() {
   if (!items.length) {
     const li = document.createElement("li");
     li.className = "hint";
-    li.textContent = "ドライソース/ に音声ファイルがありません。音声は Git に入っていないので、ドライソース/README.md の手順で OneDrive からコピーしてください（画面へ落としても使えます）";
+    li.textContent = "ドライソースのフォルダに音声ファイルがありません。音声は Git に入っていないので、ドライソース/README.md の手順で OneDrive からコピーするか、自分の音源をフォルダに置くか画面へ落としてください";
     list.append(li);
   }
   for (const item of items) {
@@ -499,6 +507,7 @@ function renderSources() {
     name.textContent = item.name;
     const size = document.createElement("span");
     size.className = item.where === "project" ? "where" : "size";
+    size.title = item.where === "project" ? "プロジェクトフォルダの ドライソース/" : item.where === "dropped" ? "保存できなかったので、この画面の間だけ" : "リポジトリの ドライソース/";
     size.textContent = item.where === "project" ? "この案件" : item.where === "dropped" ? "持ち込み" : `${(item.bytes / 1048576).toFixed(0)} MB`;
     b.append(name, size);
     b.addEventListener("click", () => chooseDry(item));
@@ -1056,6 +1065,8 @@ $("outputDevice").addEventListener("change", async (e) => {
   try { await ctx.setSinkId(e.target.value); } catch (error) { toast(`出力先を変えられませんでした（${error.message}）`, true); }
 });
 document.querySelectorAll("input[name=channels]").forEach((r) => r.addEventListener("change", (e) => setChannels(e.target.value)));
+$("refreshSources").addEventListener("click", async () => { await refreshSources(); toast(`音源 ${S.catalog.sources.length} 個`); });
+$("openDry").addEventListener("click", () => fetch("/api/open-dry").catch(() => {}));
 $("rescan").addEventListener("click", async () => {
   for (const [, s] of slots) { s.gain.disconnect(); s.conv.disconnect(); }
   slots.clear(); irCache.clear(); irData.clear();
@@ -1083,10 +1094,37 @@ document.addEventListener("drop", (e) => {
   e.preventDefault(); document.body.classList.remove("dropping");
   const files = [...e.dataTransfer.files].filter((f) => /\.(wav|mp3|flac|ogg|m4a|aac)$/i.test(f.name));
   if (!files.length) { toast("音声ファイル（wav / mp3 / flac など）を落としてください", true); return; }
-  for (const f of files) dropped.push({ id: `dropped/${f.name}/${f.size}`, name: f.name.replace(/\.[^.]+$/, ""), where: "dropped", file: f });
-  renderSources();
-  chooseDry(dropped[dropped.length - 1]);
+  uploadDry(files);
 });
+
+// ★落とした音は**共通の ドライソース/ に保存**して一覧に並べる（次に開いても残る）。
+//   保存できなかったときだけ、その場限りの「持ち込み」として並べる
+async function uploadDry(files) {
+  let last = null;
+  for (const f of files) {
+    try {
+      const response = await fetch(`/api/dry-upload?name=${encodeURIComponent(f.name)}`, { method: "POST", body: f });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error);
+      last = data.id;
+      toast(`ドライソースに加えました：${data.name}`);
+    } catch (error) {
+      const item = { id: `dropped/${f.name}/${f.size}`, name: f.name.replace(/\.[^.]+$/, ""), where: "dropped", file: f };
+      dropped.push(item); last = item.id;
+      toast(`保存できなかったので、この画面の間だけ使います（${error.message}）`, true);
+    }
+  }
+  await refreshSources();
+  const item = [...S.catalog.sources, ...dropped].find((s) => s.id === last);
+  if (item) chooseDry(item);
+}
+
+// 置き場を見直す（★結果は読み直さない。自分の音源を置いたらこれだけで並ぶ）
+async function refreshSources() {
+  const data = await (await fetch("/api/sources")).json();
+  S.catalog.sources = data.sources;
+  renderSources();
+}
 
 let toastTimer = null;
 function toast(message, error = false) {

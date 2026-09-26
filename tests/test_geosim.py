@@ -6842,6 +6842,39 @@ def test_auralize():
             ok = True
         check("ドライソースのフォルダの外は渡さない", ok)
 
+    # ---- 自分の音源を置けば並ぶ（2026-09-26 ユーザー要望）----
+    with tempfile.TemporaryDirectory() as repo, tempfile.TemporaryDirectory() as folder:
+        saved_repository = au.REPOSITORY
+        au.REPOSITORY = repo
+        try:
+            common = os.path.join(repo, au.DRY_DIR)
+            os.makedirs(os.path.join(common, "坂吉"))
+            open(os.path.join(common, "トランペット.wav"), "wb").write(b"RIFF1")
+            open(os.path.join(common, "坂吉", "声.wav"), "wb").write(b"RIFF2")
+            open(os.path.join(common, "メモ.txt"), "w").write("x")
+            os.makedirs(os.path.join(folder, au.DRY_DIR))
+            open(os.path.join(folder, au.DRY_DIR, "案件.wav"), "wb").write(b"RIFF3")
+            names = [(x["where"], x["name"]) for x in au.dry_sources(folder)]
+            check("★置いた音源が並ぶ（サブフォルダも・案件の分が先・音声以外は無視）",
+                  names == [("project", "案件"), ("common", "トランペット"), ("common", "坂吉/声")],
+                  str(names))
+            check("サブフォルダの音源も読める",
+                  open(au.dry_path(folder, "common/坂吉/声.wav"), "rb").read() == b"RIFF2")
+            first = au.save_dry("トランペット.wav", b"RIFF1")
+            second = au.save_dry("トランペット.wav", b"OTHER")
+            check("★画面へ落とした音は保存する（同じ中身なら増やさず、違えば別名。上書きしない）",
+                  first == "トランペット.wav" and second == "トランペット_2.wav"
+                  and open(os.path.join(common, "トランペット.wav"), "rb").read() == b"RIFF1",
+                  f"{first} / {second}")
+            try:
+                au.save_dry("../../悪い.wav", b"x")
+                ok = not os.path.exists(os.path.join(repo, "..", "悪い.wav")) and                     os.path.exists(os.path.join(common, "悪い.wav"))
+            except ValueError:
+                ok = True
+            check("保存も置き場の外へは書かない", ok)
+        finally:
+            au.REPOSITORY = saved_repository
+
 
 def test_html_viewer_patches():
     """[61] HTML ビューアは三角形の辺を描かず、計算で使うパッチの外周を描く（2026-09-24）。

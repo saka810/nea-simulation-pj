@@ -29,8 +29,10 @@
   （`ConvolverNode` は再生側と同じ周波数の応答しか受け付けない）。
   ドライソースはブラウザが読み込むときに自分で合わせる。
 
-ドライソースはリポジトリ直下の `ドライソース/` と、
-プロジェクトフォルダ直下の `ドライソース/`（あれば）から探す。
+ドライソースの置き場（★**ここに置けば一覧に並ぶ**。サブフォルダも見る）：
+  リポジトリ直下の `ドライソース/`        … みんなで使う音源（**画面へ落とした音もここに保存**）
+  プロジェクトフォルダ直下の `ドライソース/` … その案件だけで使う音源
+★音声本体は Git に入れない（public のため。`.gitignore` で除外）。
 """
 
 import argparse
@@ -265,34 +267,75 @@ class Catalog:
         return data
 
 
+def dry_folders(project_folder):
+    """ドライソースの置き場（プロジェクトの分 → リポジトリの分）。"""
+    return [("project", os.path.join(project_folder, DRY_DIR)),
+            ("common", os.path.join(REPOSITORY, DRY_DIR))]
+
+
 def dry_sources(project_folder):
-    """ドライソースを探す（プロジェクトの分 → リポジトリの分）。"""
-    places = [("project", os.path.join(project_folder, DRY_DIR)),
-              ("common", os.path.join(REPOSITORY, DRY_DIR))]
+    """ドライソースを探す（プロジェクトの分 → リポジトリの分）。
+
+    ★**呼ぶたびにフォルダを見直す**（控えを持たない）。利用者が自分の音源を
+    置いたら、画面の「一覧を更新」だけで並ぶ（結果を読み直さなくてよい）。
+    ★**サブフォルダも見る**（`ドライソース/坂吉/声.wav` → 名前は `坂吉/声`）。
+    人ごと・種類ごとに分けて置けるように。
+    """
     found = []
-    for where, folder in places:
+    for where, folder in dry_folders(project_folder):
         if not os.path.isdir(folder):
             continue
-        for name in sorted(os.listdir(folder)):
-            if name.lower().endswith(AUDIO_EXTENSIONS):
-                found.append({"id": f"{where}/{name}",
-                              "name": os.path.splitext(name)[0],
+        for directory, dirs, files in os.walk(folder):
+            dirs.sort()
+            for name in sorted(files):
+                if not name.lower().endswith(AUDIO_EXTENSIONS):
+                    continue
+                relative = os.path.relpath(os.path.join(directory, name), folder)
+                relative = relative.replace("\\", "/")
+                found.append({"id": f"{where}/{relative}",
+                              "name": os.path.splitext(relative)[0],
                               "where": where,
-                              "bytes": os.path.getsize(os.path.join(folder, name))})
+                              "bytes": os.path.getsize(os.path.join(directory, name))})
     return found
 
 
 def dry_path(project_folder, identifier):
     where, _, name = identifier.partition("/")
-    base = {"project": os.path.join(project_folder, DRY_DIR),
-            "common": os.path.join(REPOSITORY, DRY_DIR)}.get(where)
-    # ★フォルダの外は渡さない（`..` を含む名前を弾く）
-    if base is None or os.path.basename(name) != name:
+    base = dict(dry_folders(project_folder)).get(where)
+    if base is None or not name:
         raise KeyError(identifier)
-    path = os.path.join(base, name)
-    if not os.path.isfile(path):
+    # ★フォルダの外は渡さない（`..` で抜ける名前を弾く）
+    root = os.path.realpath(base)
+    path = os.path.realpath(os.path.join(root, name))
+    if os.path.commonpath([root, path]) != root or not os.path.isfile(path):
         raise KeyError(identifier)
     return path
+
+
+def save_dry(name, data):
+    """画面へ落とされた音声を**共通の `ドライソース/`** に保存する。戻り値は保存した名前。
+
+    ★**上書きしない**。同じ名前で中身が同じならそのまま、違えば `名前_2.wav` にする。
+    """
+    name = os.path.basename(name.replace("\\", "/")).strip()
+    if not name.lower().endswith(AUDIO_EXTENSIONS) or name.startswith("."):
+        raise ValueError(f"音声ファイルではありません: {name}")
+    folder = os.path.join(REPOSITORY, DRY_DIR)
+    os.makedirs(folder, exist_ok=True)
+    stem, ext = os.path.splitext(name)
+    candidate, number = name, 1
+    while os.path.exists(os.path.join(folder, candidate)):
+        path = os.path.join(folder, candidate)
+        if os.path.getsize(path) == len(data):
+            with open(path, "rb") as f:
+                if f.read() == data:
+                    return candidate
+        number += 1
+        candidate = f"{stem}_{number}{ext}"
+    with open(os.path.join(folder, candidate), "wb") as f:
+        f.write(data)
+    print(f"[可聴化] ドライソースに加えました: {os.path.join(folder, candidate)}")
+    return candidate
 
 
 # ------------------------------------------------------------------------------
@@ -347,6 +390,15 @@ def make_handler(catalog, state):
                         kind = AUDIO_TYPES.get(os.path.splitext(path)[1].lower(),
                                                "application/octet-stream")
                         self._send(f.read(), kind)
+                elif url.path == "/api/sources":
+                    self._send({"sources": dry_sources(catalog.folder),
+                                "folder": os.path.join(REPOSITORY, DRY_DIR)})
+                elif url.path == "/api/open-dry":
+                    # 置き場をエクスプローラで開く（無ければ作る）
+                    folder = os.path.join(REPOSITORY, DRY_DIR)
+                    os.makedirs(folder, exist_ok=True)
+                    os.startfile(folder)
+                    self._send({"ok": True})
                 elif url.path == "/api/ping":
                     self._send({"ok": True})
                 else:
@@ -358,11 +410,24 @@ def make_handler(catalog, state):
                 self._send({"error": str(error)}, status=500)
 
         def do_POST(self):
+            url = urllib.parse.urlparse(self.path)
             # 窓を閉じたときの知らせ（`navigator.sendBeacon`）。★読み込み直しでも
             #   届くので、すぐには止めず猶予を置く（次の要求が来れば続ける）
-            if urllib.parse.urlparse(self.path).path == "/api/bye":
+            if url.path == "/api/bye":
                 state["last_seen"] = time.time() - IDLE_SECONDS + BYE_GRACE
-            self._send({"ok": True})
+                self._send({"ok": True})
+                return
+            state["last_seen"] = time.time()
+            if url.path == "/api/dry-upload":
+                try:
+                    name = urllib.parse.parse_qs(url.query)["name"][0]
+                    length = int(self.headers.get("Content-Length", "0"))
+                    saved = save_dry(name, self.rfile.read(length))
+                    self._send({"id": f"common/{saved}", "name": os.path.splitext(saved)[0]})
+                except (KeyError, ValueError, OSError) as error:
+                    self._send({"error": str(error)}, status=400)
+                return
+            self._send({"error": "not found"}, status=404)
 
     return Handler
 
