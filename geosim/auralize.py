@@ -59,9 +59,6 @@ PAGE = os.path.join(HERE, "auralize.html")
 DRY_DIR = "ドライソース"
 AUDIO_EXTENSIONS = (".wav", ".mp3", ".flac", ".ogg", ".m4a")
 IR_SUFFIX = "ir.csv"
-# 画面の減衰曲線（カード）の点の数と下限
-DECAY_POINTS = 96
-DECAY_FLOOR_DB = -60.0
 # 残響時間を代表させる帯域（中音域の平均）
 MID_BANDS = (500.0, 1000.0)
 # 画面から便りが途絶えてサーバを止めるまでの秒数（`--stay` で止めない）。
@@ -88,16 +85,6 @@ def read_ir(path):
     t, ir = data[:, 0], data[:, 1]
     fs = 1.0 / np.median(np.diff(t[:64])) if len(t) > 1 else 44100.0
     return float(round(fs)), ir
-
-
-def schroeder_db(ir, points=DECAY_POINTS, floor=DECAY_FLOOR_DB):
-    """全帯域のシュレーダー積分 [dB]（画面の小さな減衰曲線に使う。0 dB 始まり）。"""
-    energy = np.cumsum((ir.astype(np.float64) ** 2)[::-1])[::-1]
-    if energy[0] <= 0:
-        return [floor] * points
-    level = 10.0 * np.log10(np.maximum(energy / energy[0], 1e-30))
-    index = np.linspace(0, len(level) - 1, points).astype(int)
-    return [round(max(float(v), floor), 2) for v in level[index]]
 
 
 def mid_value(frequencies, values):
@@ -142,21 +129,49 @@ def _source_order(name):
     return (2, 0, name)
 
 
+def natural_key(text):
+    """`条件2-1` が `条件10-1` より前に来る並べ方（数字は数として比べる）。"""
+    return [(0, int(part), "") if part.isdigit() else (1, 0, part)
+            for part in re.split(r"(\d+)", text or "")]
+
+
+def is_source_folder(name):
+    """音源ごとの棚（`src1` / `合成_平均`）か。★`旧_…` などの控えは拾わない。"""
+    return bool(re.fullmatch(pj.SOURCE_DIR.replace("%d", r"\d+"), name)
+                or name.startswith(pj.MIX_PREFIX))
+
+
+def is_receiver_folder(name):
+    return bool(re.fullmatch(r"rec\d+", name))
+
+
 class Catalog:
     """プロジェクトの `結果/` を見て、畳み込める応答を並べる。
 
     ★**計算はやり直さない**（`ir.csv` を読むだけ）。置き場は
     `結果/[srcM/]recN/<室>_<条件>_ir.csv`。条件はファイル名から、
     音源位置と受音点はフォルダから決める。
+
+    ★★**開いたときは並べるだけで、中身は使うときに読む**（2026-09-26。
+    実案件の階段教室は応答が **1,045 本 × 7.4 MB ＝ 7.7 GB**、しかも OneDrive の
+    共有フォルダで**クラウドにしか無い**ファイル。全部を先に読むと全部を落とすことになる）。
+      カードの T30 / EDT … 画面に出ている分の `rt.csv`（小さい）だけ読む（`info`）
+      インパルス応答     … 畳み込みに使うもの（温めておく最大 12 本）だけ読む
     """
+
+    # 読んだ応答を覚えておく本数（1 本 = 3 秒・44.1 kHz で 1.2 MB 前後）
+    KEEP = 48
 
     def __init__(self, folder):
         self.folder = os.path.abspath(folder)
         self.lock = threading.Lock()
-        self.cache = {}          # id -> (fs, ir float32)
-        self.resampled = {}      # (id, rate) -> bytes
+        self.cache = {}          # id -> (fs, ir float32)。使った順に古いものを捨てる
+        self.resampled = {}      # (id, rate) -> (bytes, level_db)
+        self.infos = {}          # id -> {t30, edt}
         self.results = []
-        self.gain = 1.0
+        self.by_id = {}
+        self.gain = None
+        self.reference = None
         self.room = ""
         self.scan()
 
@@ -180,20 +195,29 @@ class Catalog:
         return stem
 
     def scan(self):
+        """ファイルを並べるだけ（**中身は読まない**）。"""
         project = self._project()
         self.room = project.room_label
         self.title = project.display_name
         root = os.path.join(self.folder, pj.RESULT_DIR)
         found = []
-        for directory, _dirs, files in os.walk(root):
+        for directory, dirs, files in os.walk(root):
+            parts = [p for p in os.path.relpath(directory, root).replace("\\", "/").split("/")
+                     if p and p != "."]
+            # ★棚（src / 合成）と受音点（recN）以外のフォルダには降りない
+            #   （`旧_単一音源S1のみ_260915` のような控えを別の音源位置として拾わない）
+            if not parts:
+                dirs[:] = [d for d in dirs if is_source_folder(d) or is_receiver_folder(d)]
+            elif len(parts) == 1 and is_source_folder(parts[0]):
+                dirs[:] = [d for d in dirs if is_receiver_folder(d)]
+            else:
+                dirs[:] = []
+            receiver = next((p for p in parts if is_receiver_folder(p)), "")
+            source = next((p for p in parts if p != receiver), "")
             for name in files:
                 if not name.endswith(IR_SUFFIX):
                     continue
                 stem = name[:-len(IR_SUFFIX)].rstrip("_")
-                parts = os.path.relpath(directory, root).replace("\\", "/").split("/")
-                parts = [p for p in parts if p and p != "."]
-                receiver = next((p for p in parts if re.fullmatch(r"rec\d+", p)), "")
-                source = next((p for p in parts if p != receiver), "")
                 path = os.path.join(directory, name)
                 found.append({
                     "id": os.path.relpath(path, self.folder).replace("\\", "/"),
@@ -202,48 +226,97 @@ class Catalog:
                     "receiver": receiver,
                     "path": path,
                 })
-        # 条件は**条件表のシートの順**に並べたいが、結果だけからは分からないので
-        # 見つかった名前の順（五十音）にする。受音点・音源は番号順
-        found.sort(key=lambda r: (r["condition"], _source_order(r["source"]),
+        # 条件は**数を数として**並べる（条件2 → 条件10）。受音点・音源は番号順
+        found.sort(key=lambda r: (natural_key(r["condition"]), _source_order(r["source"]),
                                   _receiver_order(r["receiver"])))
-        self._measure(found)
-        self.results = found
+        with self.lock:
+            self.results = found
+            self.by_id = {r["id"]: r for r in found}
+            self.cache.clear()
+            self.resampled.clear()
+            self.infos.clear()
+            self.gain = None
+            self.reference = None
         return found
 
-    def _measure(self, results):
-        """応答ごとの大きさ・減衰曲線・残響時間を読む（並列）。"""
+    # ---- 読む（使うときに）---------------------------------------------------
+
+    def _load(self, identifier):
+        with self.lock:
+            if identifier in self.cache:
+                item = self.cache.pop(identifier)
+                self.cache[identifier] = item            # 使った順の末尾へ
+                return item
+            if identifier not in self.by_id:
+                raise KeyError(identifier)
+            path = self.by_id[identifier]["path"]
+        fs, ir = read_ir(path)
+        item = (fs, ir.astype(np.float32))
+        with self.lock:
+            self.cache[identifier] = item
+            while len(self.cache) > self.KEEP:
+                old = next(iter(self.cache))
+                del self.cache[old]
+                for key in [k for k in self.resampled if k[0] == old]:
+                    del self.resampled[key]
+        return item
+
+    def _gain(self):
+        """★**共通の 1 つの係数**。条件ごとに正規化すると音量の差が聞こえなくなる。
+
+        基準は**並びの先頭の応答**（最初の条件・src1・rec1）。全部を読まずに
+        決まり、開き直しても同じになる。応答は絶対値（√E/(t·c)）を持つので、
+        どれを基準にしても**比は変わらない**。
+        """
+        if self.gain is None:
+            if not self.results:
+                return 1.0
+            first = self.results[0]
+            _fs, ir = self._load(first["id"])
+            norm = float(np.sqrt(np.sum(ir.astype(np.float64) ** 2))) or 1.0
+            self.gain = 1.0 / norm
+            self.reference = first
+        return self.gain
+
+    def level_db(self, identifier):
+        """基準の応答に対する大きさ [dB]（エネルギーの比）。"""
+        gain = self._gain()
+        _fs, ir = self._load(identifier)
+        norm = float(np.sqrt(np.sum(ir.astype(np.float64) ** 2)))
+        return round(float(20 * np.log10(norm * gain)), 1) if norm > 0 else None
+
+    def info(self, identifiers):
+        """カードに出す T30 / EDT（中音域の平均）。`rt.csv` だけ読む（小さい）。"""
         import table
 
-        def one(item):
-            fs, ir = read_ir(item["path"])
+        def one(identifier):
             with self.lock:
-                self.cache[item["id"]] = (fs, ir.astype(np.float32))
-            item["fs"] = fs
-            item["seconds"] = round(len(ir) / fs, 3)
-            item["norm"] = float(np.sqrt(np.sum(ir.astype(np.float64) ** 2)))
-            item["decay"] = schroeder_db(ir)
+                if identifier in self.infos:
+                    return identifier, self.infos[identifier]
+                item = self.by_id.get(identifier)
+            if item is None:
+                return identifier, None
             rt_path = item["path"][:-len(IR_SUFFIX)] + "rt.csv"
             frequencies, rows = table.read_frequency_table(rt_path)
-            for key, row in (("t30", "T30_s"), ("edt", "EDT_s")):
-                item[key] = mid_value(frequencies, rows.get(row))
-            return item
+            value = {key: mid_value(frequencies, rows.get(row))
+                     for key, row in (("t30", "T30_s"), ("edt", "EDT_s"))}
+            with self.lock:
+                self.infos[identifier] = value
+            return identifier, value
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
-            list(pool.map(one, results))
-        norms = [r["norm"] for r in results if r["norm"] > 0]
-        # ★**共通の 1 つの係数**。条件ごとに正規化すると音量の差が聞こえなくなる
-        reference = max(norms) if norms else 1.0
-        self.gain = 1.0 / reference
-        for r in results:
-            r["level_db"] = (round(20 * np.log10(r["norm"] / reference), 1)
-                             if r["norm"] > 0 else None)
-        self.resampled.clear()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            return dict(pool.map(one, identifiers))
+
+    def reference_info(self):
+        self._gain()
+        ref = self.reference
+        return ({"condition": ref["condition"], "source": ref["source"],
+                 "receiver": ref["receiver"]} if ref else {})
 
     # ---- 渡す -------------------------------------------------------------
 
     def listing(self):
-        public = [{k: v for k, v in r.items() if k not in ("path", "norm")}
-                  for r in self.results]
+        public = [{k: v for k, v in r.items() if k != "path"} for r in self.results]
         return {
             "project": self.title,
             "room": self.room,
@@ -253,18 +326,18 @@ class Catalog:
         }
 
     def ir_bytes(self, identifier, rate):
+        """ブラウザの周波数に直し、共通の係数を掛けた応答（float32）と大きさ [dB]。"""
         key = (identifier, int(rate))
+        gain = self._gain()
         with self.lock:
             if key in self.resampled:
                 return self.resampled[key]
-            if identifier not in self.cache:
-                raise KeyError(identifier)
-            fs, ir = self.cache[identifier]
-        out = (resample(ir.astype(np.float64), fs, rate) * self.gain).astype("<f4")
-        data = out.tobytes()
+        fs, ir = self._load(identifier)
+        out = (resample(ir.astype(np.float64), fs, rate) * gain).astype("<f4")
+        result = (out.tobytes(), self.level_db(identifier))
         with self.lock:
-            self.resampled[key] = data
-        return data
+            self.resampled[key] = result
+        return result
 
 
 def dry_folders(project_folder):
@@ -353,7 +426,8 @@ def make_handler(catalog, state):
         def log_message(self, fmt, *args):      # 端末を埋めない
             pass
 
-        def _send(self, body, kind="application/json; charset=utf-8", status=200):
+        def _send(self, body, kind="application/json; charset=utf-8", status=200,
+                  headers=None):
             if isinstance(body, (dict, list)):
                 body = json.dumps(body, ensure_ascii=False).encode("utf-8")
             elif isinstance(body, str):
@@ -362,6 +436,8 @@ def make_handler(catalog, state):
             self.send_header("Content-Type", kind)
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
+            for name, value in (headers or {}).items():
+                self.send_header(name, value)
             self.end_headers()
             try:
                 self.wfile.write(body)
@@ -382,8 +458,14 @@ def make_handler(catalog, state):
                     self._send(catalog.listing())
                 elif url.path == "/api/ir":
                     rate = int(float(query.get("rate", ["48000"])[0]))
-                    data = catalog.ir_bytes(query["id"][0], rate)
-                    self._send(data, "application/octet-stream")
+                    data, level = catalog.ir_bytes(query["id"][0], rate)
+                    self._send(data, "application/octet-stream",
+                               headers={"X-Level-dB": "" if level is None else str(level)})
+                elif url.path == "/api/info":
+                    ids = [i for i in query.get("ids", [""])[0].split("\n") if i]
+                    self._send(catalog.info(ids))
+                elif url.path == "/api/reference":
+                    self._send(catalog.reference_info())
                 elif url.path == "/api/dry":
                     path = dry_path(catalog.folder, query["id"][0])
                     with open(path, "rb") as f:
@@ -454,7 +536,7 @@ def open_window(url):
 
 def serve(folder, port=0, browser=True, stay=False):
     """サーバを立てて画面を開く。窓が閉じたら（応答が途絶えたら）止まる。"""
-    print(f"[可聴化] 結果を読んでいます: {folder}")
+    print(f"[可聴化] 結果を並べています（中身は使うときに読みます）: {folder}")
     catalog = Catalog(folder)
     print(f"[可聴化] インパルス応答 {len(catalog.results)} 本 / "
           f"ドライソース {len(dry_sources(catalog.folder))} 個")

@@ -6798,43 +6798,57 @@ def test_auralize():
     with tempfile.TemporaryDirectory() as folder:
         pj.Project(folder, name="室").save()
         layout = {("src1", "rec1", "条件A"): 1.0, ("src1", "rec2", "条件A"): 0.5,
-                  ("src2", "rec1", "条件B"): 0.25}
+                  ("src2", "rec1", "条件B"): 0.25, ("src1", "rec1", "条件10"): 0.5,
+                  ("src1", "rec1", "条件2"): 0.5}
         for (src, rec, cond), scale in layout.items():
             d = os.path.join(folder, pj.RESULT_DIR, src, rec)
-            os.makedirs(d)
+            os.makedirs(d, exist_ok=True)
             imp.write_impulse_response(os.path.join(d, f"室_{cond}_ir.csv"), t, base * scale)
+        # ★控えのフォルダ（`旧_…`）は音源位置として拾わない
+        old = os.path.join(folder, pj.RESULT_DIR, "旧_控え", "rec1")
+        os.makedirs(old)
+        imp.write_impulse_response(os.path.join(old, "室_条件A_ir.csv"), t, base)
         cat = au.Catalog(folder)
         got = {(r["source"], r["receiver"], r["condition"]) for r in cat.results}
-        check("条件はファイル名から（室名の頭を外す）、音源・受音点はフォルダから",
+        check("条件はファイル名から（室名の頭を外す）、音源・受音点はフォルダから。★控えのフォルダは拾わない",
               got == set(layout), str(sorted(got)))
-        levels = {(r["source"], r["receiver"], r["condition"]): r["level_db"] for r in cat.results}
-        check("★★音量はいちばん大きい応答を 0 dB とした相対値（比が残る）",
-              abs(levels[("src1", "rec1", "条件A")]) < 1e-6
-              and abs(levels[("src1", "rec2", "条件A")] + 6.02) < 0.05
-              and abs(levels[("src2", "rec1", "条件B")] + 12.04) < 0.05,
-              str(levels))
-        loud = np.frombuffer(cat.ir_bytes("結果/src1/rec1/室_条件A_ir.csv", 44100), "<f4")
-        quiet = np.frombuffer(cat.ir_bytes("結果/src2/rec1/室_条件B_ir.csv", 44100), "<f4")
-        check("★★渡す応答は共通の係数だけ（2 本の比が 4 倍のまま）",
+        order = [r["condition"] for r in cat.results if r["source"] == "src1" and r["receiver"] == "rec1"]
+        check("条件は数を数として並べる（条件2 → 条件10）", order == ["条件2", "条件10", "条件A"], str(order))
+        check("★★開いたときは中身を読まない（実案件は 7.7 GB・クラウドにしか無いことがある）",
+              not cat.cache and cat.gain is None)
+        first = cat.results[0]
+        levels = {(r["source"], r["receiver"], r["condition"]): cat.level_db(r["id"]) for r in cat.results}
+        check("★★音量は基準（並びの先頭）の応答を 0 dB とした比（比が残る）",
+              cat.reference is first and abs(levels[("src1", "rec1", "条件A")] - 6.0) < 0.05
+              and abs(levels[("src1", "rec2", "条件A")]) < 0.05
+              and abs(levels[("src2", "rec1", "条件B")] + 6.0) < 0.05,
+              f"基準 {first['condition']} / {levels}")
+        loud, loud_db = cat.ir_bytes("結果/src1/rec1/室_条件A_ir.csv", 44100)
+        quiet, _ = cat.ir_bytes("結果/src2/rec1/室_条件B_ir.csv", 44100)
+        loud = np.frombuffer(loud, "<f4")
+        quiet = np.frombuffer(quiet, "<f4")
+        check("★★渡す応答は共通の係数だけ（2 本の比が 4 倍のまま。大きさも一緒に返す）",
               abs(np.linalg.norm(loud) / np.linalg.norm(quiet) - 4.0) < 1e-3
-              and abs(np.linalg.norm(loud) - 1.0) < 1e-3,
+              and abs(np.linalg.norm(loud) - 2.0) < 1e-3 and abs(loud_db - 6.0) < 0.05,
               f"{np.linalg.norm(loud):.4f} / {np.linalg.norm(quiet):.4f}")
-        at48 = np.frombuffer(cat.ir_bytes("結果/src1/rec1/室_条件A_ir.csv", 48000), "<f4")
+        at48, _ = cat.ir_bytes("結果/src1/rec1/室_条件A_ir.csv", 48000)
+        at48 = np.frombuffer(at48, "<f4")
         # ★畳み込みは「サンプルの和」なので、周波数を変えても**同じ音量で聞こえる**には
         #   1 kHz の正弦波を通したときの振幅が変わらないこと（和の重みを直す）
         def gain_at(ir, rate, f=1000.0):
             n = np.arange(len(ir)) / rate
             return abs(np.sum(ir * np.exp(-2j * np.pi * f * n)))
-        g44 = gain_at(loud, 44100.0)
+        g44 = gain_at(loud.astype(float), 44100.0)
         g48 = gain_at(at48.astype(float), 48000.0)
         check("★ブラウザの周波数（48 kHz）に変換しても 1 kHz の利得が変わらない",
               abs(len(at48) - len(t) * 48000 / 44100) <= 1
               and abs(20 * np.log10(g48 / g44)) < 0.05,
               f"{len(at48)} 点 / 差 {20 * np.log10(g48 / g44):+.3f} dB")
-        decay = cat.results[0]["decay"]
-        slope = (decay[len(decay) // 4] - decay[0]) / (0.25 * len(t) / fs)
-        check("カードの減衰曲線（シュレーダー積分）は T = 0.5 s の傾き（-120 dB/s）",
-              abs(slope + 120) < 15, f"{slope:.1f} dB/s")
+        cat.KEEP = 2
+        cat.cache.clear()
+        for r in cat.results:
+            cat._load(r["id"])
+        check("読んだ応答は覚える本数を超えたら古いものから捨てる", len(cat.cache) == 2)
         try:
             au.dry_path(folder, "common/../project.json")
             ok = False
