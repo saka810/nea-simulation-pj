@@ -72,6 +72,13 @@ def _visualise(project, results=None):
     import view_camera
     import view_rays as vr
 
+    # ★音源が複数あるときは棚（`結果/src1/`）を開く（2026-09-15。不具合報告 ⑨）。
+    #   `結果/` 直下には音線軌跡が無いので、そのままでは何も見つけられない
+    try:
+        import source_mix as sx
+        project = sx.default_shelf(project)
+    except Exception as error:
+        print(f"[app] 音源の棚を選べませんでした（{type(error).__name__}: {error}）")
     raylog = project.result_path("raylog")     # 受音点に依らないので `結果/` 直下
     if not os.path.exists(raylog):
         print("[app] 音線軌跡が無いので可視化は開きません（先に計算してください）")
@@ -189,6 +196,12 @@ def _report_saved(project):
     print(f"前回の結果を読み込みました → {project.folder}")
     print("=" * 70)
 
+    # ★音源が複数なら 1 番目の棚を読む（そう言ってから読む）
+    try:
+        import source_mix as sx
+        project = sx.default_shelf(project)
+    except Exception:
+        pass
     saved = pj.load_results(project)
     rt, stat = saved.get("rt"), saved.get("statistical")
     if rt is None:

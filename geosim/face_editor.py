@@ -91,6 +91,7 @@ T 字接合だと分かる（実際に視聴覚室モデルでそう判断でき
 import numpy as np
 import pyvista as pv
 
+import mesh_method as mm
 import read_dxffile as rd
 import view_camera
 import view_model_gui as vg
@@ -307,7 +308,11 @@ class FaceEditor:
         # ★レイヤの一括操作用（不具合報告 ⑦）。
         #   `layer_boxes` は [(チェックボックス, コールバック), …]、
         #   `layer_index` は「レイヤ番号」の欄で指している 0 始まりの番号
-        self.layer_boxes = []
+        # レイヤの一括操作（`view_model_gui.LayerControls`。**結果画面と共用**）。
+        # パネルを作るときに欄つきで作り直す（ここでは中身だけ持つ）
+        self.layer_controls = vg.LayerControls(
+            names=[], notice=self._notice,
+            on_pick=lambda index: setattr(self, "layer_index", index))
         self.layer_pick = None
         self.layer_index = 0
         self.outline = None
@@ -429,42 +434,41 @@ class FaceEditor:
     # ★2026-09-06 ユーザー要望「レイヤー全選択全解除ほしい」（不具合報告 ⑦）。
     #   実案件の階段教室は画層が 22 種あり、1 つずつでは手数が多すぎた。
 
+    @property
+    def layer_boxes(self):
+        """レイヤのチェックボックス [(ウィジェット, コールバック), …]。
+
+        中身は `layer_controls` が持つ（**結果画面と共用の部品**）。
+        ここは昔からの呼び名をそのまま使えるようにするための窓。
+        """
+        return self.layer_controls.boxes
+
+    @layer_boxes.setter
+    def layer_boxes(self, boxes):
+        self.layer_controls.boxes = list(boxes)
+        if not self.layer_controls.names:
+            self.layer_controls.names = list(self.layers)
+
     def _set_layer_pick(self, value):
         """「レイヤ番号」の欄（1 始まり）を受けて 0 始まりで覚える。"""
-        self.layer_index = max(0, min(len(self.layers) - 1, int(round(value)) - 1))
+        if not self.layer_controls.names:
+            self.layer_controls.names = list(self.layers)
+        self.layer_controls.set_index(value)
+
+    # ★レイヤの一括操作は `view_model_gui.LayerControls` が持つ（結果の画面と共用）。
+    #   ここは呼び名を変えずに渡すだけ（数字キーなど呼び出し口が複数あるため）
 
     def _set_layer_visible(self, index, flag):
-        """レイヤ 1 つの表示を切り替える（チェックボックスの見た目も合わせる）。
-
-        ★**コールバックを呼ぶだけでは四角の色が変わらない**（VTK の
-          チェックボックスは自分で状態を持っている）。`SetState` も併せて呼ぶ。
-        """
-        if not 0 <= index < len(self.layer_boxes):
-            return
-        widget, callback = self.layer_boxes[index]
-        try:
-            widget.GetRepresentation().SetState(1 if flag else 0)
-        except Exception as error:      # 見た目が揃わなくても表示は切り替える
-            print(f"[面] チェックボックスの状態を合わせられませんでした: "
-                  f"{type(error).__name__}: {error}")
-        callback(bool(flag))
+        """レイヤ 1 つの表示を切り替える（チェックボックスの見た目も合わせる）。"""
+        self.layer_controls.set_visible(index, flag)
 
     def _show_all_layers(self, flag):
         """全レイヤをまとめて表示／非表示にする。"""
-        for index in range(len(self.layer_boxes)):
-            self._set_layer_visible(index, flag)
-        self._notice(f"レイヤを全{'表示' if flag else '非表示'}にしました")
+        self.layer_controls.show_all(flag)
 
     def _show_only_layer(self):
-        """「レイヤ番号」の欄で指しているレイヤ**だけ**を表示する。
-
-        ★1 つだけ見る使い方が多いので、全非表示 → 1 つ表示を 1 操作にした。
-        """
-        for index in range(len(self.layer_boxes)):
-            self._set_layer_visible(index, index == self.layer_index)
-        name = (self.layers[self.layer_index]
-                if self.layer_index < len(self.layers) else "?")
-        self._notice(f"レイヤ {self.layer_index + 1}『{name}』だけ表示しました")
+        """「レイヤ番号」の欄で指しているレイヤ**だけ**を表示する。"""
+        self.layer_controls.show_only()
 
     def toggle_unit(self):
         self.by_group = not self.by_group
@@ -632,13 +636,16 @@ class FaceEditor:
         """
         centres = np.array([np.mean(t, axis=0) for t in self.triangles])
         length = float(np.linalg.norm(self.model.extents[1] - self.model.extents[0])) * 0.04
-        vectors = self.normals() * length
+        normals = self.normals()
+        vectors = normals * length
         colours = self.face_colours()
         self.arrows = []
         for k, name in enumerate(self.layers):
             faces = np.nonzero(self.layer_of == k)[0]
             if not len(faces):
                 continue
+            if self.by_group:
+                faces = self._arrow_faces(faces, normals, colours)
             cloud = pv.PolyData(centres[faces])
             cloud["vector"] = vectors[faces]
             cloud.point_data["rgb"] = colours[faces]
@@ -655,6 +662,24 @@ class FaceEditor:
             if self.registry is not None and name in self.registry:
                 self.registry[name]["arrow"] = actor
             self.arrows.append(actor)
+
+    def _arrow_faces(self, faces, normals, colours):
+        """面グループ単位のとき、矢印を立てる三角形を**グループごとに 1 本**へ絞る。
+
+        ★三角形ごとに立てると分割がそのまま見える（2026-09-24 ユーザー指摘
+        「計算上三角形要素で見てないのであれば，三角形要素の表示はやめてほしい」）。
+        ただしグループの中で**向きや色（判定・材料・選択）が違う三角形**があれば
+        それぞれに 1 本ずつ残す（1 本にまとめると裏返った面を見落とす）。
+        三角形単位（`y`）のときは呼ばない（全部に立てる）。
+        """
+        labels = []
+        for j in faces:
+            g = int(self.group_of[j])
+            first = self.groups[g][0]
+            side = 1 if float(np.dot(normals[j], normals[first])) >= 0.0 else -1
+            labels.append((g, side, tuple(int(c) for c in colours[j])))
+        anchor = mm.anchor_faces([self.triangles[j] for j in faces], labels)
+        return np.array(sorted(faces[i] for i in anchor.values()), dtype=np.int64)
 
     def _say(self, message):
         """パネル下部に一言出す（キーを押しても何も起きない理由を伝えるため）。"""
@@ -777,23 +802,17 @@ class FaceEditor:
             #   吸音材の一覧は材料が増えるといくらでも伸びる（実案件で 19 種になり、
             #   下にあった向きのスライダと操作説明が画面外に押し出された）。
             #   パネルは縦に伸びずスクロールもしないので、**長いものは最後に置く**
-            panel.heading("レイヤ表示（数字キーで選択）")
             # ★**全表示・全非表示・単独表示**（2026-09-06 ユーザー要望
             #   「レイヤー全選択全解除ほしい」。不具合報告 WIN240377 の ⑦）。
-            #   実案件の階段教室は**画層が 22 種**あり、1 つずつ切り替えると
-            #   「1 つだけ見る」「全部戻す」に 22 回のクリックが要る
-            panel.button("レイヤを全表示", lambda: self._show_all_layers(True))
-            panel.button("レイヤを全非表示", lambda: self._show_all_layers(False))
-            panel.button("この番号のレイヤだけ表示", self._show_only_layer)
-            # ★**数字キーは 1〜9 まで**なので、10 個目以降はこの欄で指す
-            #   （VTK のキーイベントは 1 文字単位。実案件の 22 画層では
-            #   10 個目以降がキーでは選べなかった）
-            self.layer_pick = panel.slider(
-                "レイヤ番号", (1, max(1, len(self.layers))), 1,
-                self._set_layer_pick, fmt="%.0f", step=1)
+            #   ★★部品は `view_model_gui.LayerControls` に 1 つだけ置いて
+            #   **結果の画面と共用する**（2026-09-15。片方だけ直る状態を避ける）
+            self.layer_controls = vg.LayerControls(
+                panel, names=self.layers, heading="レイヤ表示（数字キーで選択）",
+                notice=self._notice,
+                on_pick=lambda index: setattr(self, "layer_index", index))
+            self.layer_pick = self.layer_controls.pick
             panel.button("この番号のレイヤを選択に足す",
                          lambda: self.select_layer(self.layer_index))
-            self.layer_boxes = []
             for k, name in enumerate(self.layers):
                 faces = np.nonzero(self.layer_of == k)[0]
                 # ★番号は**全部のレイヤに付ける**（10 個目以降も「レイヤ番号」の欄で
@@ -801,7 +820,8 @@ class FaceEditor:
                 label = f"{k + 1}: {name} ({len(faces)})"
                 callback = _visibility(self.plotter, registry[name])
                 widget = panel.checkbox(label, True, callback, colour="#4cc9f0")
-                self.layer_boxes.append((widget, callback))
+                # 並べた順がレイヤ番号（共通部品が一括の切り替えに使う）
+                self.layer_controls.add(widget, callback)
 
             vg.add_opacity_control(self.plotter, font=font, panel=panel,
                                    target_key="o")
@@ -1223,15 +1243,19 @@ def load_model_for(project, verbose=True):
                           band_number=project.band_number, verbose=False)
     flipped = project.flipped_faces_for(len(first.mesh))
     materials = project.face_materials_for(len(first.mesh))
+    # ★**測定点の並び**（`測定点順.json`）を当てる（2026-09-15 ユーザー要望）。
+    #   この画面で受音点の向きを決めるので、番号が計算とずれると取り違える
+    import point_order as po
     if not flipped and not materials:
         if verbose:
             print("[read_dxffile] " + first.summary().replace("\n", "\n[read_dxffile] "))
-        return first
-    return rd.read_model(project.dxf_path, unit=project.unit, absorption_table=table,
-                         orient_normals=project.orient_normals,
-                         band_number=project.band_number,
-                         flip_faces=flipped or None, face_materials=materials,
-                         verbose=verbose)
+        return po.apply(project, first, verbose=verbose)
+    return po.apply(project, rd.read_model(
+        project.dxf_path, unit=project.unit, absorption_table=table,
+        orient_normals=project.orient_normals,
+        band_number=project.band_number,
+        flip_faces=flipped or None, face_materials=materials,
+        verbose=verbose), verbose=verbose)
 
 
 def main():

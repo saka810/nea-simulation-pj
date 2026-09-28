@@ -44,7 +44,9 @@ LEVEL_ROWS = ["Lp_dB", "Lp_A_dB", "直接音_dB", "反射音_dB"]
 LEVEL_ENERGY_AVERAGE = True
 
 # `rt.csv` / `clarity.csv` から拾う行と、まとめ表での並び順
-REVERBERATION_ROWS = ["EDT_s", "T20_s", "T30_s"]
+# ★RTany（利用者が決めた区間の残響時間。2026-09-15）も並べる。
+#   出していないプロジェクトでは行が無いだけなので、足しておいて害はない
+REVERBERATION_ROWS = ["EDT_s", "T20_s", "T30_s", "RTany_s"]
 STATISTICAL_ROWS = ["sabine_s", "eyring_s", "eyring_knudsen_s"]
 CLARITY_ROWS = ["C50_db", "C80_db", "D50", "Ts_s"]
 
@@ -62,6 +64,16 @@ def _find(project, folder, filename):
     return os.path.join(folder, project.prefixed(filename))
 
 
+def results_root(project):
+    """まとめ表を書く／受音点フォルダを探す根っこ（ふつうは `結果/`）。
+
+    ★**音源が複数あるときは `結果/srcM/`**（合成なら `結果/合成_平均/` など）。
+    2026-09-15、不具合報告 ⑨。`Project.result_dir(shared=True)` が
+    「受音点には依らないが音源には依る」置き場を返すので、それをそのまま使う。
+    """
+    return project.result_dir(shared=True)
+
+
 def receiver_folders(project):
     """受音点ごとの結果フォルダを順に返す [(表示名, フォルダ), …]。
 
@@ -72,8 +84,7 @@ def receiver_folders(project):
     folders = []
     index = 1
     while True:
-        folder = os.path.join(project.folder, pj.RESULT_DIR,
-                              pj.RECEIVER_DIR % index)
+        folder = os.path.join(results_root(project), pj.RECEIVER_DIR % index)
         if not os.path.isdir(folder):
             break
         folders.append((pj.RECEIVER_DIR % index, folder))
@@ -189,7 +200,7 @@ def write_reverberation_summary(project, verbose=True):
         if key in statistical:
             records.append(("理論値", key, statistical[key]))
 
-    path = os.path.join(project.folder, pj.RESULT_DIR,
+    path = os.path.join(results_root(project),
                         project.prefixed(REVERBERATION_FILE))
     _write(path, frequencies, records)
     project.drop_old_names(os.path.dirname(path), REVERBERATION_FILE)
@@ -224,7 +235,7 @@ def write_clarity_summary(project, verbose=True):
             records.append(("ばらつき", key,
                             np.nanmax(block, axis=0) - np.nanmin(block, axis=0)))
 
-    path = os.path.join(project.folder, pj.RESULT_DIR,
+    path = os.path.join(results_root(project),
                         project.prefixed(CLARITY_FILE))
     _write(path, frequencies, records)
     project.drop_old_names(os.path.dirname(path), CLARITY_FILE)
@@ -282,7 +293,7 @@ def write_level_summary(project, verbose=True):
                        else np.nanmean(np.array(gathered[key]), axis=0))
             records.append(("平均", key, None, average))
 
-    path = os.path.join(project.folder, pj.RESULT_DIR,
+    path = os.path.join(results_root(project),
                         project.prefixed(LEVEL_FILE))
     _write(path, frequencies, records, extra_label="音源距離_m")
     project.drop_old_names(os.path.dirname(path), LEVEL_FILE)
@@ -324,7 +335,7 @@ def write_sti_summary(project, verbose=True):
             records.append(("ばらつき", "STI",
                             "%.3f" % (max(values) - min(values)), None))
 
-    path = os.path.join(project.folder, pj.RESULT_DIR, project.prefixed(STI_FILE))
+    path = os.path.join(results_root(project), project.prefixed(STI_FILE))
     _write(path, frequencies, records, extra_label="総合")
     project.drop_old_names(os.path.dirname(path), STI_FILE)
     if verbose:
@@ -347,6 +358,7 @@ def write_condition_summary(project, conditions=None, verbose=True):
     結果が無い条件は飛ばす。
     """
     import condition_table as ct
+    import source_mix as sx
 
     if conditions is None:
         conditions = ct.discover(project.folder)
@@ -354,8 +366,11 @@ def write_condition_summary(project, conditions=None, verbose=True):
 
     for item in conditions:
         file_name, sheet = item if isinstance(item, (tuple, list)) else (item, None)
-        sub = pj.Project(project.folder,
-                         **{k: getattr(project, k) for k in pj.DEFAULTS})
+        # ★音源ごとの棚（`結果/src1/`）を引き継ぐ（2026-09-16。不具合報告 ⑪ ⑫ の同型）。
+        #   `pj.DEFAULTS` に `source_tag` / `source_index` は入っていないので、
+        #   組み直すと棚が落ちて `結果/` 直下のまとめ表を探してしまう
+        sub = sx.tagged(project, tag=project.source_tag,
+                        index=project.source_index)
         sub.condition_csv = file_name
         sub.condition_sheet = sheet or ""
         label = sub.condition_label or "（既定）"
@@ -385,7 +400,7 @@ def write_condition_summary(project, conditions=None, verbose=True):
 
     room = project.room_label
     name = f"{room}_{CONDITION_FILE}" if room else CONDITION_FILE
-    path = os.path.join(project.folder, pj.RESULT_DIR, name)
+    path = os.path.join(results_root(project), name)
     _write(path, frequencies, records, extra_label="総合", first_label="条件")
     if verbose:
         conditions_found = len({r[0] for r in records})
@@ -399,7 +414,7 @@ def _read_summary(project, filename, skip):
     まとめ表は 1 列目が受音点、2 列目が項目で、`skip` が 3 なら 3 列目に
     周波数に依らない値が入る（`_write` と対応）。読めなければ None。
     """
-    path = _find(project, os.path.join(project.folder, pj.RESULT_DIR), filename)
+    path = _find(project, results_root(project), filename)
     if not os.path.exists(path):
         return None
     with open(path, encoding="utf-8-sig", newline="") as f:

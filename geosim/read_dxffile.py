@@ -1231,7 +1231,7 @@ COPLANAR_ANGLE_DEGREES = 1.0
 COPLANAR_DISTANCE = 1.0e-3
 
 
-def patch_outline_segments(triangles, normals, angle_degrees=None):
+def patch_outline_segments(triangles, normals, angle_degrees=None, labels=None):
     """**同一平面パッチの外周**を線分 (M,2,3) で返す。
 
     三角形の辺を全部引くと網目になって形が読めないので、
@@ -1241,16 +1241,23 @@ def patch_outline_segments(triangles, normals, angle_degrees=None):
     **形が見えない**（2026-08-24 ユーザー指摘「壁が見えなくなっている」）。
     測定点の配置図（`plots.measurement_points`）と虚音源の画面
     （`view_images`）で共用している。
+
+    `labels` を渡すとその割り方（例：計算の `mesh_method.coplanar_patches`）で外周を取る。
+    ★結果の画面は**計算と同じ割り方**で描く（2026-09-24。見えている区切りが
+    計算の単位と食い違わないように）
     """
     triangles = np.asarray(triangles, dtype=float)
     normals = np.asarray(normals, dtype=float)
     if not len(triangles):
         return np.zeros((0, 2, 3))
     kwargs = {} if angle_degrees is None else {"angle_degrees": angle_degrees}
-    try:
-        groups = coplanar_groups(triangles, normals, **kwargs)
-    except Exception:
-        groups = np.arange(len(triangles))
+    if labels is not None:
+        groups = np.asarray(labels)
+    else:
+        try:
+            groups = coplanar_groups(triangles, normals, **kwargs)
+        except Exception:
+            groups = np.arange(len(triangles))
 
     segments = []
     for group in np.unique(groups):
@@ -1505,6 +1512,50 @@ def analyse_shells(triangles, tol=1.0e-9):
 # ------------------------------------------------------------------------------
 # 本体
 # ------------------------------------------------------------------------------
+
+def apply_absorption(model, absorption_table=None, default_absorption=None,
+                     band_number=None, verbose=True):
+    """**読み込み済みのモデルに吸音率を貼り直す**（幾何は触らない）。→ model
+
+    ★★**同じモデルを何度も読み直さないため**（2026-09-20。高速化の提案 ①）。
+    実案件（階段教室・779 三角形）で `read_model` は **1 回 1.74 秒**かかるのに、
+    1 条件を回すのに **17 回**読んでいた（音源 × 受音点ごとに 1 回ずつなど）。
+    F-6 で「音線追跡は受音点をまたいで 1 回」にしたのと同じ考えがここにも要る。
+
+    ★**重い工程はすべて材料に依らない**（DXF の解析・三角形分割・法線・
+    同一平面グループ・容積・表面積・開いた辺）。材料に依るのは
+    **各面に吸音率を貼るところだけ**なので、そこだけやり直せばよい。
+
+    ★`Mesh.material` は**触らない**。`read_dxffile` はそこにレイヤ名
+    （面ごとの指定があればその材料名）を入れており、**吸音率の値では変わらない**。
+    だからパッチの切れ目も動かない（経路キャッシュが無効にならない）。
+
+    ★**`layer_materials`（レイヤ → 引けた材料のキー）は作り直す。**
+    『吸音率と理論値.csv』の材料別の集計がここから決まるため。
+    """
+    if model is None:
+        return model
+    if band_number is None:
+        # ★**いま貼ってある吸音率の長さ**から決める（モデルは band_number を持たない）。
+        #   既定 8 で決め打ちすると、6 バンドで回しているときに列がずれる
+        band_number = (len(model.mesh[0].absorption_coefficient)
+                       if model.mesh is not None and len(model.mesh)
+                       else DEFAULT_BAND_NUMBER)
+    if isinstance(absorption_table, str):
+        absorption_table = read_absorption_csv(absorption_table, band_number)
+
+    unresolved = set()
+    model.layer_materials = {}
+    for face in model.mesh:
+        face.absorption_coefficient = _resolve_absorption(
+            face.material, absorption_table, default_absorption, band_number,
+            unresolved, model.layer_materials)
+    if unresolved and verbose:
+        used = 0.1 if default_absorption is None else default_absorption
+        print(f"[read_dxffile] 警告: 吸音率が未指定のレイヤ {sorted(unresolved)} "
+              f"→ {used} を使用")
+    return model
+
 
 def read_model(file_name, unit=None, absorption_table=None, default_absorption=None,
                orient_normals="cad", reference_point=None, band_number=DEFAULT_BAND_NUMBER,
@@ -1881,6 +1932,14 @@ def read_model(file_name, unit=None, absorption_table=None, default_absorption=N
                      else np.mean([np.mean(t, axis=0) for t in triangles], axis=0))
             model.enclosure = encloses_point(triangles, probe)
         enclosed = model.is_closed or (model.enclosure or 0.0) >= ENCLOSURE_THRESHOLD
+        # ★★**自由端は開いていれば必ず数える**（2026-09-20。不具合報告 ㉒）。
+        #   以前は下の「容積を出すとき」の中でしか数えていなかったので、
+        #   **囲まれていない開いたモデルでは `free_edges` が既定値の [] のまま**だった。
+        #   `[]` は「自由端が無い」ではなく「数えていない」の意味になっていて、
+        #   `check_model` がそれを信じると**開いたモデルに「面は閉じています」と言う**
+        #   （test2.dxf：床と壁 2 面。`open_edges.py` は自由端 11 本と正しく数える）
+        if not model.is_closed:
+            model.free_edges = uncovered_open_edges(triangles)
         if enclosed:
             model.volume = abs(volume_from_normals(
                 triangles, [f.normal for f in model.mesh]))
@@ -1890,7 +1949,6 @@ def read_model(file_name, unit=None, absorption_table=None, default_absorption=N
             #   覆われていない自由端があると、宙に浮いた片面の板などが混ざっていて
             #   値が黙って狂うので、必ず知らせる
             if not model.is_closed:
-                model.free_edges = uncovered_open_edges(triangles)
                 if model.free_edges:
                     length = sum(float(np.linalg.norm(b - a)) for a, b in model.free_edges)
                     model.volume_note = (
@@ -2004,26 +2062,39 @@ def check_model(model, absorption_table=None, verbose=True,
     #   一面反射板の検討もふつうにある）。`closed_expected` で言ってもらい、
     #   **「閉じている」と言われたときだけ作図ミスとして扱う**。
     #   何も言われなければ（None）、どちらの可能性もあると伝える
-    if not model.is_closed and closed_expected is not False:
-        level = "info" if (model.open_edges < 4 or closed_expected is None) \
-            else "warning"
-        tail = ("。**閉じた室を想定しているので作図ミスです**"
-                if closed_expected else
-                "（閉じた室のつもりなら作図ミス。"
-                "一面反射板などなら問題ありません）")
-        add(level, f"開いた辺が {model.open_edges} 本あります" + tail)
+    #
+    # ★★**判定は「自由端」だけで行う**（2026-09-20。不具合報告 ㉒）。
+    #   以前はここだけ**開いた辺の総数**（`open_edges`・`is_closed`）で判定していたので、
+    #   **T字接合しか無い閉じた室でも「作図ミスです」と出ていた**
+    #   （視聴覚室で 68 本・4 かたまり。壁を下部・上部・天井裏に割ってあるだけ）。
+    #   開いた辺は 2 種類あって混ぜない（2026-08-19 の約束）：
+    #     ・自由端 … 他の辺に覆われていない。宙に浮いた板・面の抜け（作図ミスの候補）
+    #     ・T字接合 … 他の辺に覆われている。面は閉じている（壁を帯で割っただけ）
+    #   毎回「作図ミス」と出ると、本当の自由端が出たときに見分けがつかない
+    t_joints = max(int(model.open_edges) - len(model.free_edges), 0)
     if model.free_edges:
         length = sum(float(np.linalg.norm(b - a)) for a, b in model.free_edges)
         body = (f"自由端（他の辺に覆われていない開いた辺）が "
                 f"{len(model.free_edges)} 本・計 {length:.2f} m あります。"
                 f"宙に浮いた片面の板や面の抜けです")
+        where = "`python open_edges.py <DXF>` で場所を確かめられます"
         if closed_expected is False:
             # 閉じていないモデルとして扱う設定。★それでも**容積は目安**になる
             add("info", body + "（閉じていないモデルとして扱う設定なので"
                                "想定どおりです。ただし容積は目安になります）")
+        elif closed_expected:
+            add("warning", body + "。**閉じた室を想定しているので作図ミスです**。"
+                                  "容積は目安になります。" + where)
         else:
-            add("warning", body + "。容積は目安になります。"
-                                  "`python open_edges.py <DXF>` で場所を確かめられます")
+            add("warning", body + "（閉じた室のつもりなら作図ミス。"
+                                  "一面反射板などなら問題ありません）。"
+                                  "容積は目安になります。" + where)
+    if t_joints:
+        # ★T字接合は**作図ミスではない**。数だけ知らせる（情報）
+        closed_note = ("自由端は無いので**面は閉じています**"
+                       if not model.free_edges else "面の継ぎ目で、作図ミスではありません")
+        add("info", f"T字接合（他の辺に覆われた開いた辺）が {t_joints} 本あります。"
+                    f"壁を帯や開口で分割したときにできる継ぎ目で、{closed_note}")
     if not model.winding_consistent:
         add("warning", "巻き順が一貫していません"
                        "（隣り合う面で法線が反対を向いている箇所があります）")

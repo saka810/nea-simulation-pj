@@ -66,6 +66,50 @@ DECAY_MEASURES = {
     "T30": (-5.0, -35.0),
 }
 
+# ★★**RTany ― 評価区間を利用者が決める残響時間**（2026-09-15 ユーザー指示）。
+#
+#   > 減衰曲線の読み方を任意に読めるようにしています。RTany がそれです。
+#   > 読み方を人それぞれが判断する方法を置いておけば良いです。
+#   > そのうえで、自動的な数値（RT20 や 30 など）は置いておいてください。
+#
+#   きっかけは**減衰が二段階になる室**（階段教室。曲率が 125〜4k Hz で 10% 超）。
+#   前半が速く減り後半が遅く残るので、T30 を 1 本の直線で読むこと自体に無理がある。
+#   どこを読むかは**音響設計者が決めること**なので、機械が選ばずに手で決められる
+#   口を用意する（測定側の `sti_measurement` プロジェクトと同じ考え方）。
+#
+#   ★**EDT / T20 / T30 は今までどおり必ず出す**。RTany はそれに足す 1 本で、
+#     置き換えではない（自動の数字と見比べられないと判断できないため）。
+#   ★既定は T30 と同じ区間にしてある（変えるまでは T30 と同じ値になる＝
+#     「まだ何も決めていない」ことが数字を見れば分かる）。
+RT_ANY = "RTany"
+RT_ANY_DEFAULT = (-5.0, -35.0)
+
+
+def measures_with_any(start_db=None, end_db=None, base=None):
+    """`DECAY_MEASURES` に **RTany** を足した組を返す。→ {名前: (開始dB, 終了dB)}
+
+    `start_db` / `end_db` が両方 None なら足さない（従来どおり EDT / T20 / T30）。
+    片方だけ指定されたら、もう片方は既定（-5 / -35 dB）を使う。
+
+    ★**開始より終了のほうが下**でなければならない（`-5 → -35`）。
+      逆さに書かれたら**入れ替える**（符号を書き間違えやすいので、
+      黙って変な値を出すより直して知らせる）。
+    """
+    measures = dict(DECAY_MEASURES if base is None else base)
+    if start_db is None and end_db is None:
+        return measures
+    start = RT_ANY_DEFAULT[0] if start_db is None else float(start_db)
+    end = RT_ANY_DEFAULT[1] if end_db is None else float(end_db)
+    if start < end:
+        print(f"[reverberation] RTany の区間が逆さです（{start} → {end} dB）。"
+              f"入れ替えて {end} → {start} dB として読みます")
+        start, end = end, start
+    if start == end:
+        print(f"[reverberation] RTany の開始と終了が同じ（{start} dB）なので出しません")
+        return measures
+    measures[RT_ANY] = (start, end)
+    return measures
+
 # 減衰曲線の読み取り方。
 #   'least_squares' … 評価区間の全サンプルへ直線を最小二乗で当てる（**ISO 3382**。既定）
 #   'crossing'      … 開始 dB と終了 dB を横切る 2 点の時刻差（元コード 134 行）。
@@ -236,9 +280,10 @@ def statistical_reverberation(mesh, volume, frequencies=None, atmosphere=None,
     sound_velocity = atmosphere.sound_velocity
     constant = 24.0 * np.log(10.0) / sound_velocity  # c=343 のとき 0.1611
 
-    # 空気吸収の項 4mV（m はエネルギーの減衰係数 [1/m]）
-    air = (4.0 * atmosphere.absorption_coefficient(frequencies) * volume
-           if include_air_absorption else np.zeros(len(frequencies)))
+    # 空気吸収の項 4mV（m はエネルギーの減衰係数 [1/m]）。
+    # ★**厳密中心周波数で引く**（ISO 9613-1 表1 と同じ土俵にするため。2026-09-16）
+    air = (4.0 * atmosphere.absorption_coefficient(ab.exact_midband(frequencies))
+           * volume if include_air_absorption else np.zeros(len(frequencies)))
 
     mean_absorption = (areas @ alpha) / total_area          # (nf,)
 
@@ -366,11 +411,13 @@ def octave_bandpass(signal, centre_frequency, sampling_frequency,
     method='fir'    … `scipy.signal.firwin` + 線形畳み込み。遅れを切り落として返す。
     """
     nyquist = sampling_frequency / 2.0
-    # ★帯域幅は `band_width` で決める（`1/1` なら f/√2〜f√2、`1/3` なら
-    #   f·2^(∓1/6)）。2026-08-26 に 1/3 オクターブ対応で追加
-    half = ab.band_ratio(band_width) / 2.0
-    lower = centre_frequency * 2.0 ** (-half)
-    upper = min(centre_frequency * 2.0 ** half, nyquist * 0.999)
+    # ★★帯域端は **JIS C 1513-1 5.6.1**（`ab.band_edges`）。
+    #   **厳密中心周波数**（5.4.1）のまわりに `G^(∓1/(2b))`、G = 10^(3/10)。
+    #   2026-09-16 にユーザー指示でベース 2（f/√2、2^(∓1/6)）から揃えた。
+    #   渡ってくる `centre_frequency` は呼び値なので、その変換もここで済む
+    lower, upper = ab.band_edges(centre_frequency, band_width)
+    lower = float(lower)
+    upper = min(float(upper), nyquist * 0.999)
     if lower >= upper:
         raise ValueError(f"{centre_frequency:.0f} Hz バンドがナイキスト周波数 "
                          f"{nyquist:.0f} Hz に収まりません")
@@ -479,11 +526,68 @@ def curvature_percent(decay_db, dt, fit=DEFAULT_DECAY_FIT):
     return (t30 / t20 - 1.0) * 100.0
 
 
-def _decay_floor_db(decay_db):
-    """減衰曲線がどこまで下がったか [dB]（見えている範囲）。届いていなければ大きい値。"""
-    finite = np.asarray(decay_db, dtype=float)
-    finite = finite[np.isfinite(finite)]
-    return float(finite.min()) if len(finite) else np.nan
+# ★★**打ち切りが作る床**を見つけるためのしきい値（2026-09-20。不具合報告 ⑰）
+FLOOR_REFERENCE_DB = -20.0      # 基準の傾きを測る深さ
+FLOOR_SLOPE_FACTOR = 5.0        # 基準の傾きの何倍から「崖」とみなすか
+
+
+def _decay_floor_db(decay_db, reference_db=FLOOR_REFERENCE_DB,
+                    factor=FLOOR_SLOPE_FACTOR):
+    """**どこまで読める減衰か** [dB]。浅いほど読める範囲が狭い。
+
+    ★★2026-09-20 に**曲線の最小値を返すのをやめた**（不具合報告 ⑰。
+    ユーザー指摘「シミュレーションだとしても −100 もいくかな？」）。
+
+    実測なら暗騒音が床を作るので最小値でよい。しかし**シミュレーションには
+    暗騒音が無い**ので、シュレーダー積分は応答の終端でゼロに向かい、
+    **float64 の精度限界（−350 dB 前後）まで落ちるだけ**になる。
+    実案件（階段教室・63 Hz）では **−80 dB までは 3.5 秒かけて素直に落ちるのに、
+    そこから 1 秒足らずで −300 dB まで垂直に落ちていた**。
+    パルス列の最後の到来が 4.11 s（応答長 5.0 s）で、それ以降は積分に残す音が
+    無いだけ。−347 dB という数字は「余裕たっぷり」という**誤った安心**を与える。
+
+    ★そこで**傾きが急変する点**を床とみなす。基準は「0 → `reference_db` まで
+    落ちるのに要した平均の傾き」で、その `factor` 倍を超えたら崖と数える。
+    崖が末尾まで続く手前（＝最後にふつうの傾きだった点）の値を返す。
+
+    ★**崖が無ければ従来どおり最小値**（解析的な直線の減衰など、
+    打ち切りの影響が無い曲線では意味が変わらない）。
+
+    ★この値は `decay_curves` の「ISO 3382 の余裕（評価区間の下端 + 10 dB）まで
+    見えているか」の判定に使われる。**最小値のままだと −347 dB なので
+    この警告は一度も出なかった**（見張りが効いていなかった）。
+    """
+    y = np.asarray(decay_db, dtype=float)
+    y = y[np.isfinite(y)]
+    if not len(y):
+        return np.nan
+    if len(y) < 8:
+        return float(y.min())
+
+    # 基準の傾き [dB/サンプル]：先頭から reference_db だけ落ちるまでの平均
+    below = np.nonzero(y <= y[0] + reference_db)[0]
+    if not len(below):
+        return float(y.min())       # 基準の深さまで落ちない＝崖を測る物差しが無い
+    k = int(below[0])
+    if k < 2:
+        return float(y.min())       # いきなり落ちている（読み取れる減衰が無い）
+    reference = (y[0] - y[k]) / k
+    if not reference > 0.0:
+        return float(y.min())
+
+    # 局所の傾き。1 サンプルずつ見ると粗いので、基準までの長さに応じた窓で測る
+    window = max(1, k // 8)
+    if len(y) <= window + k:
+        return float(y.min())
+    slope = (y[:-window] - y[window:]) / window
+
+    # ★**崖の入口**を探す。基準の深さより手前は見ない（立ち上がりの急降下を
+    #   崖と取り違えないため）。崖の先は数値の底で平らになる（傾き 0）ので、
+    #   「最後に緩やかだった点」ではなく**最初に急になった点**を採る
+    steep = np.nonzero(slope[k:] > factor * reference)[0]
+    if not len(steep):
+        return float(y.min())       # 崖が無い＝最後まで素直に落ちている
+    return float(y[int(steep[0]) + k])
 
 
 def decay_curves(time, ir, frequencies=None, db_max=DB_MAX, db_min=DB_MIN,
@@ -504,7 +608,8 @@ def decay_curves(time, ir, frequencies=None, db_max=DB_MAX, db_min=DB_MIN,
         'frequencies' / 'time' / 'decay' (nf, n) [dB] /
         'reverberation_time' (nf,) [s] / 'curvature' (nf,) [%]（**ISO 3382 の C**）/
         'nonlinearity' (nf,)（**ISO 3382-2 の ξ = 1000(1-r²)**）/
-        'r2' (nf,) / 'floor_db' (nf,)（減衰曲線が下がりきった深さ）/
+        'r2' (nf,) / 'floor_db' (nf,)（★**どこまで読める減衰か**。
+                    打ち切りが作る崖の手前まで。2026-09-20。不具合報告 ⑰）/
         'fit' (nf,) 適合の情報 dict のリスト / 'fit_method'
 
     ※ 帯域幅×減衰時間（BT 積）が小さいと推定のばらつきが大きくなる
@@ -643,7 +748,7 @@ def decay_measures(time, ir, frequencies=None, measures=None, method="butter",
         'nonlinearity'  {名前: (nf,)}   ISO 3382-2 の ξ = 1000(1-r²)
         'fit'           {名前: [適合の情報 dict]}
         'curvature'     (nf,) [%]   **ISO 3382 の C = (T30/T20 - 1)×100**
-        'floor_db'      (nf,)       減衰曲線が下がりきった深さ
+        'floor_db'      (nf,)       ★どこまで読める減衰か（打ち切りの崖の手前）
         'fit_method'
     """
     if measures is None:
@@ -677,6 +782,8 @@ def decay_measures(time, ir, frequencies=None, measures=None, method="butter",
     return {"frequencies": base["frequencies"], "time": base["time"],
             "decay": base["decay"], "measures": values,
             "nonlinearity": nonlinearity, "fit": fits,
+            # どの区間で読んだか（RTany は利用者が決めるので表にも残す）
+            "ranges": dict(measures),
             "curvature": base["curvature"], "floor_db": base["floor_db"],
             "fit_method": fit}
 
@@ -806,6 +913,15 @@ def write_decay_measures(filename, result):
     rows["curvature_percent"] = result["curvature"]
     if result.get("floor_db") is not None:
         rows["decay_floor_db"] = result["floor_db"]
+    # ★**RTany はどの区間で読んだかを表に残す**（2026-09-15）。
+    #   利用者が決める値なので、表だけ見て「何 dB から何 dB まで」が分からないと
+    #   あとで読み返せない。バンドに依らない値だが、この表は 1 行 1 項目なので
+    #   全バンドに同じ値を並べる（`summary.py` は名前で拾うので邪魔にならない）
+    span = (result.get("ranges") or {}).get(RT_ANY)
+    if span is not None:
+        count = len(result["frequencies"])
+        rows[f"{RT_ANY}_start_db"] = np.full(count, float(span[0]))
+        rows[f"{RT_ANY}_end_db"] = np.full(count, float(span[1]))
     return tb.write_frequency_table(filename, result["frequencies"], rows)
 
 

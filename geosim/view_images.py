@@ -75,7 +75,9 @@ COLOUR_LABEL = {"reflection": "反射回数", "energy": "エネルギー [dB]",
                 "time": "到来時刻 [ms]"}
 COLOUR_BAR_TITLE = {"reflection": "Reflection order", "energy": "Energy [dB]",
                     "time": "Arrival time [ms]"}
-COLOUR_CMAP = {"reflection": "viridis", "energy": "plasma", "time": "cividis"}
+# ★到来時刻は**反転して 0 s に近いほど黄色**（2026-09-24。不具合報告 ㉔）。
+#   音線の画面（`view_rays.RAY_CMAP`）と Tab で行き来するので向きをそろえる
+COLOUR_CMAP = {"reflection": "viridis", "energy": "plasma", "time": "cividis_r"}
 
 IMAGE_COLOR = "#ffd166"         # 虚音源の点（色分けしないとき）
 RECEIVER_COLOR = "#4cc9f0"
@@ -379,6 +381,13 @@ def load_sets(project, verbose=True):
     for k, point in enumerate(receivers):
         sub = pj.Project(project.folder,
                          **{key: getattr(project, key) for key in pj.DEFAULTS})
+        # ★音源ごとの棚（`結果/src1/`）を引き継ぐ（2026-09-16。不具合報告 ⑫）。
+        #   `source_tag` / `source_index` は**保存する条件ではない**ので
+        #   `DEFAULTS` に入っておらず、組み直すとここで落ちていた。
+        #   落ちると `結果/recN/` を見にいくので、音源が 2 点以上のときは
+        #   パルス列が 1 つも見つからず**虚音源のタブが出なかった**
+        sub.source_tag = project.source_tag
+        sub.source_index = project.source_index
         sub.receiver_index = k + 1
         path = sub.existing_result_path("pulses")
         if not os.path.exists(path):

@@ -18,10 +18,17 @@
 """
 
 import os
+import subprocess
+import sys
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 import project as pj
+import source_mix as sx
+
+# ★**音源が複数あるときの結果の見方**（2026-09-15 ユーザー要望。不具合報告 ⑨）。
+#   音源ごとの計算（個別）は必ず行うので、ここで選ぶのは「合成」をどれにするか
+MIX_CHOICES = sx.MIX_CHOICES
 
 BAND_CHOICES = [("8 バンド（63〜8k Hz）", 8), ("6 バンド（125〜4k Hz）", 6)]
 # ★インパルス応答の合成のやり方（2026-08-23 ユーザー指摘）。
@@ -53,6 +60,17 @@ GEOMETRY_FIELDS = [
 ROOM_FIELDS = [
     ("volume", "室容積 [m³]", float, "空欄なら閉じた形状から自動算出"),
 ]
+# ★**RTany ― 減衰曲線をどこで読むか**（2026-09-15 ユーザー指示）。
+#   EDT / T20 / T30 は今までどおり必ず出る。RTany はそれに足す 1 本で、
+#   **減衰が二段階になる室でどこを読むかを設計者が決める**ためのもの
+DECAY_FIELDS = [
+    ("rt_any_start_db", "RTany 開始 [dB]", float,
+     "空欄なら RTany を出さない。既定 -5（T30 と同じ）"),
+    ("rt_any_end_db", "RTany 終了 [dB]", float,
+     "既定 -35（T30 と同じ）。前半だけ読むなら -15 など"),
+]
+DECAY_FIT_CHOICES = [("ISO 3382（区間の全点に直線を当てる）", "least_squares"),
+                     ("2 点法（開始 dB と終了 dB を横切る時刻の差）", "crossing")]
 SOURCE_FIELDS = [
     # 音圧レベルの絶対値・STI の SNR に要る（2026-08-21 ユーザー要望）
     ("source_power_db", "音源 PWL [dB]", float,
@@ -66,7 +84,8 @@ ATMOSPHERE_FIELDS = [
     ("humidity", "相対湿度 [%]", float, ""),
     ("pressure", "気圧 [kPa]", float, ""),
 ]
-NUMBER_FIELDS = GEOMETRY_FIELDS + ROOM_FIELDS + SOURCE_FIELDS + ATMOSPHERE_FIELDS
+NUMBER_FIELDS = (GEOMETRY_FIELDS + ROOM_FIELDS + DECAY_FIELDS + SOURCE_FIELDS
+                 + ATMOSPHERE_FIELDS)
 
 # インパルス応答の長さを理論残響時間の何倍にするか（1 秒単位に切り上げる）。
 # T30 は 35 dB 減るまで見るので 0.58 倍あれば測れるが、余裕を見て 1.5 倍
@@ -267,6 +286,25 @@ class SetupWindow:
                                    justify="left")
         self.room_note.grid(row=1, column=0, columnspan=3, sticky="w", pady=(4, 0))
 
+        # ★**減衰曲線の読み方**（2026-09-15 ユーザー指示）。
+        #   EDT / T20 / T30 は今までどおり必ず出る。ここで決めるのは
+        #   **RTany**（設計者が自分で区間を決めて読む 1 本）と、直線の当て方
+        frame = self._section(parent, "減衰曲線の読み方（EDT / T20 / T30 は常に出ます）")
+        for row, (key, label, _type, hint) in enumerate(DECAY_FIELDS):
+            self._number_row(frame, row, key, label, hint)
+        ttk.Label(frame, text="読み取り方").grid(row=len(DECAY_FIELDS), column=0,
+                                            sticky="w", pady=3)
+        var = tk.StringVar()
+        self.vars["decay_fit"] = var
+        ttk.Combobox(frame, textvariable=var, state="readonly", width=44,
+                     values=[text for text, _ in DECAY_FIT_CHOICES]).grid(
+                         row=len(DECAY_FIELDS), column=1, sticky="w", padx=8)
+        ttk.Label(frame, foreground="#3a6ea5", justify="left",
+                  text="★減衰が二段階になる室では、T30 を 1 本の直線で読むこと自体に"
+                       "無理があります。どこを読むかは設計者が決めてください"
+                  ).grid(row=len(DECAY_FIELDS) + 1, column=0, columnspan=3,
+                         sticky="w", pady=(4, 0))
+
         frame = self._section(parent, "音源（音圧レベル・STI に使う）")
         for row, (key, label, _type, hint) in enumerate(SOURCE_FIELDS):
             self._number_row(frame, row, key, label, hint)
@@ -300,9 +338,11 @@ class SetupWindow:
         combo(1, "orient_normals", "法線の向き", NORMAL_CHOICES)
         combo(2, "closed_model", "閉じたモデル", CLOSED_CHOICES)
         combo(3, "impulse_method", "インパルス応答の合成", IMPULSE_CHOICES)
+        # ★音源が 2 点以上あるときだけ効く（1 点なら何も変わらない）
+        combo(4, "source_combination", "音源が複数のとき", MIX_CHOICES)
         self.vars["statistical"] = tk.BooleanVar()
         ttk.Checkbutton(frame, text="統計残響式（Sabine / Eyring / Eyring-Knudsen）も計算する",
-                        variable=self.vars["statistical"]).grid(row=4, column=1,
+                        variable=self.vars["statistical"]).grid(row=5, column=1,
                                                                 sticky="w", padx=8)
 
     def _build_buttons(self, parent):
@@ -328,8 +368,13 @@ class SetupWindow:
         # （左寄りの補助的なもの → 右寄りの本命）の順に並べる
         items = [
             ("条件だけ保存", self._on_save),
+            # ★測定点の並び（`結果/recN/` の N をどの点にするか。2026-09-15 ユーザー要望）
+            ("測定点の並び…", self._on_point_order),
             ("面を確認…（法線・吸音材）", self._on_normals),
             ("前回の結果を見る", self._on_view),
+            # ★可聴化（2026-09-26 ユーザー要望）。ブラウザの窓で開くので、
+            #   この画面は閉じずに並べて使える
+            ("可聴化…", self._on_auralize),
             # ★同じフォルダの条件表を全部回す（2026-08-21 ユーザー要望）。
             #   経路は吸音に依らないので 2 件目以降は一瞬で終わる（F-9）
             ("全条件を一括 ▶▶", self._on_run_all),
@@ -392,6 +437,10 @@ class SetupWindow:
         self._set_combo("orient_normals", NORMAL_CHOICES, p.orient_normals)
         self._set_combo("closed_model", CLOSED_CHOICES,
                         getattr(p, "closed_model", pj.CLOSED_AUTO))
+        self._set_combo("decay_fit", DECAY_FIT_CHOICES,
+                        getattr(p, "decay_fit", "least_squares"))
+        self._set_combo("source_combination", MIX_CHOICES,
+                        getattr(p, "source_combination", sx.MIX_ALL))
         self._set_combo("impulse_method", IMPULSE_CHOICES,
                         getattr(p, "impulse_method", "fast"))
         self.vars["statistical"].set(bool(p.statistical))
@@ -449,6 +498,9 @@ class SetupWindow:
                                                         NORMAL_CHOICES)
         self.project.closed_model = self._combo_value("closed_model",
                                                       CLOSED_CHOICES)
+        self.project.decay_fit = self._combo_value("decay_fit", DECAY_FIT_CHOICES)
+        self.project.source_combination = self._combo_value("source_combination",
+                                                            MIX_CHOICES)
         self.project.impulse_method = self._combo_value("impulse_method",
                                                         IMPULSE_CHOICES)
         self.project.statistical = bool(self.vars["statistical"].get())
@@ -493,6 +545,30 @@ class SetupWindow:
             self.vars[key].set(os.path.normpath(path))
             if key == "condition_csv":
                 self._refresh_sheets()      # 選んだ表の条件シートを並べ直す
+
+    def _on_point_order(self):
+        """**測定点の並び**を直す窓を開く（`測定点順.json`）。
+
+        ★CAD に描いた順がそのまま `rec1` `rec2` …になるので、ラベル（R1…）と
+        ずれることがある（実案件で `rec1` が R4 になっていた。2026-09-15）。
+        並べ替えは**次の計算から効く**（計算済みの結果フォルダは並べ替えない）。
+        """
+        self._collect()
+        folder = self.vars["folder"].get().strip()
+        if not folder or not os.path.isdir(folder):
+            messagebox.showerror("測定点の並び",
+                                 "先にプロジェクトフォルダを決めてください")
+            return
+        if not self.project.dxf_path or not os.path.exists(self.project.dxf_path):
+            messagebox.showerror("測定点の並び", "先に DXF を選んでください")
+            return
+        import point_order as po
+
+        try:
+            po.edit(self.project, parent=self.root)
+        except Exception as e:
+            messagebox.showerror("測定点の並びを開けませんでした",
+                                 f"{type(e).__name__}: {e}")
 
     def _show_directions(self):
         """音線がどの向きへ飛ぶかを見る（室形状は関係ないので単体で開ける）。"""
@@ -767,6 +843,26 @@ class SetupWindow:
             return
         self.action = "view"
         self.root.destroy()
+
+    def _on_auralize(self):
+        """インパルス応答をドライソースに畳み込んで聴く画面（`auralize.py`）を開く。
+
+        ★**この画面は閉じない**（別のプロセスで立ち上げ、ブラウザの窓で開く）。
+        条件を直して計算し直したら、可聴化の画面の「結果を読み直す」で取り込める。
+        """
+        error = self._collect()
+        if error:
+            messagebox.showerror("入力を確認してください", error)
+            return
+        if not pj.has_results(self.project):
+            messagebox.showinfo("結果がありません",
+                                f"{self.project.folder} にまだ計算結果がありません。\n"
+                                f"「計算する ▶」を先に実行してください。")
+            return
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "auralize.py")
+        subprocess.Popen([sys.executable, script, self.project.folder],
+                         cwd=os.path.dirname(script))
+        self.status.config(text="可聴化の画面をブラウザで開きます（結果を読むので少し待ちます）")
 
     def _on_run(self):
         error = self._collect()

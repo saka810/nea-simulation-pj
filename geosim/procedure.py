@@ -42,12 +42,18 @@ from ray_recorder import RayRecorder
 def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref, soundray_number,
             absorption_csv=None, absorption_kind=None, layer_assignment=None,
             band_number=rd.DEFAULT_BAND_NUMBER, band_width="1/1",
-            band_start=None, material_library=None,
+            band_start=None, material_library=None, absorption_table=None,
+            model=None, absorption_stages=None,
             unit=None, orient_normals="cad", two_sided=False, volume=None,
             atmosphere=None, raylog_filename=None, raylog_max_rays=2000,
             pulse_filename=None, impulse_filename=None,
             sampling_frequency=ir.SAMPLING_FREQUENCY, max_time=ir.MAX_TIME,
             reverberation_filename=None, decay_filename=None,
+            # ★**RTany**（評価区間を利用者が決める残響時間。2026-09-15 ユーザー指示）。
+            #   両方 None なら従来どおり EDT / T20 / T30 だけ
+            rt_any_start_db=None, rt_any_end_db=None,
+            # 減衰曲線の読み方（`least_squares` = ISO 3382 の回帰／`crossing` = 2 点法）
+            decay_fit=None,
             room_filename=None, statistical=True,
             clarity=True, clarity_filename=None,
             source_power_db=None, noise_level_db=None,
@@ -94,6 +100,21 @@ def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref
     material_library : absorption.MaterialLibrary | None
         材料一覧を直接渡す場合（GUI から編集したものなど）。
         指定すると absorption_csv より優先される。
+    model : read_dxffile.DxfModel | None
+        ★**読み込み済みのモデル**（2026-09-20。高速化の提案 ①）。渡すと DXF を
+        読み直さず、**吸音率だけ貼り直して**使う（`rd.apply_absorption`）。
+        実案件（階段教室）は 1 回読むのに 1.74 秒かかり、1 条件で 17 回読んでいた。
+        ★**このプロシージャはモデルを書き換えない**（読むだけ）ので、
+        受音点をまたいで同じものを渡してよい
+    absorption_stages : dict | None
+        ★吸音率の各段（カタログ値・安全率・上限の丸め）。『吸音率と理論値.csv』に
+        書くためだけに使う（計算には効かない）。`run_project` が
+        `condition_table.absorption_stages()` で作って渡す（不具合報告 ㉑）
+    absorption_table : dict | None
+        ★**出来あいの吸音率テーブル**（{レイヤ名またはキー: 垂直入射吸音率}）。
+        渡すと `material_library` から組み立て直さずにそのまま使う。
+        `run_project` は条件表の**安全率**を掛けた表をここに渡す
+        （2026-09-20。不具合報告 ⑱。渡さないと安全率が効かない）
     atmosphere : atmosphere.Atmosphere | None
         温度・湿度・気圧。**音速と空気吸収の両方がここから決まる。**
         None なら基準状態（20℃ / 湿度 40% / 101.325 kPa → 音速 343.8 m/s）。
@@ -202,21 +223,38 @@ def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref
     # 吸音率テーブルを作る。
     # ・残響室法の値なら Paris の式で垂直入射に変換してから渡す
     # ・レイヤ → 材料の対応は layer_assignment で差し替えられる（CAD を触らずに済む）
-    absorption_table = None
+    #
+    # ★★**出来あいの表を渡されたらそれを使う**（2026-09-20。不具合報告 ⑱）。
+    #   それまでは呼ばれるたびに `material_library` から**自前に**組み立てていたので、
+    #   `run_project` が条件表の**安全率**を掛けて作った表（`_absorption_table_for`）が
+    #   本計算に届かず、**安全率がまったく効いていなかった**（警告も出ない）。
+    #   同じ 1 回の実行の中でモデルが 2 通りの吸音率で読まれる状態でもあった。
     if material_library is None and absorption_csv is not None:
         material_library = ab.MaterialLibrary.from_file(absorption_csv,
                                                         kind=absorption_kind)
     if material_library is not None:
         print(f"[procedure] {material_library.summary()}")
+    if absorption_table is None and material_library is not None:
         absorption_table = material_library.absorption_table(layer_assignment,
                                                              band_number=band_number)
 
     # 室形状・吸音率・音源・受音点をまとめて DXF から読む
     # 元コード132〜283行目に対応
-    report("モデルを読み込み中")
-    model = rd.read_model(dxf_filename, unit=unit, absorption_table=absorption_table,
-                          orient_normals=orient_normals, band_number=band_number,
-                          flip_faces=flip_faces, face_materials=face_materials)
+    #
+    # ★★**読み込み済みのモデルを渡されたら読み直さない**（2026-09-20。
+    #   高速化の提案 ①）。重い工程（DXF の解析・三角形分割・法線・同一平面
+    #   グループ・容積・表面積）は**材料に依らない**ので、吸音率だけ貼り直す。
+    #   実案件では 1 回 1.74 秒 × 17 回 ＝ 30 秒がここに消えていた
+    if model is None:
+        report("モデルを読み込み中")
+        model = rd.read_model(dxf_filename, unit=unit,
+                              absorption_table=absorption_table,
+                              orient_normals=orient_normals,
+                              band_number=band_number,
+                              flip_faces=flip_faces, face_materials=face_materials)
+    else:
+        report("モデルを使い回し中（吸音率だけ貼り直します）")
+        rd.apply_absorption(model, absorption_table, band_number=band_number)
     mesh = model.mesh
 
     # 作図ミスの洗い出し（TODO B-10）。計算に入る前に指摘するほうが早い
@@ -272,7 +310,14 @@ def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref
             # **1 枚にまとめて書く**（材料別の吸音率 → 平均吸音率 → 理論値）。
             # 以前は rt_statistical.csv と surface.csv に分けていた
             import project as pj
-            pj.write_room_csv(room_filename, statistical_result, frequencies)
+            # ★★**音線追跡が実際に使った垂直入射吸音率**も残す（不具合報告 ㉑）。
+            #   モデルの面から取るので、計算そのものの値と食い違わない
+            normal = {}
+            for face in mesh:
+                normal.setdefault(face.material,
+                                  np.asarray(face.absorption_coefficient, dtype=float))
+            pj.write_room_csv(room_filename, statistical_result, frequencies,
+                              normal=normal, stages=absorption_stages)
             print(f"[統計残響] 材料別の吸音率・平均吸音率・理論値: {room_filename}")
 
     # ★吸音材だけ変えた計算は、保存した経路から再開できる（F-9）。
@@ -416,7 +461,10 @@ def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref
             reverberation = rv.reverberation_time(
                 impulse[0], impulse[1], rt_filename=reverberation_filename,
                 decay_filename=decay_filename, frequencies=frequencies,
-                band_width=band_width)
+                band_width=band_width,
+                # ★RTany を足す（指定が無ければ EDT / T20 / T30 のまま）
+                measures=rv.measures_with_any(rt_any_start_db, rt_any_end_db),
+                fit=decay_fit or rv.DEFAULT_DECAY_FIT)
 
     # 明瞭度系の指標（C50 / C80 / D50 / Ts）。残響時間とは見ている中身が違う。
     # 「どれだけ長く響くか」ではなく「初期の音が後から来る音に対してどれだけ強いか」

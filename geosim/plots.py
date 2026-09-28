@@ -226,7 +226,9 @@ def reverberation(path, frequencies, measures, statistical=None, curvature=None)
     _style(ax, "残響時間", "周波数 [Hz]", "残響時間 [s]")
 
     x = np.arange(len(frequencies))
-    styles = {"EDT": ("o-", "#4cc9f0"), "T20": ("s-", "#4cc38a"), "T30": ("^-", "#f7b801")}
+    # ★**RTany は破線**（利用者が決めた区間の読み。自動の 3 本と区別する）
+    styles = {"EDT": ("o-", "#4cc9f0"), "T20": ("s-", "#4cc38a"),
+              "T30": ("^-", "#f7b801"), "RTany": ("d--", "#e07a5f")}
     for name, values in measures.items():
         marker, colour = styles.get(name, ("d-", ACCENT))
         ax.plot(x, values, marker, color=colour, linewidth=1.8, markersize=6, label=name)

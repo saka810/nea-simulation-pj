@@ -11,7 +11,7 @@ CSV にしてあるのは Excel でそのまま開けるようにするため。
       結果/
         研修室_条件A_まとめ_残響時間.csv    全受音点 ＋ 平均 ＋ 理論値（summary.py が書く）
         研修室_条件A_まとめ_明瞭度.csv      全受音点 ＋ 平均
-        研修室_条件A_吸音率と理論値.csv     材料別の吸音率 → 平均吸音率 → 残響時間理論値
+        研修室_条件A_吸音率と理論値.csv     材料別の吸音率 → 平均吸音率 → 室の諸元 → 理論値
         研修室_条件A_raylog.npz             音線軌跡（可視化用。可変長なので npz）
         rec1/               ← **受音点ごと**
           研修室_条件A_pulses.csv   パルス列（反射回数・到来時刻・到来方向・エネルギー）
@@ -44,6 +44,7 @@ DXF や吸音率 CSV は**プロジェクトフォルダからの相対パスで
 
 import json
 import os
+import re
 
 import numpy as np
 
@@ -54,6 +55,12 @@ RESULT_DIR = "結果"
 FIGURE_DIR = "図"
 # 受音点ごとのフォルダ名（`結果/rec1/` `図/rec1/`）
 RECEIVER_DIR = "rec%d"
+# ★**音源ごとのフォルダ名**（`結果/src1/rec1/`。2026-09-15。不具合報告 ⑨）。
+#   音源が 1 点だけのときは**この段を作らない**（従来どおり `結果/rec1/`）。
+#   点が 1 つしかないのにフォルダが深くなると、過去のプロジェクトと置き方が変わる
+SOURCE_DIR = "src%d"
+# 合成した結果を入れる棚の頭（`合成_平均` / `合成_重ね合わせ` …。`source_mix.py`）
+MIX_PREFIX = "合成_"
 # 画面から手で撮った画像・動画の置き場。**`図/` の直下ではなく子フォルダにする。**
 # `clear_results()` が `図/` の PNG を消してしまうので、
 # 同じ所に置くと計算し直すたびに撮った画像が巻き添えで消える
@@ -102,6 +109,14 @@ CLOSED_CHOICES = (CLOSED_AUTO, CLOSED_YES, CLOSED_NO)
 #   室の吸音と理論値 … 室形状と材料だけで決まる
 #   音線軌跡         … 音源から出た音線の形。受音点をまたいで共有している（F-6）
 SHARED_RESULTS = {"room", "raylog", "points", "open_edges"}
+
+# **音源に依らない**結果。音源が複数あっても `結果/` 直下に置く（`結果/srcM/` に入れない）。
+#   室の吸音と理論値 … 室形状と材料だけで決まる
+#   測定点の一覧     … 配置だけ（音源も受音点も 1 枚の表に並べる）
+#   開いた辺         … 形だけで決まる
+# ★**音線軌跡（raylog）と経路（paths）は音源に依る**ので入れない。
+#   軌跡は音源から出た音線そのもの、経路は音源→受音点の反射の並びである
+SOURCE_SHARED_RESULTS = {"room", "points", "open_edges"}
 
 # **条件（吸音材）に依らない**結果。ファイル名に条件名を付けず、対象室名だけにする。
 #   経路の幾何 … 吸音に依らない（それを使い回すのがこの仕組みの目的）
@@ -189,6 +204,13 @@ DEFAULTS = {
     # 放射方向（`自動` / `+X` / `-X` / `+Y` / `-Y` / `+Z` / `-Z`）。
     # 辺や頂点に載っているとき、どの面に置いた音源かを決めるのに使う
     "source_direction": "自動",
+    # ★**音源が複数あるときの結果の見方**（2026-09-15 ユーザー要望。不具合報告 ⑨
+    #   「S1 の結果を見るのか、S2 を見るのか、平均を見るのか、インパルス応答を
+    #   重ね合わせてそこから出すのか、重ね合わせる場合 時間遅れを考慮するのか。
+    #   結果の見方は選択できるようにして欲しい」）。
+    #   **音源ごとの計算（個別）は必ず行う**ので、ここで選ぶのは
+    #   そのうえで作る「合成」をどれにするか。値は `source_mix.MIX_CHOICES`
+    "source_combination": "すべて",
     "receiver": None,              # None なら DXF の rec レイヤ
     # 受音点に置く「人」の正面方向。真上から見た方位角 [度]。
     # **0° = +X 方向、反時計回り**（真上から見て）。
@@ -199,6 +221,17 @@ DEFAULTS = {
     #   数値なら全受音点に同じ向きを使う（従来の project.json をそのまま読める）。
     #   リストなら k 番目の受音点に k 番目の向きを使う。`head_azimuth_for()` を通すこと
     "head_azimuth": 0.0,
+    # ★**RTany ― 減衰曲線をどこで読むか**（2026-09-15 ユーザー指示）。
+    #   > 減衰曲線の読み方を任意に読めるようにしています。RTany がそれです。
+    #   > …そのうえで、自動的な数値（RT20 や 30 など）は置いておいてください。
+    #   減衰が二段階になる室では、どこを読むかは設計者が決めること。
+    #   **EDT / T20 / T30 は今までどおり必ず出す**（RTany はそれに足す 1 本）。
+    #   None なら RTany を出さない。既定は T30 と同じ区間（-5 → -35 dB）
+    "rt_any_start_db": -5.0,
+    "rt_any_end_db": -35.0,
+    # 減衰曲線の読み方。`least_squares`（ISO 3382 の最小二乗回帰。既定）か
+    # `crossing`（開始 dB と終了 dB を横切る 2 点の時刻差。元 Fortran と同じ）
+    "decay_fit": "least_squares",
     "raylog_max_rays": 2000,
     "statistical": True,
     # インパルス応答の合成のやり方。`fast`（時間領域→FFT）か `exact`（式(2) そのまま）。
@@ -236,6 +269,11 @@ class Project:
         # いま何番目の受音点を扱っているか（1 始まり）。**保存する条件ではない**ので
         # DEFAULTS には入れない。`結果/recN/` `図/recN/` の振り分けにだけ使う
         self.receiver_index = values.get("receiver_index")
+        # ★いま何番目の**音源**を扱っているか（1 始まり）。音源が 1 点だけなら None。
+        #   `source_tag` は合成の結果（`合成_平均` など）を入れる棚の名前で、
+        #   立っていればそちらが優先される。どちらも**保存する条件ではない**
+        self.source_index = values.get("source_index")
+        self.source_tag = values.get("source_tag")
         # 条件シートの指定が無いときに使うシート名（`_fallback_sheet`）の控え。
         # **保存する条件ではない**ので DEFAULTS には入れない
         self._condition_fallback = _UNSET
@@ -245,15 +283,58 @@ class Project:
     def path(self, *parts):
         return os.path.join(self.folder, *parts)
 
-    def result_dir(self, shared=False):
+    @property
+    def source_folder(self):
+        """音源ごとのフォルダ名（`src1` / `合成_平均` など）。1 音源なら空。
+
+        ★**音源が 1 点だけのときは空**にして、従来どおり `結果/recN/` に置く
+        （2026-09-15。不具合報告 ⑨）。点が 1 つしかないのに段を増やすと、
+        それまでのプロジェクトと置き方が変わってしまう。
+        """
+        if self.source_tag:
+            return str(self.source_tag)
+        if self.source_index:
+            return SOURCE_DIR % int(self.source_index)
+        return ""
+
+    def source_folders(self):
+        """`結果/` の下にある**音源ごとの棚**を順に返す（`src1` `src2` `合成_平均`…）。
+
+        音源が 1 点だけのプロジェクトは棚を作らないので**空**が返る
+        （＝従来どおり `結果/recN/` を見ればよい、の意味）。
+        並びは **src が番号順 → 合成**。まとめ表や Excel を棚ごとに作るのに使う。
+        """
+        root = self.path(RESULT_DIR)
+        if not os.path.isdir(root):
+            return []
+        found = [name for name in os.listdir(root)
+                 if os.path.isdir(os.path.join(root, name))]
+        numbered, mixed = [], []
+        for name in found:
+            if re.fullmatch(SOURCE_DIR.replace("%d", r"\d+"), name):
+                numbered.append(name)
+            elif name.startswith(MIX_PREFIX):
+                mixed.append(name)
+        numbered.sort(key=lambda n: int(re.sub(r"\D", "", n)))
+        return numbered + sorted(mixed)
+
+    def result_dir(self, shared=False, source_shared=False):
         """結果の置き場。受音点が決まっていれば `結果/recN/`。
 
         `shared=True` は受音点に依らないもの（統計残響式など）で、
         受音点を扱っていても `結果/` 直下を返す。
+
+        ★音源が複数あるときは間に `srcM`（または合成の名前）が入る
+        （`結果/src2/rec1/`）。`source_shared=True` は**音源にも依らない**もの
+        （室の吸音・測定点・開いた辺）で、その段を挟まない。
         """
-        if shared or self.receiver_index is None:
-            return self.path(RESULT_DIR)
-        return self.path(RESULT_DIR, RECEIVER_DIR % self.receiver_index)
+        parts = [RESULT_DIR]
+        tag = "" if source_shared else self.source_folder
+        if tag:
+            parts.append(tag)
+        if not (shared or self.receiver_index is None):
+            parts.append(RECEIVER_DIR % self.receiver_index)
+        return self.path(*parts)
 
     # ---- ファイル名の頭（対象室＋条件名）------------------------------
     #
@@ -346,7 +427,8 @@ class Project:
         受音点に依らないもの（`SHARED_RESULTS`）は `結果/` 直下、
         それ以外は `結果/recN/` に置く。名前には対象室＋条件名が頭に付く。
         """
-        return os.path.join(self.result_dir(shared=key in SHARED_RESULTS),
+        return os.path.join(self.result_dir(shared=key in SHARED_RESULTS,
+                                            source_shared=key in SOURCE_SHARED_RESULTS),
                             self._named(key, RESULT_FILES[key]))
 
     def name_candidates(self, filename):
@@ -408,7 +490,8 @@ class Project:
         ③ 頭の付いていない名前（頭を付ける前に計算したプロジェクト）
         ④ さらに古い名前（`rt_statistical.csv` など。`LEGACY_RESULT_FILES`）
         """
-        folder = self.result_dir(shared=key in SHARED_RESULTS)
+        folder = self.result_dir(shared=key in SHARED_RESULTS,
+                                 source_shared=key in SOURCE_SHARED_RESULTS)
         names = [RESULT_FILES[key]] + LEGACY_RESULT_FILES.get(key, [])
         paths = []
         for name in names:
@@ -438,15 +521,54 @@ class Project:
         """明瞭度の CSV（`結果/recN/…clarity.csv`）。"""
         return self.result_path("clarity")
 
-    def figure_dir(self, shared=False):
+    def figure_dir(self, shared=False, source_shared=None):
         """図の置き場。受音点が決まっていれば `図/recN/`。
 
         `shared=True` は**受音点に依らない図**（測定点の配置図など）で、
         `図/` 直下に置く（結果 CSV の `SHARED_RESULTS` と同じ考え方）。
+
+        ★音源が複数あるときは間に `srcM` が入る（`図/src2/rec1/`）。
+        `source_shared` を省くと `shared` と同じ扱いにする——いま `shared=True`
+        なのは測定点の配置図だけで、これは音源にも依らない（全部の点を 1 枚に描く）。
         """
-        if shared or self.receiver_index is None:
-            return self.path(FIGURE_DIR)
-        return self.path(FIGURE_DIR, RECEIVER_DIR % self.receiver_index)
+        if source_shared is None:
+            source_shared = shared
+        parts = [FIGURE_DIR]
+        tag = "" if source_shared else self.source_folder
+        if tag:
+            parts.append(tag)
+        if not (shared or self.receiver_index is None):
+            parts.append(RECEIVER_DIR % self.receiver_index)
+        return self.path(*parts)
+
+    def owns_figure(self, name):
+        """その PNG が**いまの条件の図か**（`clear_results` が消す相手か）。
+
+        ★★**条件名の付いた図は、その条件のものだけを消す**
+        （2026-09-18。不具合報告 ⑭）。それまでは図フォルダの PNG を
+        名前も見ずに全部消していたので、**条件ごとの CSV は残るのに
+        図だけ最後に回した条件のものしか残らなかった**
+        （一括実行だと途中の条件の図が全滅する。実案件で 110 枚消えた）。
+
+        ファイル名の頭を付けるようにした時点（2026-08-21）で
+        「古い条件のファイルが混ざる」問題は**名前で解決している**ので、
+        まとめて消す必要はもう無い。判定は結果 CSV 側（`name_candidates`）と
+        同じ考え方で、**対象室名＋条件名**を手がかりにする。
+
+            階段教室_条件1_decay.png   いまの条件      → 消す
+            階段教室_条件0_decay.png   別の条件        → 残す
+            階段教室_points.png        条件に依らない図 → 残す（毎回書き直される）
+            decay.png                  頭を付ける前の図 → 消す
+        """
+        prefix = self.file_prefix
+        if not prefix:
+            return True                 # 頭を付けない使い方 → 従来どおり全部消す
+        if name.startswith(f"{prefix}_"):
+            return True                 # いまの条件の図
+        room = self.room_label
+        if room and name.startswith(f"{room}_"):
+            return False                # 別の条件、または条件に依らない図
+        return True                     # 頭の付いていない昔の図
 
     def figure_path(self, name, shared=False):
         """図のパス。**図にも対象室＋条件名を付ける**（貼ってから見分けが付くように）。
@@ -539,6 +661,10 @@ class Project:
         ★**昔の名前のファイルも消す**（`result_candidates`）。名前を変える前の
         `rt.csv` や `rt_statistical.csv` が残っていると、今回の結果と並んでしまう。
 
+        ★★**図は「いまの条件のもの」だけ消す**（`owns_figure`。2026-09-18。
+        不具合報告 ⑭）。CSV は条件名で分かれているので残るのに、
+        図だけ名前を見ずに全部消していた。
+
         ★**経路の幾何（`経路.npz`）は消さない**（`KEEP_ON_CLEAR`）。
         作り直すのに音線追跡が丸ごと要るうえ、古いかどうかは指紋で判定できるため。
         `keep` に鍵を足せば他のものも残せる（経路を使い回すときの音線軌跡など）。
@@ -553,9 +679,18 @@ class Project:
         #     書き直されないまま終わっていた。実際に研修室で消えていた）。
         #   受音点 N>1 を扱っている分身に、共有のものを消す筋合いはない
         shared_allowed = self.receiver_index in (None, 1)
+        # ★★**音源にも依らないものは「1 番目の音源」のときだけ消す**
+        #   （2026-09-15。不具合報告 ⑨ で音源ごとに回すようにしたときの落とし穴）。
+        #   『吸音率と理論値.csv』『測定点.csv』『開いた辺.csv』は `結果/` 直下に
+        #   1 つしかないので、2 番目の音源の掃除で**1 番目が書いたものが消える**。
+        #   音源 M>1 を扱っている分身に、音源に依らないものを消す筋合いはない
+        source_shared_allowed = (shared_allowed and not self.source_tag
+                                 and self.source_index in (None, 1))
         # 受音点ごとのものと、受音点に依らないものの両方（result_path が振り分ける）
         for key in RESULT_FILES:
             if key in skip:
+                continue
+            if key in SOURCE_SHARED_RESULTS and not source_shared_allowed:
                 continue
             if key in SHARED_RESULTS and not shared_allowed:
                 continue
@@ -563,10 +698,12 @@ class Project:
                 if os.path.exists(path):
                     os.remove(path)
                     removed += 1
+        # ★図も**いまの条件のものだけ**消す（2026-09-18。不具合報告 ⑭）。
+        #   名前も見ずに消していたので、条件を変えて回すと前の条件の図が全滅した
         figures = self.figure_dir()
         if os.path.isdir(figures):
             for name in os.listdir(figures):
-                if name.lower().endswith(".png"):
+                if name.lower().endswith(".png") and self.owns_figure(name):
                     os.remove(os.path.join(figures, name))
                     removed += 1
         if removed and verbose:
@@ -752,6 +889,11 @@ class Project:
         #   （`name` は結果ファイル名の頭に付くので、受音点ごとに変わると
         #     ファイル名が受音点ごとに違ってしまう）
         who = "" if self.receiver_index is None else f"（受音点 {self.receiver_index}）"
+        # ★音源が複数あるときは何番目かも出す（不具合報告 ⑨。どの音源の結果か分かるように）
+        if self.source_folder:
+            who = f"（音源 {self.source_folder}" + (
+                "" if self.receiver_index is None
+                else f" / 受音点 {self.receiver_index}") + "）"
         condition = f" / 条件『{self.condition_label}』" if self.condition_label else ""
         return (f"プロジェクト『{self.display_name}』{condition}{who}\n"
                 f"  フォルダ  {self.folder}\n"
@@ -768,7 +910,24 @@ class Project:
 # ------------------------------------------------------------------------------
 
 # 「吸音率と理論値」の CSV の区分（この順に並べる。2026-08-21 ユーザー指定）
-ROOM_SECTIONS = ("材料別の吸音率", "平均吸音率", "残響時間理論値")
+ROOM_SECTION_MATERIALS = "材料別の吸音率"
+ROOM_SECTION_MEAN = "平均吸音率"
+# ★**室の諸元**（2026-09-18 ユーザー要望「容積も行を足しておいて」）。
+#   統計残響式は容積で決まる（`T = 0.161 V / A`）のに、それまで**容積が
+#   結果のどこにも残っていなかった**ので、理論値を後から検算できなかった。
+#   ᾱ → A → V → T と読めるように**理論値の直前**に置く
+ROOM_SECTION_SPEC = "室の諸元"
+ROOM_SECTION_STATISTICAL = "残響時間理論値"
+# ★★**吸音率の各段**（2026-09-20。不具合報告 ㉑）。「材料別の吸音率」は
+#   **統計式が使う乱入射の値**（安全率と上限の丸めを通したあと）で、
+#   カタログ値も**音線追跡が実際に使った垂直入射の値**もどこにも残っていなかった
+ROOM_SECTION_CATALOG = "材料別の吸音率（カタログ値）"
+ROOM_SECTION_FACTOR = "安全率"
+ROOM_SECTION_NORMAL = "材料別の吸音率（垂直入射）"
+ROOM_SECTION_CLIPPED = "上限に丸めた帯域"
+ROOM_SECTIONS = (ROOM_SECTION_MATERIALS, ROOM_SECTION_CATALOG,
+                 ROOM_SECTION_FACTOR, ROOM_SECTION_NORMAL, ROOM_SECTION_CLIPPED,
+                 ROOM_SECTION_MEAN, ROOM_SECTION_SPEC, ROOM_SECTION_STATISTICAL)
 
 # 「平均吸音率」の区分に入れる行。**平均吸音率だけでなく等価吸音面積も入れる**。
 # 統計残響式は A = Sᾱ（Sabine）／-S ln(1-ᾱ)（Eyring）から T を出すので、
@@ -782,8 +941,16 @@ ROOM_STATISTICAL_ROWS = (("sabine_s", "sabine"),
                          ("eyring_s", "eyring"),
                          ("eyring_knudsen_s", "eyring_knudsen"))
 
+# 「室の諸元」の区分に入れる行（周波数に依らない値なので 3 列目だけを埋める）。
+# ★総表面積は「平均吸音率」の行の面積欄にも入っているが、そこは見落としやすいので
+#   ここにも並べる。`statistical` が最初から持っている値で、計算は増えない
+ROOM_SPEC_ROWS = (("容積_m3", "volume"),
+                  ("総表面積_m2", "total_area"),
+                  ("平均自由行程_4V/S_m", "mean_free_path"))
 
-def write_room_csv(filename, statistical, frequencies=None):
+
+def write_room_csv(filename, statistical, frequencies=None, normal=None,
+                   stages=None):
     """室の吸音と残響時間理論値を**1 つの CSV**にする。
 
     元は `rt_statistical.csv`（統計残響式）と `surface.csv`（材料別の面積・吸音率）
@@ -797,15 +964,31 @@ def write_room_csv(filename, statistical, frequencies=None):
         平均吸音率,平均吸音率,340.2,0.153,…          ← 面積で重み付けした ᾱ
         平均吸音率,等価吸音面積_m2,,52.1,…
         平均吸音率,空気吸収_4mV_m2,,0.0,…
+        室の諸元,容積_m3,3490.4,                     ← ★周波数に依らない（3 列目だけ）
+        室の諸元,総表面積_m2,3031.9,
+        室の諸元,平均自由行程_4V/S_m,4.60,
         残響時間理論値,sabine_s,,1.91,…
         残響時間理論値,eyring_s,,…
         残響時間理論値,eyring_knudsen_s,,…
 
     **周波数は横**（`table.py` の共通ルール。「区分付きの表」の形）。
 
+    ★★**吸音率の各段も並べる**（2026-09-20。不具合報告 ㉑）。
+    「材料別の吸音率」は**統計式が使う乱入射の値**（安全率と上限の丸めを通したあと）。
+    そのすぐ下に、渡されたものだけ足す：
+
+        材料別の吸音率（カタログ値）,壁B（残響室法）,,0.05,0.10,0.45,…  ← 吸音率シートの値
+        安全率,壁B,0.8,                                              ← 掛けたレイヤだけ
+        材料別の吸音率（垂直入射）,壁B,,0.026,0.051,0.24,…            ← ★音線追跡が使った値
+        上限に丸めた帯域,天井_GW,,,,0.99,0.99,…                      ← 丸める前の値（丸めた帯域だけ）
+
     引数:
         statistical … `reverberation.statistical_reverberation()` の戻り値
                       （`['surface']` に材料別の面積・吸音率が入っている）
+        normal      … {材料: (nb,)} **音線追跡が実際に使った垂直入射吸音率**
+                      （`procedure` がモデルの面から取る＝計算そのものの値）
+        stages      … `condition_table.absorption_stages()` の戻り値
+                      （カタログ値・安全率・丸め。`run_project` が作る）
     """
     import table as tb
 
@@ -813,15 +996,44 @@ def write_room_csv(filename, statistical, frequencies=None):
         frequencies = statistical["frequencies"]
     surface = statistical["surface"]
 
-    rows = [(ROOM_SECTIONS[0], name, area, alpha)
+    rows = [(ROOM_SECTION_MATERIALS, name, area, alpha)
             for name, area, alpha in zip(surface["names"], surface["areas"],
                                          surface["absorption"])]
+    # ★吸音率の各段（不具合報告 ㉑）。渡されたものだけ足す（無ければ従来どおり）
+    stages = stages or {}
+    names = list(surface["names"])
+    for name in names:
+        stage = stages.get(name)
+        if stage is not None:
+            kind = "残響室法" if stage["kind"] != "normal" else "垂直入射"
+            rows.append((ROOM_SECTION_CATALOG, f"{name}（{kind}）", None,
+                         stage["catalog"]))
+    for name in names:
+        stage = stages.get(name)
+        if stage is not None and stage.get("factor"):
+            rows.append((ROOM_SECTION_FACTOR, name, stage["factor"], None))
+    if normal:
+        for name in names:
+            if name in normal:
+                rows.append((ROOM_SECTION_NORMAL, name, None,
+                             np.asarray(normal[name], dtype=float)))
+    for name in names:
+        stage = stages.get(name)
+        if stage is not None and np.any(stage["clipped"]):
+            # ★丸める前の値を、丸めた帯域だけに書く（ほかは空欄）
+            before = np.where(stage["clipped"], stage["after"], np.nan)
+            rows.append((ROOM_SECTION_CLIPPED, name, None, before))
     for label, key in ROOM_MEAN_ROWS:
         # 面積の欄は平均吸音率の行だけ埋める（総表面積）。他は帯域の値だけ
         area = surface["total_area"] if key == "mean_absorption" else None
-        rows.append((ROOM_SECTIONS[1], label, area, statistical[key]))
+        rows.append((ROOM_SECTION_MEAN, label, area, statistical[key]))
+    # ★室の諸元（容積など）。**周波数に依らない**ので 3 列目だけを埋める
+    for label, key in ROOM_SPEC_ROWS:
+        value = statistical.get(key)
+        if value is not None:
+            rows.append((ROOM_SECTION_SPEC, label, value, None))
     for label, key in ROOM_STATISTICAL_ROWS:
-        rows.append((ROOM_SECTIONS[2], label, None, statistical[key]))
+        rows.append((ROOM_SECTION_STATISTICAL, label, None, statistical[key]))
     return tb.write_sectioned_table(filename, frequencies, rows,
                                     value_label="面積_m2")
 
@@ -902,7 +1114,7 @@ def read_room_csv(path):
 
     names, areas, alphas = [], [], []
     for section, item in table["order"]:
-        if section != ROOM_SECTIONS[0]:
+        if section != ROOM_SECTION_MATERIALS:
             continue
         names.append(item)
         try:
@@ -1016,14 +1228,32 @@ def has_results(project):
     ★**受音点ごとのフォルダ（`結果/rec1/`）も見る。**
     置き場を `結果/recN/` に変えたとき、`結果/` 直下しか見ていなかったので
     結果があるのに「ありません」と言われていた。
+
+    ★★**音源ごとの棚（`結果/src1/`）も見る**（2026-09-16。不具合報告 ⑪）。
+    音源が 2 点以上あると結果は `結果/src1/recN/` に入る（⑨ の対応）ので、
+    棚を見ないと**計算済みでも「結果がありません」**になり、
+    条件入力の「前回の結果を見る」が開けなかった（実案件で踏んだ）。
+    ★既に棚を指している `project` は**その棚だけ**を見る（指定を無視しない）。
     """
-    saved = project.receiver_index
-    try:
-        for index in ((None, 1) if saved is None else (saved,)):
+    saved_receiver, saved_tag = project.receiver_index, project.source_tag
+
+    def found():
+        for index in ((None, 1) if saved_receiver is None else (saved_receiver,)):
             project.receiver_index = index
             if any(os.path.exists(project.existing_result_path(key))
                    for key in ("rt", "pulses")):
                 return True
+        return False
+
+    try:
+        if project.source_folder:
+            return found()
+        # 音源が 1 点なら `source_folders()` は空なので、従来どおり直下だけを見る
+        for tag in [None] + project.source_folders():
+            project.source_tag = tag
+            if found():
+                return True
     finally:
-        project.receiver_index = saved
+        project.receiver_index = saved_receiver
+        project.source_tag = saved_tag
     return False

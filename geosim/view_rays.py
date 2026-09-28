@@ -103,7 +103,11 @@ RAY_BAR_TITLE = {"energy": "Ray energy [dB]", "time": "Ray time [ms]",
 # 音線の色分けに使う配色。`ray`（音線の番号）は**1 本目から最後まで**を
 # 一巡する色相にすると、全方向へ均等に散っているかが目で確かめられる。
 # 明るさが単調に変わる plasma だと「どこが 1 本目か」が分かりにくい
-RAY_CMAP = {"ray": "hsv"}
+# ★**到来時刻は反転して、0 s に近いほど黄色**にする（2026-09-24 ユーザー要望
+#   「0s に近い方が黄色の方が見やすい」。不具合報告 ㉔）。この画面は初期反射を読むためのもので、
+#   既定の plasma のままだと**見たい早い音ほど暗く沈んでいた**。`energy` の「強いほど黄色」とも
+#   向きがそろう（早い＝強い＝黄色）。虚音源（`view_images.COLOUR_CMAP`）も同じ向きにしてある
+RAY_CMAP = {"ray": "hsv", "time": "plasma_r"}
 PARTICLE_BAR_TITLE = "Particle energy [dB]"
 
 

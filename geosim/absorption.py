@@ -60,9 +60,20 @@ BAND_WIDTH_OCTAVE = "1/1"
 BAND_WIDTH_THIRD = "1/3"
 BAND_WIDTHS = (BAND_WIDTH_OCTAVE, BAND_WIDTH_THIRD)
 
-# 1/3 オクターブの呼び中心周波数（IEC 61260 / JIS C 1513）。
-# 計算には 10^(n/10) の厳密値ではなく、**表に載る呼び値**を使う
-# （報告書や吸音率の表と突き合わせるときに数字がそろうため）
+# ★★**呼び値と厳密中心周波数は別物**（IEC 61260-1:2014 / JIS C 1513-1:2020）。
+#
+#   呼び中心周波数   … 63 / 125 / …／160 / 315 / 630（3.6。**バンドを識別する名前**）
+#   厳密中心周波数   … f_m = f_r · G^(x/b)（5.4.1 式(2)。**計算に使う周波数**）
+#                      f_r = 1000 Hz ちょうど（5.3）、G = 10^(3/10)（5.2.1 式(1)）
+#
+# ★**表・ファイル名・列見出しは呼び値**のまま（報告書や吸音率表と数字がそろう）。
+# ★**計算は厳密値**で行う（`exact_midband()`）。2026-09-16 にユーザー指示で
+#   ベース 2（2^(n/3)）からベース 10 へ揃えた。ISO 9613-1 の表 1 も注5 のとおり
+#   厳密中心周波数で計算されているので、空気吸収がその表と一致するようになる。
+REFERENCE_FREQUENCY = 1000.0            # 基準周波数 f_r（JIS C 1513-1 5.3）
+OCTAVE_RATIO = 10.0 ** (3.0 / 10.0)     # オクターブ周波数比 G = 1.995 26（5.2.1）
+
+# 1/3 オクターブの呼び中心周波数（IEC 61260 / JIS C 1513 附属書 E）
 THIRD_OCTAVE_NOMINAL = (
     12.5, 16.0, 20.0, 25.0, 31.5, 40.0, 50.0, 63.0, 80.0, 100.0, 125.0,
     160.0, 200.0, 250.0, 315.0, 400.0, 500.0, 630.0, 800.0, 1000.0,
@@ -82,14 +93,54 @@ def is_third_octave(band_width):
     return abs(band_ratio(band_width) - 1.0 / 3.0) < 1.0e-9
 
 
-def band_edges(centres, band_width=BAND_WIDTH_OCTAVE):
+def exact_midband(nominal):
+    """**呼び中心周波数 → 厳密中心周波数**（JIS C 1513-1 5.4.1 式(2)）。
+
+        f_m = f_r · G^(x/b)    f_r = 1000 Hz、G = 10^(3/10)
+
+    1/3 オクターブの格子（b = 3）で最も近い x を選ぶ。オクターブの中心周波数は
+    その格子の 3 つおきに乗るので、どちらの幅でも同じ 1 本の式で足りる。
+
+    | 呼び値 | 厳密値 |
+    |---|---|
+    | 63 | 63.096 |
+    | 125 | 125.89 |
+    | 1000 | 1000.00 |
+    | 4000 | 3981.1 |
+    | 8000 | **7943.3** |
+    | 160 / 315 / 630 | 158.49 / 316.23 / 630.96 |
+
+    ★**すでに厳密値を渡しても値は変わらない**（いちばん近い格子点に丸めるだけ）。
+    ★表示・ファイル名には使わない（そちらは呼び値のまま）。
+    """
+    nominal = np.asarray(nominal, dtype=float)
+    index = np.round(10.0 * np.log10(nominal / REFERENCE_FREQUENCY))
+    result = REFERENCE_FREQUENCY * 10.0 ** (index / 10.0)
+    return result if np.ndim(nominal) else float(result)
+
+
+def band_edges(centres, band_width=BAND_WIDTH_OCTAVE, exact=True):
     """各バンドの下端・上端 [Hz]。フィルタの遮断周波数に使う。
 
-    幅 1 オクターブなら f/√2 〜 f√2、1/3 なら f·2^(-1/6) 〜 f·2^(1/6)。
+    **JIS C 1513-1 5.6.1 式(4)(5)**（IEC 61260-1）:
+
+        f1 = f_m · G^(-1/(2b))      f2 = f_m · G^(+1/(2b))      G = 10^(3/10)
+
+    オクターブ（b=1）なら f_m·G^∓0.5 ＝ ÷1.412 54 / ×1.412 54、
+    1/3（b=3）なら f_m·G^∓(1/6) ＝ ×0.891 25 / ×1.122 02
+    （規格 表 F.1 の不連続点と一致する）。
+
+    ★★**√2 や 2^(1/6) ではない**（それはベース 2 フィルタ。規格 5.2.2 注記2 で
+    「適合する確率は中心周波数が基準から離れるほど下がる」とされている側）。
+    2026-09-16 にユーザー指示でベース 10 へ揃えた。差は 0.12%（オクターブ）と
+    0.04%（1/3）で小さいが、規格に沿うほうが説明できる。
+
+    `exact=False` にすると渡した中心周波数をそのまま使う（参照・検算用）。
     """
     centres = np.asarray(centres, dtype=float)
-    half = band_ratio(band_width) / 2.0
-    return centres * 2.0 ** (-half), centres * 2.0 ** half
+    centre = exact_midband(centres) if exact else centres
+    half = band_ratio(band_width) / 2.0         # = 1/(2b)
+    return centre * OCTAVE_RATIO ** (-half), centre * OCTAVE_RATIO ** half
 
 
 def frequency_bands(band_number, band_width=BAND_WIDTH_OCTAVE, start=None):
@@ -146,9 +197,18 @@ def reflection_coefficient(impedance, cos_theta):
         R = (z cosθ - 1) / (z cosθ + 1)
 
     z は規格化音響インピーダンス（実数と仮定）。書籍 2.2 節と同じモデル。
+
+    ★**完全に剛な面（z = ∞）は R = 1**（全反射）。素直に計算すると
+    `inf/inf = nan` になるので、極限の値を入れる（2026-09-16。下記 ⚠ 参照）。
     """
-    z_cos = np.asarray(impedance, dtype=float) * np.asarray(cos_theta, dtype=float)
-    return (z_cos - 1.0) / (z_cos + 1.0)
+    z = np.asarray(impedance, dtype=float)
+    cos_theta = np.asarray(cos_theta, dtype=float)
+    with np.errstate(invalid="ignore"):
+        z_cos = z * cos_theta
+        result = (z_cos - 1.0) / (z_cos + 1.0)
+    # z → ∞（剛）は R → 1。ただし cosθ = 0（すれすれ入射）でも R → 1 なので
+    # `inf * 0 = nan` になる組み合わせも同じ値でよい
+    return np.where(np.isinf(z) | np.isnan(result), 1.0, result)
 
 
 def normal_absorption(impedance):
@@ -156,9 +216,15 @@ def normal_absorption(impedance):
 
     ※ z と 1/z が同じ値を与える（z → 1/z について対称）。
       つまり α_n だけからは z が一意に決まらない。逆変換に注意が要る理由。
+
+    ⚠★★**両端（z = 0 と z = ∞）は 0**。どちらも全反射で、吸音しない。
+    素直に書くと `z = ∞` で `4·∞/∞² = nan` になり、**剛な面を指定しただけで
+    結果が黙って全部 NaN になる**（2026-09-16 にユーザー指摘で修正）。
     """
     z = np.asarray(impedance, dtype=float)
-    return 4.0 * z / (1.0 + z) ** 2
+    with np.errstate(invalid="ignore", divide="ignore"):
+        result = 4.0 * z / (1.0 + z) ** 2
+    return np.where(np.isinf(z), 0.0, result)
 
 
 def impedance_from_normal(alpha_normal):
@@ -221,9 +287,15 @@ def statistical_absorption_closed_form(impedance):
     さらに u = zμ+1 と置換すると
         = (8/z²) [ u - 2 ln u - 1/u ]₁^{1+z}
     となり上式を得る。
+
+    ⚠**両端（z = 0 と z = ∞）は 0**。式のままだと `0/0` と `∞·0` で
+    NaN になるので、極限の値を入れる（2026-09-16）。
     """
     z = np.asarray(impedance, dtype=float)
-    return (8.0 / z ** 2) * ((1.0 + z) - 2.0 * np.log(1.0 + z) - 1.0 / (1.0 + z))
+    with np.errstate(invalid="ignore", divide="ignore"):
+        result = ((8.0 / z ** 2)
+                  * ((1.0 + z) - 2.0 * np.log(1.0 + z) - 1.0 / (1.0 + z)))
+    return np.where(np.isinf(z) | (z == 0.0), 0.0, result)
 
 
 def _statistical_maximum(samples=200001):
@@ -320,6 +392,20 @@ def random_to_normal(alpha_random, branch="hard", warn=True, label=""):
               f"（残響室法の値が 1 を超えるのは試料端部の回折などによるものです）")
     z = impedance_from_statistical(alpha, branch=branch)
     result = normal_absorption(z)
+
+    # ★★**NaN を絶対に返さない**（2026-09-16 ユーザー指摘で追加）。
+    #   以前は α_s = 0（剛な面）を渡すと z = ∞ → 4z/(1+z)² = NaN になり、
+    #   **そのまま反射計算へ流れて結果が黙って全部 NaN になった**
+    #   （警告も出ないので気づけない）。極限は入れたが、
+    #   将来また同じことが起きたときに**黙って壊れない**よう見張りを置く。
+    bad = ~np.isfinite(result)
+    if np.any(bad):
+        where = f"（{label}）" if label else ""
+        raise ValueError(
+            f"残響室法吸音率{where} {np.array2string(alpha[bad], precision=3)} を "
+            f"垂直入射に変換できませんでした（結果が数値になりません）。"
+            f"これは実装の不具合です。値をそのまま計算に流すと結果が"
+            f"すべて NaN になるため、ここで止めます。")
     return result if np.ndim(alpha_random) else float(result[0])
 
 

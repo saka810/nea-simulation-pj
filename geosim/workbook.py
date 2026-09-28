@@ -73,8 +73,13 @@ TITLE_FONT_SIZE = 11
 
 
 def path(project):
-    """結果一式（xlsx）のパス。`結果/` 直下（受音点に依らないので）。"""
-    return os.path.join(project.path(pj.RESULT_DIR),
+    """結果一式（xlsx）のパス。`結果/` 直下（受音点に依らないので）。
+
+    ★**音源が複数あるときは棚ごと**（`結果/src1/` `結果/合成_平均/` …）。
+    棚ごとにまとめ表が違うので、1 つに重ねると最後の棚で上書きされる
+    （2026-09-15。不具合報告 ⑨ の対応で実際に踏んだ）。
+    """
+    return os.path.join(sm.results_root(project),
                         project.prefixed(WORKBOOK_FILE))
 
 
@@ -140,7 +145,7 @@ def _as_number(text):
 
 def _summary_table(project, filename, text_columns):
     """まとめ表の CSV を読む。**条件名の付く前の名前も探す**（`name_candidates`）。"""
-    folder = project.path(pj.RESULT_DIR)
+    folder = sm.results_root(project)
     rows = None
     for name in project.name_candidates(filename):
         rows = _read_rows(os.path.join(folder, name))
@@ -279,7 +284,7 @@ def sheets(project, verbose=True):
     # 条件を横に並べた比較（一括計算したときだけできる。条件名は頭に付かない）
     room = project.room_label
     comparison = _read_rows(os.path.join(
-        project.path(pj.RESULT_DIR),
+        sm.results_root(project),
         f"{room}_{sm.CONDITION_FILE}" if room else sm.CONDITION_FILE))
     if comparison is not None:
         name = SHEET_COMPARISON
@@ -465,8 +470,26 @@ def _add_chart(sheet, name, rows, kind, skip):
                            min_row=1, max_row=1)
     chart.add_data(data, from_rows=True, titles_from_data=False)
     chart.set_categories(categories)
+
+    # ★**周波数の欄が空の行はグラフに載せない**（2026-09-20）。
+    #   `室の諸元`（容積・総表面積・平均自由行程）のように**周波数に依らない行**は
+    #   3 列目だけを埋めるので、そのまま足すと**中身の無い系列が凡例に並ぶ**。
+    #   表には残す（読むためのもの）が、グラフは周波数の曲線を見る場所なので外す
+    def _has_values(row):
+        return any(str(v).strip() not in ("", "None") for v in row[skip:])
+
+    drawn = [row for row in rows[1:] if _has_values(row)]
+    if len(drawn) != len(rows) - 1:
+        try:
+            chart.series = [series for series, row
+                            in zip(chart.series, rows[1:]) if _has_values(row)]
+        except Exception as error:      # 外せなくてもグラフ自体は出る
+            print(f"[Excel] 空の系列を外せませんでした: "
+                  f"{type(error).__name__}: {error}")
+            drawn = rows[1:]
+
     # 系列名は「受音点＋項目」を並べたもの（表の左側の列をつなげる）
-    for series, row in zip(chart.series, rows[1:]):
+    for series, row in zip(chart.series, drawn):
         label = " ".join(str(v) for v in row[:skip] if v)
         series.tx = None
         try:

@@ -388,7 +388,28 @@ def read_points(dxf_path):
             except ValueError:
                 pass
     keep()
-    return points
+    return sort_points(points)
+
+
+def sort_points(points):
+    """`POINT` を**画層 → 座標**の順に並べ直す（2026-09-20。不具合報告 ⑯）。
+
+    ★★**作り直しても番号が動かないようにする**ため。CAD は画層名を変えただけでも
+    `ENTITIES` の並びを変えることがあり、実案件では**三角形が 779 枚とも同じなのに
+    `src1` が S2 に、`rec3` が R5 になった**。`read_dxffile` は出てきた順に番号を
+    振るので、黙って `結果/src1/` の中身が別の点にすり替わる
+    （さらに経路キャッシュの指紋も合わなくなり、音線追跡からやり直しになる）。
+
+    ★**元の図面の並びには依存しない**決め方にしておけば、何度変換しても同じ番号になる。
+    画層名（`rec1` `rec2` …）でまとめてから座標で並べるので、
+    測線ごとに作った点も測線の順に並ぶ。
+    """
+    def key(item):
+        layer, xyz = item
+        return (str(layer).lower(), round(xyz[0], 6), round(xyz[1], 6),
+                round(xyz[2], 6))
+
+    return sorted(points, key=key)
 
 
 def _insunits_of(dxf_path):
@@ -423,6 +444,10 @@ BRIDGE_TOLERANCE = 1.0e-6
 
 # 三角形に割ったあとの面積が合っているかのしきい値（相対）
 AREA_TOLERANCE = 1.0e-6
+
+# ★**面積が無い**とみなす大きさ [m2 相当]（キーホール法の橋の根元にできる）。
+#   ここより小さい三角形は書き出さない（残すと法線が決まらない）
+DEGENERATE_AREA = 1.0e-9
 
 
 def loop_normal(points):
@@ -578,17 +603,37 @@ def _in_triangle_2d(point, a, b, c):
                 and d3 <= BRIDGE_TOLERANCE))
 
 
-def ear_clip_2d(ring):
+def _min_angle_2d(a, b, c):
+    """2 次元の三角形の最小角 [度]。**細長さの目安**で、0 に近いほど悪い。"""
+    sides = sorted((math.hypot(b[0] - a[0], b[1] - a[1]),
+                    math.hypot(c[0] - b[0], c[1] - b[1]),
+                    math.hypot(a[0] - c[0], a[1] - c[1])))
+    if sides[1] <= 0.0 or sides[2] <= 0.0:
+        return 0.0
+    # いちばん小さい角は**いちばん短い辺の向かい**（余弦定理）
+    cosine = ((sides[1] ** 2 + sides[2] ** 2 - sides[0] ** 2)
+              / (2.0 * sides[1] * sides[2]))
+    return math.degrees(math.acos(max(-1.0, min(1.0, cosine))))
+
+
+def ear_clip_2d(ring, pick_best=True):
     """2 次元の輪を耳刈り法で三角形に割る。→ [(添字, 添字, 添字), …] | None
 
     反時計回りの輪を前提にする（`bridge_holes` がそう揃えて返す）。
+
+    ★★**候補の耳のうち、いちばん形の良いもの（最小角が最大）を切る**
+    （2026-09-20。`read_dxffile._ear_clip` と同じ流儀に揃えた）。
+    「最初に見つかった耳」を切ると走査が毎回同じ側から始まるので**扇状に分割**され、
+    細長い三角形（スリバー）が並ぶ。★**枚数は n 角形なら必ず n-2 枚で減らせない**
+    ので、変えられるのは**形**だけ。細長い三角形はレイとの交差判定が丸めに
+    左右されやすいので、形は実利でもある。
     """
     order = list(range(len(ring)))
     triangles = []
     guard = 0
     while len(order) > 3 and guard <= len(ring) * len(ring) + 10:
         guard += 1
-        cut = None
+        best = None
         for m in range(len(order)):
             i, j, k = order[m - 1], order[m], order[(m + 1) % len(order)]
             if not _convex_2d(ring[i], ring[j], ring[k]):
@@ -596,11 +641,15 @@ def ear_clip_2d(ring):
             if any(_in_triangle_2d(ring[q], ring[i], ring[j], ring[k])
                    for q in order if q not in (i, j, k)):
                 continue
-            cut = (m, i, j, k)
-            break
-        if cut is None:
+            if not pick_best:
+                best = (0.0, m, i, j, k)
+                break
+            quality = _min_angle_2d(ring[i], ring[j], ring[k])
+            if best is None or quality > best[0]:
+                best = (quality, m, i, j, k)
+        if best is None:
             return None
-        m, i, j, k = cut
+        _quality, m, i, j, k = best
         triangles.append((i, j, k))
         order.pop(m)
     if len(order) != 3:
@@ -641,7 +690,7 @@ def triangles_with_holes(loops):
     for hole in flat_holes:
         want -= abs(signed_area_2d(hole))
 
-    triangles, got = [], 0.0
+    triangles, got, dropped = [], 0.0, 0
     for i, j, k in order:
         corners = []
         for index in (i, j, k):
@@ -649,11 +698,26 @@ def triangles_with_holes(loops):
             if key not in lookup:
                 return None
             corners.append(lookup[key])
-        got += abs(signed_area_2d([ring[i], ring[j], ring[k]]))
+        area = abs(signed_area_2d([ring[i], ring[j], ring[k]]))
+        got += area
+        # ★★**面積が無い三角形は書かない**（2026-09-20）。キーホール法は
+        #   **橋の両端を 2 度使う**ので、橋の根元に**面積 0 の三角形**ができる。
+        #   面積が無いので落としても形は変わらない（上の照合にも影響しない）が、
+        #   残すと法線が決まらず（`face_normal` が None）、パッチの併合や
+        #   交差判定で無駄な枝になる。実案件の階段教室で 4 枚あった
+        if area <= DEGENERATE_AREA:
+            dropped += 1
+            continue
         triangles.append(tuple(corners))
     if want <= 0.0 or abs(got - want) > AREA_TOLERANCE * max(want, 1.0):
         return None
+    if dropped:
+        triangles_with_holes.dropped += dropped
     return triangles
+
+
+# 落とした面積 0 の三角形の枚数（`convert` が最後に知らせる）
+triangles_with_holes.dropped = 0
 
 
 # ---- 入り口 -----------------------------------------------------------------
@@ -674,6 +738,7 @@ def convert(dxf_path, out_path=None, accore=None, verbose=True, keep=False):
             "CAD 側で面（3DFACE か閉じたポリライン）に分解して"
             "書き出してください")
 
+    triangles_with_holes.dropped = 0        # 1 回の変換ごとに数え直す
     folder = tempfile.mkdtemp(prefix="geosim_faces_")
     try:
         # ★控えに対して作業する（元のファイルは開かせない）
@@ -724,6 +789,13 @@ def convert(dxf_path, out_path=None, accore=None, verbose=True, keep=False):
             if holed:
                 print(f"[面に分解] ★穴のある面 {holed} 枚は**穴を開けたまま**"
                       f"三角形に割りました（開口は塞いでいません）")
+            # ★落とした面積 0 の三角形（橋の根元にできる）を知らせる。
+            #   面積が無いので形は変わらないが、黙って枚数が減ると混乱するので言う
+            if triangles_with_holes.dropped:
+                print(f"[面に分解] ★面積の無い三角形を "
+                      f"{triangles_with_holes.dropped} 枚落としました"
+                      f"（キーホール法の橋の根元にできるもの。"
+                      f"面積が無いので形は変わりません）")
             if unfilled:
                 print(f"[面に分解] ★★穴を開けられなかった面が {len(unfilled)} 枚"
                       f"あります（{' / '.join(sorted(set(unfilled)))}）。"
@@ -754,6 +826,11 @@ def convert(dxf_path, out_path=None, accore=None, verbose=True, keep=False):
                                     in sorted(counts.items()))
                 print(f"[面に分解] 点（POINT）を {len(points)} 個"
                       f"引き継ぎました（画層: {detail}）")
+                # ★**並べ直したことを言う**（番号が変わりうるので黙って直さない）
+                print("[面に分解] ★点は画層 → 座標の順に並べ直しました"
+                      "（作り直しても `src1` `rec1` の番号が動かないように）。"
+                      "前に計算したことがある室なら、結果を見る前に "
+                      "`python point_order.py <プロジェクト>` で並びを確かめてください")
             else:
                 print("[面に分解] 元の図面に点（POINT）はありませんでした。"
                       "★音源・受音点は `src` / `rec` 画層の POINT で渡します")
