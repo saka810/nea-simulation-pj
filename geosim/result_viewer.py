@@ -446,10 +446,12 @@ class Results:
         if loaded is not None:
             fs, ir = loaded
             ir = ir.astype(float)
-            peak = float(np.max(np.abs(ir))) or 1.0
             if band and band != "all":
                 ir = rv.octave_bandpass(ir, float(band), fs,
                                         band_width=getattr(self.project, "band_width", "1/1"))
+            # ★**帯域を通したあとの最大で割る**（2026-09-30 ユーザー指摘「正規化されてなくない？」）。
+            #   以前は広帯域の最大で割っていたので、帯域を選ぶと最大が 1 にならなかった
+            peak = float(np.max(np.abs(ir))) or 1.0
             out["phase"] = {"t0": 0.0, "dt": 1.0 / fs, "y": _round(ir / peak, 5)}
         p = self.pulses(shelf, rec, cond)
         if p is not None and len(p["time"]):

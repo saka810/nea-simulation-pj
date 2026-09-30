@@ -70,6 +70,7 @@ aside.rail {
 .rtany tr.all + tr td { padding-top: 6px; }
 .rtany input { width: 54px; text-align: right; padding: 1px 4px; border: 1px solid var(--rule-strong); border-radius: 4px; background: var(--paper); }
 .rtany input.changed { border-color: var(--focus); background: #eef7fa; }
+.rtany-target { width: 100%; margin-top: 2px; border: 1px solid var(--rule-strong); border-radius: 5px; background: var(--paper); padding: 2px 6px; }
 .key { display: grid; grid-template-columns: 30px 1fr; gap: 4px 8px; align-items: center; font-size: 12px; }
 .stroke { display: inline-block; width: 26px; border-top: 2.5px solid; vertical-align: middle; }
 .stroke.dash { border-top-style: dashed; }
@@ -156,10 +157,14 @@ main { padding: 10px; overflow: auto; min-height: 0; }
   <aside class="rail" id="rail">
     <section>
       <h2>RTany の区間</h2>
-      <p>減衰曲線をどこで読むかを帯域ごとに決める。変えるとすぐ全部の窓が読み直す。EDT・T20・T30 はそのまま残る。</p>
+      <p>減衰曲線をどこで読むかを帯域ごとに決める。条件ごとにも変えられる。変えるとすぐ全部の窓が読み直す。EDT・T20・T30 はそのまま残る。</p>
+      <label class="lab" for="rtanyTarget">対象</label>
+      <select id="rtanyTarget" class="rtany-target"></select>
+      <p id="rtanyNote" style="margin:4px 0 6px"></p>
       <table class="rtany" id="rtanyTable"></table>
-      <div style="margin-top:8px;display:flex;gap:6px">
-        <button class="btn" id="rtanyReset" title="project.json の区間に戻す">設定に戻す</button>
+      <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">
+        <button class="btn" id="rtanyUnset" title="この条件の個別の区間を消して共通の区間で読む">共通に戻す</button>
+        <button class="btn" id="rtanyReset" title="全条件を project.json の区間に戻す">設定に戻す</button>
       </div>
     </section>
     <section>
@@ -211,7 +216,9 @@ const unitOf = k => INDEX_UNIT[k] !== undefined ? INDEX_UNIT[k] : "dB";
 // 音圧レベルの内訳（エネルギー和だけにある）
 const ENERGY_ONLY = new Set(["Lp_A_dB", "直接音_dB", "反射音_dB", "初期_50ms_dB", "後期_dB"]);
 const METHOD_NAME = { phase: "位相考慮", energy: "エネルギー和" };
-const PALETTE = ["#1c2420", "#16876b", "#c2386f", "#6a4fc4", "#a87600", "#2a8ec4", "#8a4a22", "#50781a", "#d2651a", "#2a5db0"];
+// ★条件・受音点を重ねるときの色（2026-09-30 ユーザー指摘「黒・緑だと見にくい。赤・青・緑…のように」）。
+//   白地で見分けやすい順に並べる。足し方は線の種類（実線／破線）で見分ける
+const PALETTE = ["#e0262f", "#1f5fd6", "#1f9e3a", "#8e3fc7", "#f08c00", "#00a3b8", "#c2185b", "#7a5230", "#6b8e00", "#555f5b"];
 const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 const bandText = f => f >= 1000 ? `${+(f / 1000).toFixed(2)}k` : `${Math.round(f)}`;
 
@@ -220,7 +227,10 @@ const bandText = f => f >= 1000 ? `${+(f / 1000).toFixed(2)}k` : `${Math.round(f
 // =============================================================================
 let catalog = null;
 let count = 4;
-let rtany = {};           // {"500": [-5, -35], ...}
+// RTany の区間 {"*": {帯域: [開始, 終了]}, "<条件>": {…}}。"*" は全条件の共通、
+// 条件の名前があればその条件だけ別の区間で読む（2026-09-30 ユーザー要望「条件ごとに変更できるといい」）
+let rtany = { "*": {} };
+let rtanyTarget = "*";
 let focused = 0;
 const panes = [];
 const cache = new Map();
@@ -264,7 +274,8 @@ async function getJSON(url) {
 function q(params) {
   return Object.entries(params).map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join("&");
 }
-const rtanyParam = () => JSON.stringify(rtany);
+const rtanyOf = cond => rtany[cond] || rtany["*"];
+const rtanyParam = cond => JSON.stringify(rtanyOf(cond));
 function toast(text, ms = 3200) {
   const t = document.getElementById("toast");
   t.textContent = text; t.style.display = "block";
@@ -494,12 +505,12 @@ async function build(p) {
   const missing = [];
 
   if (p.kind === "decay") {
-    const [ra0, ra1] = rtany[p.band] || catalog.rt_any;
+    const [ra0, ra1] = rtanyOf(p.conds[0])[p.band] || catalog.rt_any;
     spec.title = `減衰曲線　${bandText(+p.band)} Hz`;
     spec.xlabel = "時間 [s]"; spec.ylabel = "残留エネルギー [dB]";
     let tEnd = 0.3;
     for (const [i, c] of list.entries()) {
-      const d = await getJSON(`/api/decay?${q({ ...base(c), rtany: rtanyParam() })}`);
+      const d = await getJSON(`/api/decay?${q({ ...base(c), rtany: rtanyParam(c.cond) })}`);
       for (const m of methods) {
         const part = d[m];
         if (!part || !part.curves[p.band]) { missing.push(`${comboName(p, c)} ${METHOD_NAME[m]}`); continue; }
@@ -511,7 +522,7 @@ async function build(p) {
         tEnd = Math.max(tEnd, (where > 0 ? where : y.length) * part.dt * 1.1);
         spec.series.push({ t0: part.t0, dt: part.dt, y, color: st.color, dash: st.dash, width: 1.5,
           fits: shown.map(k => ({ ...fits[k], name: k })), name: `${comboName(p, c)} ${METHOD_NAME[m]}` });
-        const vals = shown.map(k => `${k} ${fmt(fits[k].T)}`).join("  ");
+        const vals = shown.map(k => `${k === "RTany" ? `RTany(${fits[k].start}〜${fits[k].end})` : k} ${fmt(fits[k].T)}`).join("  ");
         spec.legend.push({ color: st.color, dash: st.dash, text: `${comboName(p, c)} ${METHOD_NAME[m]}${vals ? "　" + vals + " s" : ""}` });
       }
     }
@@ -530,7 +541,7 @@ async function build(p) {
     let all = [];
     for (const [i, c] of list.entries()) {
       let d;
-      try { d = await getJSON(`/api/indices?${q({ ...base(c), rtany: rtanyParam() })}`); }
+      try { d = await getJSON(`/api/indices?${q({ ...base(c), rtany: rtanyParam(c.cond) })}`); }
       catch (e) { missing.push(`${comboName(p, c)}（${e.message}）`); continue; }
       bands = d.bands;
       if (p.kind === "rtdiff") {
@@ -994,26 +1005,49 @@ document.getElementById("saveAll").onclick = () => {
 function renderRtany() {
   const t = document.getElementById("rtanyTable");
   const [d0, d1] = catalog.rt_any;
+  const own = rtanyTarget !== "*" && rtany[rtanyTarget];
+  const table = rtanyTarget === "*" ? rtany["*"] : (rtany[rtanyTarget] || rtany["*"]);
+  const base = rtanyTarget === "*" ? null : rtany["*"];
+  // 対象（全条件の共通／条件ごと）。個別に決めた条件には印を付ける
+  const sel = document.getElementById("rtanyTarget");
+  sel.innerHTML = `<option value="*">全条件（共通）</option>` + catalog.conditions.map(c =>
+    `<option value="${c}" ${c === rtanyTarget ? "selected" : ""}>${c || "（名前なし）"}${rtany[c] ? "　● 個別" : ""}</option>`).join("");
+  sel.value = rtanyTarget;
+  document.getElementById("rtanyNote").textContent = rtanyTarget === "*"
+    ? "個別に決めていない条件はこの区間で読む。"
+    : own ? "この条件だけの区間。" : "いまは共通の区間。変えるとこの条件だけの区間になる。";
+  document.getElementById("rtanyUnset").style.display = own ? "" : "none";
+  const first = table[String(catalog.bands[0])] || [d0, d1];
   t.innerHTML = `<tr><th>帯域</th><th>開始 dB</th><th>終了 dB</th></tr>
-    <tr class="all"><td>全帯域</td><td><input type="number" step="1" id="allStart" value="${d0}"></td><td><input type="number" step="1" id="allEnd" value="${d1}"></td></tr>`
+    <tr class="all"><td>全帯域</td><td><input type="number" step="1" id="allStart" value="${first[0]}"></td><td><input type="number" step="1" id="allEnd" value="${first[1]}"></td></tr>`
     + catalog.bands.map(b => {
-      const [s, e] = rtany[String(b)] || [d0, d1];
-      const changed = s !== d0 || e !== d1 ? "changed" : "";
-      return `<tr><td>${bandText(b)} Hz</td><td><input type="number" step="1" class="${changed}" data-b="${b}" data-k="0" value="${s}"></td><td><input type="number" step="1" class="${changed}" data-b="${b}" data-k="1" value="${e}"></td></tr>`;
+      const [s0, e0] = table[String(b)] || [d0, d1];
+      const ref = base ? (base[String(b)] || [d0, d1]) : [d0, d1];
+      const changed = s0 !== ref[0] || e0 !== ref[1] ? "changed" : "";
+      return `<tr><td>${bandText(b)} Hz</td><td><input type="number" step="1" class="${changed}" data-b="${b}" data-k="0" value="${s0}"></td><td><input type="number" step="1" class="${changed}" data-b="${b}" data-k="1" value="${e0}"></td></tr>`;
     }).join("");
+  // 書き込む先（条件を選んでいて、まだ個別が無ければ共通を写してから）
+  const target = () => {
+    if (rtanyTarget === "*") return rtany["*"];
+    if (!rtany[rtanyTarget]) rtany[rtanyTarget] = JSON.parse(JSON.stringify(rtany["*"]));
+    return rtany[rtanyTarget];
+  };
   t.querySelectorAll("input[data-b]").forEach(inp => inp.addEventListener("change", () => {
     const b = inp.dataset.b, v = parseFloat(inp.value);
-    const cur = rtany[b] ? [...rtany[b]] : [...catalog.rt_any];
+    const cur = [...(table[b] || catalog.rt_any)];
     cur[+inp.dataset.k] = v;
     if (!(cur[1] < cur[0])) { toast("終了は開始より低い値にしてください（例：-5 → -35）"); renderRtany(); return; }
-    rtany[b] = cur; afterRtany();
+    target()[b] = cur; afterRtany();
   }));
   ["allStart", "allEnd"].forEach(id => document.getElementById(id).addEventListener("change", () => {
-    const s = parseFloat(document.getElementById("allStart").value), e = parseFloat(document.getElementById("allEnd").value);
-    if (!(e < s)) { toast("終了は開始より低い値にしてください"); return; }
-    catalog.bands.forEach(b => rtany[String(b)] = [s, e]); afterRtany();
+    const s1 = parseFloat(document.getElementById("allStart").value), e1 = parseFloat(document.getElementById("allEnd").value);
+    if (!(e1 < s1)) { toast("終了は開始より低い値にしてください"); return; }
+    const tb = target();
+    catalog.bands.forEach(b => tb[String(b)] = [s1, e1]); afterRtany();
   }));
 }
+document.getElementById("rtanyTarget").addEventListener("change", e => { rtanyTarget = e.target.value; renderRtany(); });
+document.getElementById("rtanyUnset").onclick = () => { delete rtany[rtanyTarget]; afterRtany(); };
 let rtanyTimer = null;
 function afterRtany() {
   renderRtany();
@@ -1022,7 +1056,10 @@ function afterRtany() {
     panes.slice(0, count).forEach((p, i) => { if (["decay", "rt", "rtdiff"].includes(p.kind)) refresh(i); });
   }, 250);
 }
-document.getElementById("rtanyReset").onclick = () => { rtany = {}; catalog.bands.forEach(b => rtany[String(b)] = [...catalog.rt_any]); afterRtany(); };
+document.getElementById("rtanyReset").onclick = () => {
+  rtany = { "*": {} }; catalog.bands.forEach(b => rtany["*"][String(b)] = [...catalog.rt_any]); afterRtany();
+  toast("全条件の区間を project.json の設定に戻しました（条件ごとの区間も消えます）");
+};
 
 // =============================================================================
 // はじめ
@@ -1049,12 +1086,17 @@ addEventListener("pagehide", () => navigator.sendBeacon("/api/bye"));
   catalog = await (await fetch("/api/catalog")).json();
   document.getElementById("where").textContent = `${catalog.project}　条件 ${catalog.conditions.length}・受音点 ${(catalog.receivers[catalog.shelves[0]] || []).length}${catalog.shelves.length > 1 ? `・音源の棚 ${catalog.shelves.length}` : ""}`;
   document.title = `結果を見比べる｜${catalog.project}`;
-  catalog.bands.forEach(b => rtany[String(b)] = [...catalog.rt_any]);
+  catalog.bands.forEach(b => rtany["*"][String(b)] = [...catalog.rt_any]);
   const saved = await (await fetch("/api/layout")).json();
   const base = defaultLayout();
   if (saved && Array.isArray(saved.panes)) {
     count = saved.count || 4;
-    Object.assign(rtany, saved.rtany || {});
+    const r = saved.rtany || {};
+    // 昔の形（帯域 → 区間 だけ）は全条件の共通として読む
+    if (r["*"] || Object.keys(r).some(k => catalog.conditions.includes(k))) {
+      Object.assign(rtany["*"], r["*"] || {});
+      Object.entries(r).forEach(([k, v]) => { if (k !== "*" && catalog.conditions.includes(k)) rtany[k] = v; });
+    } else Object.assign(rtany["*"], r);
     saved.panes.forEach((sp, k) => {
       if (!KINDS[sp.kind]) return;
       const p = Object.assign(defaultPane(sp.kind), sp, { held: [] });

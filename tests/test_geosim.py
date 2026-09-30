@@ -6859,6 +6859,10 @@ def test_result_viewer():
         each = [r.indices("", rec, "条件A", {})["energy"]["T20"][0] for rec in ("rec1", "rec2")]
         mean = r.indices("", "平均", "条件A", {})["energy"]["T20"][0]
         check("受音点の平均（残響時間は算術平均）", abs(mean - np.mean(each)) < 1e-3, f"{mean} / {each}")
+        peaks = [max(abs(v) for v in r.impulse_view("", "rec1", "条件A", b)["phase"]["y"])
+                 for b in ("all", "500")]
+        check("★インパルス応答（位相考慮）は帯域を通したあとの最大で正規化（どの帯域でも最大 1）",
+              all(abs(pk - 1.0) < 1e-4 for pk in peaks), str(peaks))
         ab_ = r.absorption("条件A")
         check("★吸音率の面積は後の区分（垂直入射・面積は空欄）に上書きされない",
               ab_["materials"][0]["area"] == 12.5 and ab_["materials"][0]["alpha"] == [0.3, 0.4],
