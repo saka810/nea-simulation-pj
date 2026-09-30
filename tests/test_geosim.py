@@ -22,6 +22,10 @@ import warnings
 
 import numpy as np
 
+# ★ファイルダイアログの初期フォルダの記録（%LOCALAPPDATA%）をテストで書き換えない
+#   （`dialog_dirs.py`。全アプリ共通の約束の 6）
+os.environ["DIALOG_DIRS_NO_PERSIST"] = "1"
+
 # ★★端末の文字コードで書けない文字があっても**落とさない**（2026-09-17）。
 #   cp932 の端末へ出すと `≈` `²` などで UnicodeEncodeError になり、
 #   **テストが途中で止まって残りが走らない**（実際に [7] の途中で止まった）。
@@ -6778,6 +6782,41 @@ def test_reports_19_to_22():
     shutil.rmtree(folder, ignore_errors=True)
 
 
+def test_dialog_dirs():
+    """[64] ファイルダイアログの初期フォルダ（2026-09-30。`Desktop/Claude/CLAUDE.md` の共通の約束）。"""
+    print()
+    print("[64] ファイルダイアログの初期フォルダ")
+    import tempfile
+    import dialog_dirs as dd
+    import project as pj
+    import setup_window as sw
+
+    with tempfile.TemporaryDirectory() as root:
+        a = os.path.join(root, "案件A")
+        b = os.path.join(root, "案件B")
+        for folder in (a, b):
+            os.makedirs(os.path.join(folder, "モデル"))
+            dxf = os.path.join(folder, "モデル", "室.dxf")
+            open(dxf, "w").close()
+            pj.Project(folder, dxf=dxf).save()
+        dd.forget()
+        w = sw.SetupWindow(folder=a)
+        check("プロジェクトを開くと、そのフォルダ・DXF の場所を覚える",
+              dd.base_dir(dd.PROJECT) == a and dd.base_dir(sw.DIALOG_DXF) == os.path.join(a, "モデル"),
+              f"{dd.base_dir(dd.PROJECT)} / {dd.base_dir(sw.DIALOG_DXF)}")
+        check("覚えていない用途はプロジェクトのフォルダから開く", dd.base_dir(sw.DIALOG_OTHER) == a)
+        dd.remember(sw.DIALOG_OTHER, os.path.join(root, "案件A"))
+        w.project = pj.Project.load(b)
+        w._reset_dialog_dirs()
+        check("★別のプロジェクトに切り替えると前の案件の記憶を捨てる",
+              dd.base_dir(sw.DIALOG_DXF) == os.path.join(b, "モデル") and dd.base_dir(sw.DIALOG_OTHER) == b)
+        dd.forget()
+        sw.SetupWindow(folder=root)
+        check("project.json の無いフォルダ（作業フォルダなど）はプロジェクトとして覚えない",
+              dd.base_dir(dd.PROJECT) == "")
+        dd.forget()
+
+
 def test_result_viewer():
     """[63] 結果を見比べる画面 ― エネルギー和の読み方と、結果の読み方（2026-09-30 ユーザー要望）。
 
@@ -7090,7 +7129,7 @@ def main():
                test_decay_floor, test_point_order_changed, test_model_reuse,
                test_triangle_cleanup, test_conditions_shelf,
                test_reports_19_to_22, test_html_viewer_patches,
-               test_auralize, test_result_viewer):
+               test_auralize, test_result_viewer, test_dialog_dirs):
         fn()
 
     failed = [name for name, ok in _results if not ok]

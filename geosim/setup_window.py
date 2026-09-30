@@ -23,6 +23,8 @@ import sys
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+import dialog_dirs as dd
+
 import project as pj
 import source_mix as sx
 
@@ -92,6 +94,13 @@ NUMBER_FIELDS = (GEOMETRY_FIELDS + ROOM_FIELDS + DECAY_FIELDS + SOURCE_FIELDS
 MAX_TIME_MARGIN = 1.5
 
 
+# ファイルダイアログの用途（用途ごとに最後のフォルダを覚える）と記録の置き場の名前
+DIALOG_APP = "nea-simulation-pj"
+DIALOG_DXF = "dxf"
+DIALOG_CONDITION = "condition"
+DIALOG_OTHER = "import"
+
+
 def estimate_volume(dxf_path, unit=None):
     """DXF から室容積の目安を出す（統計残響式の入力を埋めるため）。
 
@@ -145,6 +154,22 @@ class SetupWindow:
         self.project = project or pj.Project.load(folder or os.getcwd())
         self.action = None
         self.root = None
+        # ★ファイルダイアログの初期フォルダ（`Desktop/Claude/CLAUDE.md` の全アプリ共通の約束。
+        #   2026-09-30 ユーザー指示）。前回のプロジェクトのフォルダを読み、
+        #   開いているプロジェクトがあればその中身で覚え直す
+        dd.enable_persistence(DIALOG_APP)
+        self._reset_dialog_dirs()
+
+    def _reset_dialog_dirs(self):
+        """**プロジェクトを開いた・切り替えたときに呼ぶ**。用途ごとの記憶を捨て、
+        そのプロジェクトのフォルダ・DXF・条件表の場所を入れ直す（案件 A の DXF の場所で
+        案件 B のダイアログが開かないように）。project.json が無いフォルダ（起動したときの
+        作業フォルダなど）はプロジェクトとして覚えない。"""
+        p = self.project
+        if not pj.Project.exists(p.folder):
+            return
+        seeds = {DIALOG_DXF: [p.dxf_path], DIALOG_CONDITION: [p.condition_path]}
+        dd.reset_to_project(p.folder, {k: [c for c in v if c] for k, v in seeds.items()})
 
     # ---- 組み立て ------------------------------------------------------
 
@@ -475,6 +500,7 @@ class SetupWindow:
         if os.path.abspath(folder) != self.project.folder:
             # フォルダを変えたら、そのフォルダの既存条件を土台にする
             self.project = pj.Project.load(folder)
+            self._reset_dialog_dirs()
 
         self.project.dxf = dxf
         # 対象室名。**空欄のままにする**（空なら DXF のファイル名が使われる）
@@ -523,17 +549,26 @@ class SetupWindow:
     # ---- ボタン --------------------------------------------------------
 
     def _browse(self, key, kind):
+        # ★初期フォルダ（全アプリ共通の約束）：①欄にパスが入っていればそこ
+        #   ②無ければ用途ごとに最後に使ったフォルダ ③それも無ければプロジェクトのフォルダ。
+        #   以前は作業フォルダ（geosim/）から始まっていた
+        use = {"dir": dd.PROJECT, "dxf": DIALOG_DXF,
+               "condition_csv": DIALOG_CONDITION}.get(kind if kind == "dir" else key, DIALOG_OTHER)
         current = self.vars[key].get().strip()
         start = current if os.path.isdir(current) else os.path.dirname(current)
+        if not (start and os.path.isdir(start)):
+            start = dd.base_dir(use)
         if kind == "dir":
-            path = filedialog.askdirectory(title="プロジェクトフォルダ",
-                                           initialdir=start or os.getcwd())
+            path = filedialog.askdirectory(title="プロジェクトフォルダ", initialdir=start or None)
             if path:
                 self.vars[key].set(os.path.normpath(path))
                 # そのフォルダに project.json があれば読み込んで反映する
                 if pj.Project.exists(path):
                     self.project = pj.Project.load(path)
                     self._load_into_widgets()
+                    self._reset_dialog_dirs()
+                else:
+                    dd.reset_to_project(path)
             return
         if key == "dxf":
             patterns = [("DXF", "*.dxf"), ("すべて", "*.*")]
@@ -543,8 +578,9 @@ class SetupWindow:
         else:
             patterns = [("CSV", "*.csv"), ("すべて", "*.*")]
         path = filedialog.askopenfilename(title="ファイルを選ぶ", filetypes=patterns,
-                                          initialdir=start or os.getcwd())
+                                          initialdir=start or None)
         if path:
+            dd.remember(use, path)
             self.vars[key].set(os.path.normpath(path))
             if key == "condition_csv":
                 self._refresh_sheets()      # 選んだ表の条件シートを並べ直す

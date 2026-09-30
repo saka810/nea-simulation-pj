@@ -581,10 +581,16 @@ def main(argv=None):
         from tkinter import filedialog
         root = tk.Tk()
         root.withdraw()
-        folder = filedialog.askdirectory(title="可聴化するプロジェクトフォルダ")
+        import dialog_dirs as dd
+        import setup_window as sw
+        # ★前回のプロジェクトのフォルダから開く（全アプリ共通の約束。`dialog_dirs.py`）
+        dd.enable_persistence(sw.DIALOG_APP)
+        folder = filedialog.askdirectory(title="可聴化するプロジェクトフォルダ",
+                                         initialdir=dd.base_dir(dd.PROJECT) or None)
         root.destroy()
         if not folder:
             return 1
+        dd.remember(dd.PROJECT, folder)
     if not os.path.isdir(folder):
         print(f"[可聴化] フォルダがありません: {folder}")
         return 1
