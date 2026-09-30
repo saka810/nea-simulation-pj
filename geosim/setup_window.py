@@ -375,6 +375,9 @@ class SetupWindow:
             # ★可聴化（2026-09-26 ユーザー要望）。ブラウザの窓で開くので、
             #   この画面は閉じずに並べて使える
             ("可聴化…", self._on_auralize),
+            # ★結果を窓に並べて条件・足し方（位相考慮／エネルギー和）で見比べる
+            #   （2026-09-30 ユーザー要望）。可聴化と同じくブラウザの窓で開く
+            ("結果を見比べる…", self._on_compare),
             # ★同じフォルダの条件表を全部回す（2026-08-21 ユーザー要望）。
             #   経路は吸音に依らないので 2 件目以降は一瞬で終わる（F-9）
             ("全条件を一括 ▶▶", self._on_run_all),
@@ -863,6 +866,26 @@ class SetupWindow:
         subprocess.Popen([sys.executable, script, self.project.folder],
                          cwd=os.path.dirname(script))
         self.status.config(text="可聴化の画面をブラウザで開きます（結果を読むので少し待ちます）")
+
+    def _on_compare(self):
+        """計算結果を窓に並べて見比べる画面（`result_viewer.py`）を開く。
+
+        ★**この画面は閉じない**（別のプロセスで立ち上げ、ブラウザの窓で開く）。
+        計算し直したら、見比べる画面の「結果を読み直す」で取り込める。
+        """
+        error = self._collect()
+        if error:
+            messagebox.showerror("入力を確認してください", error)
+            return
+        if not pj.has_results(self.project):
+            messagebox.showinfo("結果がありません",
+                                f"{self.project.folder} にまだ計算結果がありません。\n"
+                                f"「計算する ▶」を先に実行してください。")
+            return
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "result_viewer.py")
+        subprocess.Popen([sys.executable, script, self.project.folder],
+                         cwd=os.path.dirname(script))
+        self.status.config(text="結果を見比べる画面をブラウザで開きます")
 
     def _on_run(self):
         error = self._collect()

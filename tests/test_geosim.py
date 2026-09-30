@@ -6778,6 +6778,99 @@ def test_reports_19_to_22():
     shutil.rmtree(folder, ignore_errors=True)
 
 
+def test_result_viewer():
+    """[63] 結果を見比べる画面 ― エネルギー和の読み方と、結果の読み方（2026-09-30 ユーザー要望）。
+
+    ★エネルギー和は案件フォルダの `エネルギー和の読み取り.py` と同じやり方
+      （`energy_sum.py`）。★位相考慮の数字は本体の rt.csv と一致させる。
+    """
+    print()
+    print("[63] 結果を見比べる（エネルギー和・RTany・平均・面積）")
+    import tempfile
+    import energy_sum as es
+    import result_viewer as rview
+    import project as pj
+    import impulse as imp
+    import reverberation as rv
+
+    # ---- エネルギー和の減衰：指数減衰なら T は解析値どおり ----
+    rng = np.random.default_rng(1)
+    t = np.sort(rng.uniform(0.01, 3.0, 40000))
+    T = 1.2
+    e = np.exp(-13.8155 * t / T)[:, None] * np.ones((1, 2))
+    curves = es.decay_curves(t, e)
+    got = [es.decay_time(curves[0], 1.0 / es.FS, a, b)[0] for a, b in es.RANGES.values()]
+    check("エネルギー和の減衰曲線：指数減衰（T=1.2 s）から EDT/T20/T30 が 1% 以内",
+          all(abs(g / T - 1) < 0.01 for g in got), str(np.round(got, 4)))
+
+    # ---- 明瞭度：直接音と 100 ms 後の同じ強さの反射 ----
+    c = es.clarity(np.array([0.01, 0.11]), np.array([[1.0], [1.0]]))
+    check("明瞭度：C50 = 0 dB・D50 = 0.5・Ts = 50 ms（直接音の到来を 0 とする）",
+          abs(c["C50_db"][0]) < 1e-9 and abs(c["D50"][0] - 0.5) < 1e-12
+          and abs(c["Ts_s"][0] - 0.05) < 1e-12, str(c))
+
+    with tempfile.TemporaryDirectory() as folder:
+        pj.Project(folder, name="室", rt_any_start_db=-5.0, rt_any_end_db=-15.0).save()
+        fs = 44100.0
+        ti = np.arange(int(2.0 * fs)) / fs
+        head = ("reflection_count,time_s,distance_m,dir_x,dir_y,dir_z,"
+                + ",".join(f"energy_{b}Hz" for b in (500, 1000)))
+        for k, (rec, tau) in enumerate((("rec1", 0.8), ("rec2", 0.5))):
+            d = os.path.join(folder, pj.RESULT_DIR, rec)
+            os.makedirs(d)
+            ir = rng.standard_normal(len(ti)) * np.exp(-6.91 * ti / tau)
+            imp.write_impulse_response(os.path.join(d, "室_条件A_ir.csv"), ti, ir)
+            tp = np.sort(rng.uniform(0.01, 1.5, 3000))
+            with open(os.path.join(d, "室_条件A_pulses.csv"), "w", encoding="utf-8") as f:
+                f.write(head + "\n")
+                for j, tt in enumerate(tp):
+                    en = np.exp(-13.8155 * tt / tau)
+                    # 距離は一定（1/(4πd²) で減衰の傾きが変わらないように）
+                    f.write(f"{j},{tt},5.0,1,0,0,{en},{en}\n")
+            with open(os.path.join(d, "室_条件A_rt.csv"), "w", encoding="utf-8-sig") as f:
+                f.write("項目,500,1000\nT20_s,1,1\n")
+        with open(os.path.join(folder, pj.RESULT_DIR, "室_条件A_吸音率と理論値.csv"),
+                  "w", encoding="utf-8-sig") as f:
+            f.write("区分,項目,面積_m2,500,1000\n材料別の吸音率,壁,12.5,0.3,0.4\n"
+                    "材料別の吸音率（垂直入射）,壁,,0.2,0.3\n平均吸音率,平均吸音率,12.5,0.3,0.4\n")
+        r = rview.Results(folder)
+        check("置き場は受音点のフォルダ、条件はファイル名から（室名の頭を外す）",
+              r.conditions == ["条件A"] and r.receivers == {"": ["rec1", "rec2"]},
+              f"{r.conditions} {r.receivers}")
+        check("★開いたときは中身を読まない", not r.pulse_cache and not r.decay_cache)
+        dec = r.decay("", "rec1", "条件A", {"*": [-5, -25]})
+        _fs, ir1 = rview.au.read_ir(os.path.join(folder, pj.RESULT_DIR, "rec1", "室_条件A_ir.csv"))
+        ref = rv.decay_measures(np.arange(len(ir1)) / _fs, ir1.astype(float),
+                                frequencies=[500.0, 1000.0], verbose=False)
+        ph = dec["phase"]["fits"]["500"]
+        check("★位相考慮の EDT/T20/T30 は本体（reverberation.decay_measures）と一致",
+              all(abs(ph[k]["T"] - ref["measures"][k][0]) < 1e-9 for k in ("EDT", "T20", "T30")),
+              f"{[ph[k]['T'] for k in ('EDT', 'T20', 'T30')]} / {[ref['measures'][k][0] for k in ('EDT', 'T20', 'T30')]}")
+        check("★RTany に −5〜−25 dB を入れると T20 と同じ値（1 ms に間引いた曲線で読まない）",
+              ph["RTany"]["T"] == ph["T20"]["T"] and dec["energy"]["fits"]["500"]["RTany"]["T"]
+              == dec["energy"]["fits"]["500"]["T20"]["T"])
+        e20 = dec["energy"]["fits"]["500"]["T20"]["T"]
+        check("エネルギー和の T20 は pulses.csv から読む（ここでは 0.8 s に近い）",
+              0.7 < e20 < 0.9, f"{e20:.3f}")
+        band = r.indices("", "rec1", "条件A", {})["phase"]["RTany"]
+        check("RTany の区間を指定しなければ project.json の区間（−5〜−15 dB）",
+              abs(band[0] - r.decay("", "rec1", "条件A", {})["phase"]["fits"]["500"]["RTany"]["T"]) < 1e-4
+              and r.decay("", "rec1", "条件A", {})["phase"]["fits"]["500"]["RTany"]["end"] == -15.0)
+        each = [r.indices("", rec, "条件A", {})["energy"]["T20"][0] for rec in ("rec1", "rec2")]
+        mean = r.indices("", "平均", "条件A", {})["energy"]["T20"][0]
+        check("受音点の平均（残響時間は算術平均）", abs(mean - np.mean(each)) < 1e-3, f"{mean} / {each}")
+        ab_ = r.absorption("条件A")
+        check("★吸音率の面積は後の区分（垂直入射・面積は空欄）に上書きされない",
+              ab_["materials"][0]["area"] == 12.5 and ab_["materials"][0]["alpha"] == [0.3, 0.4],
+              str(ab_["materials"]))
+        r.write_layout({"count": 2, "panes": [{"kind": "decay"}]})
+        check("窓の並びは プロジェクト直下の 見比べ.json に残す",
+              r.read_layout()["count"] == 2 and os.path.exists(os.path.join(folder, rview.LAYOUT_FILE)))
+        p1 = r.save_figure("図A", b"x")
+        p2 = r.save_figure("図A", b"y")
+        check("★画像は上書きしない（同じ名前なら _2）", p1 != p2 and p2.endswith("図A_2.png"), p2)
+
+
 def test_auralize():
     """[62] 可聴化 ― 結果の並べ方と音量の比（2026-09-26 ユーザー要望）。
 
@@ -6993,7 +7086,7 @@ def main():
                test_decay_floor, test_point_order_changed, test_model_reuse,
                test_triangle_cleanup, test_conditions_shelf,
                test_reports_19_to_22, test_html_viewer_patches,
-               test_auralize):
+               test_auralize, test_result_viewer):
         fn()
 
     failed = [name for name, ok in _results if not ok]

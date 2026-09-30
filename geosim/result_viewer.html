@@ -1,0 +1,1077 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>結果を見比べる</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=BIZ+UDPGothic:wght@400;700&display=swap" rel="stylesheet">
+<style>
+/* 白い地の「計測器の記録紙」。窓の中（グラフ）は真っ白、まわりは薄い灰緑。
+   ★色は意味で分ける：橙＝位相考慮（波形）／青＝エネルギー和。
+     条件や受音点を 2 つ以上重ねたときは色＝その組、足し方＝線の種類（実線／破線）。 */
+:root {
+  --desk: #eef1ef;
+  --panel: #f8faf9;
+  --paper: #ffffff;
+  --ink: #1c2420;
+  --muted: #5d6964;
+  --faint: #8b9691;
+  --rule: #d4dbd7;
+  --rule-strong: #b9c3be;
+  --focus: #0e6b89;
+  --phase: #d2651a;
+  --energy: #2a5db0;
+  --hold: #9aa39f;
+  --warn: #b3261e;
+  --font: "BIZ UDPGothic", "BIZ UDPゴシック", "Yu Gothic UI", "Meiryo", sans-serif;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body {
+  background: var(--desk); color: var(--ink); font-family: var(--font);
+  font-size: 13px; line-height: 1.5; font-variant-numeric: tabular-nums;
+}
+button, select, input { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+button { cursor: pointer; }
+
+.app { display: grid; grid-template-columns: auto 1fr; grid-template-rows: auto 1fr; height: 100vh; }
+header {
+  grid-column: 1 / -1; display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  padding: 8px 16px; background: var(--paper); border-bottom: 1px solid var(--rule);
+}
+header h1 { font-size: 16px; margin: 0; }
+header .where { color: var(--muted); }
+header .spacer { flex: 1; }
+.seg { display: inline-flex; border: 1px solid var(--rule-strong); border-radius: 6px; overflow: hidden; background: var(--paper); }
+.seg button { border: 0; background: transparent; padding: 3px 10px; color: var(--muted); }
+.seg button + button { border-left: 1px solid var(--rule); }
+.seg button[aria-pressed="true"] { background: var(--ink); color: #fff; }
+.btn { background: var(--paper); border: 1px solid var(--rule-strong); border-radius: 6px; padding: 3px 11px; }
+.btn:hover { border-color: var(--ink); }
+.btn.primary { background: var(--ink); color: #fff; border-color: var(--ink); }
+
+/* ---- 左の欄：RTany と凡例の決まり ---- */
+aside.rail {
+  width: 236px; background: var(--panel); border-right: 1px solid var(--rule);
+  padding: 12px 14px 20px; overflow-y: auto;
+}
+.app.rail-closed aside.rail { display: none; }
+.rail h2 { font-size: 13px; margin: 0 0 4px; }
+.rail p { color: var(--muted); font-size: 12px; margin: 0 0 8px; }
+.rail section + section { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--rule); }
+.rtany { width: 100%; border-collapse: collapse; }
+.rtany th { font-weight: 400; color: var(--muted); font-size: 12px; text-align: right; padding: 2px 4px; }
+.rtany th:first-child { text-align: left; }
+.rtany td { padding: 2px 3px; text-align: right; }
+.rtany td:first-child { text-align: left; }
+.rtany tr.all td { border-bottom: 1px solid var(--rule); padding-bottom: 6px; }
+.rtany tr.all + tr td { padding-top: 6px; }
+.rtany input { width: 54px; text-align: right; padding: 1px 4px; border: 1px solid var(--rule-strong); border-radius: 4px; background: var(--paper); }
+.rtany input.changed { border-color: var(--focus); background: #eef7fa; }
+.key { display: grid; grid-template-columns: 30px 1fr; gap: 4px 8px; align-items: center; font-size: 12px; }
+.stroke { display: inline-block; width: 26px; border-top: 2.5px solid; vertical-align: middle; }
+.stroke.dash { border-top-style: dashed; }
+
+/* ---- 窓 ---- */
+main { padding: 10px; overflow: auto; min-height: 0; }
+.grid { display: grid; gap: 10px; height: 100%; }
+.grid[data-count="1"] { grid-template-columns: 1fr; }
+.grid[data-count="2"] { grid-template-columns: 1fr 1fr; }
+.grid[data-count="4"] { grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr; }
+.grid[data-count="6"] { grid-template-columns: 1fr 1fr 1fr; grid-template-rows: 1fr 1fr; }
+.pane {
+  display: flex; flex-direction: column; min-height: 300px; min-width: 0;
+  background: var(--paper); border: 1px solid var(--rule); border-radius: 8px;
+}
+.pane.focus { border-color: var(--focus); box-shadow: 0 0 0 1px var(--focus); }
+.bar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 6px 8px; }
+.bar + .bar { padding-top: 0; }
+.bar select, .pick {
+  border: 1px solid var(--rule-strong); border-radius: 5px; background: var(--paper); padding: 2px 6px; max-width: 190px;
+}
+.bar select.kind { font-weight: 700; border-color: var(--ink); max-width: 170px; }
+.pick { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pick::after { content: "▾"; color: var(--faint); font-size: 10px; }
+.bar .spacer { flex: 1; }
+.mini { border: 1px solid var(--rule-strong); border-radius: 5px; background: var(--paper); padding: 2px 8px; white-space: nowrap; }
+.mini[aria-pressed="true"] { background: var(--ink); border-color: var(--ink); color: #fff; }
+.mini.m-phase[aria-pressed="true"] { background: var(--phase); border-color: var(--phase); }
+.mini.m-energy[aria-pressed="true"] { background: var(--energy); border-color: var(--energy); }
+.mini.hold[aria-pressed="true"] { background: #fff4e0; color: #7a4a00; border-color: #d9a441; }
+.mini:disabled { opacity: .4; cursor: default; }
+.lab { color: var(--muted); font-size: 12px; }
+.checks { display: inline-flex; gap: 8px; }
+.checks label { display: inline-flex; gap: 3px; align-items: center; color: var(--muted); font-size: 12px; }
+.plot { position: relative; flex: 1; min-height: 0; border-top: 1px solid var(--rule); }
+.plot canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+.plot .msg { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); padding: 20px; text-align: center; }
+
+/* 浮かせる小窓（条件・受音点の選択、軸） */
+.pop {
+  position: fixed; z-index: 20; background: var(--paper); border: 1px solid var(--rule-strong);
+  border-radius: 8px; box-shadow: 0 8px 28px rgba(28,36,32,.18); padding: 10px 12px; min-width: 190px;
+  max-height: 70vh; overflow: auto;
+}
+.pop h3 { margin: 0 0 6px; font-size: 12px; color: var(--muted); font-weight: 400; }
+.pop label { display: flex; gap: 6px; align-items: center; padding: 2px 0; white-space: nowrap; }
+.pop .row { display: flex; gap: 6px; margin-top: 8px; }
+.axis-grid { display: grid; grid-template-columns: auto 1fr auto 1fr; gap: 6px 6px; align-items: center; }
+.axis-grid input[type=number] { width: 82px; padding: 1px 4px; border: 1px solid var(--rule-strong); border-radius: 4px; }
+.readout {
+  position: fixed; z-index: 30; pointer-events: none; display: none; background: rgba(255,255,255,.96);
+  border: 1px solid var(--rule-strong); border-radius: 6px; padding: 5px 8px; font-size: 12px; white-space: nowrap;
+  box-shadow: 0 4px 14px rgba(28,36,32,.12);
+}
+.toast {
+  position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); background: var(--ink); color: #fff;
+  padding: 8px 14px; border-radius: 6px; font-size: 12.5px; display: none; z-index: 40; max-width: 80vw;
+}
+@media (max-width: 900px) {
+  .app { grid-template-columns: 1fr; grid-template-rows: auto auto 1fr; height: auto; }
+  aside.rail { width: auto; border-right: 0; border-bottom: 1px solid var(--rule); }
+  .grid[data-count] { grid-template-columns: 1fr; grid-template-rows: none; height: auto; }
+  .pane { min-height: 380px; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+<div class="app" id="app">
+  <header>
+    <button class="btn" id="railToggle" title="RTany の区間と線の決まりの欄を出し入れ">RTany・凡例</button>
+    <h1>結果を見比べる</h1>
+    <span class="where" id="where">読み込み中…</span>
+    <span class="spacer"></span>
+    <span class="where">窓の数</span>
+    <div class="seg" id="countSeg" role="group" aria-label="窓の数">
+      <button data-count="1">1</button><button data-count="2">2</button><button data-count="4">4</button><button data-count="6">6</button>
+    </div>
+    <button class="btn" id="rescan" title="計算し直した結果を取り込む">結果を読み直す</button>
+    <button class="btn" id="saveLayout" title="窓の並びと RTany の区間をプロジェクトの 見比べ.json に保存（次に開いたとき元に戻る）">並びを保存</button>
+    <button class="btn primary" id="saveAll" title="見えている窓を 1 枚の PNG にして 図/見比べ/ に保存">画像で保存</button>
+  </header>
+
+  <aside class="rail" id="rail">
+    <section>
+      <h2>RTany の区間</h2>
+      <p>減衰曲線をどこで読むかを帯域ごとに決める。変えるとすぐ全部の窓が読み直す。EDT・T20・T30 はそのまま残る。</p>
+      <table class="rtany" id="rtanyTable"></table>
+      <div style="margin-top:8px;display:flex;gap:6px">
+        <button class="btn" id="rtanyReset" title="project.json の区間に戻す">設定に戻す</button>
+      </div>
+    </section>
+    <section>
+      <h2>線の決まり</h2>
+      <div class="key">
+        <span class="stroke" style="border-color:var(--phase)"></span><span>位相考慮（波形）</span>
+        <span class="stroke dash" style="border-color:var(--energy)"></span><span>エネルギー和</span>
+        <span class="stroke" style="border-color:var(--hold)"></span><span>ホールドした線（薄く残る）</span>
+      </div>
+      <p style="margin-top:8px">条件や受音点を 2 つ以上重ねると、色＝その組、実線／破線＝足し方になる。</p>
+      <p>音圧レベルの「位相考慮」は複素和。STI・到来方向・吸音率は足し方に依らない。</p>
+    </section>
+    <section>
+      <h2>操作</h2>
+      <p>グラフの上でカーソルを動かすと値を読める。ダブルクリックで軸を自動に戻す。</p>
+      <p>「ホールド」を押すと今の線を残したまま、条件などを切り替えて重ねられる。</p>
+    </section>
+  </aside>
+
+  <main><div class="grid" id="grid"></div></main>
+</div>
+<div class="readout" id="readout"></div>
+<div class="toast" id="toast"></div>
+
+<script>
+"use strict";
+// =============================================================================
+// 決まりごと
+// =============================================================================
+const KINDS = {
+  decay:     { label: "減衰曲線",                 time: true,  methods: true,  band: true  },
+  rt:        { label: "残響時間",                 freq: true,  methods: true,  index: ["EDT", "T20", "T30", "RTany"] },
+  rtdiff:    { label: "差（位相考慮 − エネルギー和）", freq: true, methods: false, index: ["EDT", "T20", "T30", "RTany", "C50_db", "C80_db", "D50", "Ts_s", "Lp_dB"] },
+  clarity:   { label: "明瞭度",                   freq: true,  methods: true,  index: ["C50_db", "C80_db", "D50", "Ts_s"] },
+  spl:       { label: "音圧レベル",               freq: true,  methods: true,  index: ["Lp_dB", "Lp_A_dB", "直接音_dB", "反射音_dB", "初期_50ms_dB", "後期_dB"] },
+  sti:       { label: "STI（MTI）",               freq: true,  methods: false, index: ["MTI"] },
+  impulse:   { label: "インパルス応答",           time: true,  methods: true,  band: true, bandAll: true },
+  etc:       { label: "エネルギー時間曲線",       time: true,  methods: true,  band: true, bandAll: true },
+  direction: { label: "到来方向",                 polar: true, methods: false, band: true, bandAll: true },
+  absorption:{ label: "吸音率",                   freq: true,  methods: false, noRec: true },
+};
+const INDEX_LABEL = {
+  EDT: "EDT", T20: "T20", T30: "T30", RTany: "RTany", C50_db: "C50", C80_db: "C80", D50: "D50", Ts_s: "Ts",
+  Lp_dB: "音圧レベル", Lp_A_dB: "A 特性音圧レベル", "直接音_dB": "直接音", "反射音_dB": "反射音",
+  "初期_50ms_dB": "初期（50 ms まで）", "後期_dB": "後期", MTI: "MTI",
+};
+const INDEX_UNIT = { EDT: "s", T20: "s", T30: "s", RTany: "s", C50_db: "dB", C80_db: "dB", D50: "", Ts_s: "s", MTI: "" };
+const unitOf = k => INDEX_UNIT[k] !== undefined ? INDEX_UNIT[k] : "dB";
+// 音圧レベルの内訳（エネルギー和だけにある）
+const ENERGY_ONLY = new Set(["Lp_A_dB", "直接音_dB", "反射音_dB", "初期_50ms_dB", "後期_dB"]);
+const METHOD_NAME = { phase: "位相考慮", energy: "エネルギー和" };
+const PALETTE = ["#1c2420", "#16876b", "#c2386f", "#6a4fc4", "#a87600", "#2a8ec4", "#8a4a22", "#50781a", "#d2651a", "#2a5db0"];
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const bandText = f => f >= 1000 ? `${+(f / 1000).toFixed(2)}k` : `${Math.round(f)}`;
+
+// =============================================================================
+// 状態
+// =============================================================================
+let catalog = null;
+let count = 4;
+let rtany = {};           // {"500": [-5, -35], ...}
+let focused = 0;
+const panes = [];
+const cache = new Map();
+
+function defaultPane(kind, extra = {}) {
+  const cond = catalog.conditions[0] || "";
+  const shelf = catalog.shelves[0] || "";
+  const rec = (catalog.receivers[shelf] || ["rec1"])[0];
+  const mid = catalog.bands.find(b => b === 500) || catalog.bands[Math.floor(catalog.bands.length / 2)] || 500;
+  return Object.assign({
+    kind, shelf, conds: [cond], recs: [KINDS[kind].freq ? "平均" : rec], methods: ["phase", "energy"],
+    band: String(mid), index: (KINDS[kind].index || [null])[0], lines: { EDT: false, T20: true, T30: false, RTany: true },
+    theory: false, part: "all", ymode: "amp", axis: { auto: true }, held: [],
+  }, extra);
+}
+function defaultLayout() {
+  return [
+    defaultPane("decay"),
+    defaultPane("rt", { index: "T20" }),
+    defaultPane("rtdiff", { index: "T20" }),
+    defaultPane("etc"),
+    defaultPane("clarity"),
+    defaultPane("spl"),
+  ];
+}
+
+// =============================================================================
+// サーバとのやり取り
+// =============================================================================
+async function getJSON(url) {
+  if (cache.has(url)) return cache.get(url);
+  const p = fetch(url).then(async r => {
+    const body = await r.json();
+    if (!r.ok) throw new Error(body.error || r.statusText);
+    return body;
+  });
+  cache.set(url, p);
+  p.catch(() => cache.delete(url));
+  return p;
+}
+function q(params) {
+  return Object.entries(params).map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join("&");
+}
+const rtanyParam = () => JSON.stringify(rtany);
+function toast(text, ms = 3200) {
+  const t = document.getElementById("toast");
+  t.textContent = text; t.style.display = "block";
+  clearTimeout(toast.timer); toast.timer = setTimeout(() => t.style.display = "none", ms);
+}
+
+// =============================================================================
+// 描画の土台（canvas）
+// =============================================================================
+function niceTicks(min, max, n = 6) {
+  const span = max - min || 1;
+  const step0 = span / n;
+  const mag = Math.pow(10, Math.floor(Math.log10(step0)));
+  const step = [1, 2, 2.5, 5, 10].map(m => m * mag).find(s => span / s <= n + 0.5) || mag * 10;
+  const out = [];
+  for (let v = Math.ceil(min / step - 1e-9) * step; v <= max + step * 1e-9; v += step) out.push(+v.toFixed(10));
+  return out;
+}
+function fmt(v) {
+  if (v === null || v === undefined || !isFinite(v)) return "—";
+  const a = Math.abs(v);
+  return a >= 100 ? v.toFixed(0) : a >= 10 ? v.toFixed(1) : a >= 1 ? v.toFixed(2) : v.toFixed(3);
+}
+
+/** 1 枚のグラフを描く。spec の中身は下の make* 関数が作る。 */
+function drawPlot(canvas, spec) {
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  const W = Math.max(rect.width, 200), H = Math.max(rect.height, 150);
+  canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr);
+  const g = canvas.getContext("2d");
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.fillStyle = "#fff"; g.fillRect(0, 0, W, H);
+  const font = px => `${px}px ${css("--font")}`;
+  const box = { l: 58, r: 14, t: 30, b: 40 };
+  g.font = font(13); g.fillStyle = css("--ink"); g.textBaseline = "alphabetic";
+  g.fillText(spec.title || "", 12, 19);
+  if (spec.polar) return drawPolar(g, W, H, spec, font);
+
+  const X0 = box.l, X1 = W - box.r, Y0 = box.t, Y1 = H - box.b;
+  const xs = spec.xlog ? v => Math.log10(Math.max(v, 1e-9)) : v => v;
+  const ys = spec.ylog ? v => Math.log10(Math.max(v, 1e-9)) : v => v;
+  const X = v => X0 + (xs(v) - xs(spec.x[0])) / (xs(spec.x[1]) - xs(spec.x[0])) * (X1 - X0);
+  const Y = v => Y1 - (ys(v) - ys(spec.y[0])) / (ys(spec.y[1]) - ys(spec.y[0])) * (Y1 - Y0);
+  spec._map = { X, Y, X0, X1, Y0, Y1,
+    invX: px => { const u = xs(spec.x[0]) + (px - X0) / (X1 - X0) * (xs(spec.x[1]) - xs(spec.x[0])); return spec.xlog ? Math.pow(10, u) : u; } };
+
+  // 目盛り
+  g.strokeStyle = "#e9edeb"; g.lineWidth = 1; g.fillStyle = css("--muted"); g.font = font(11);
+  const xticks = spec.xticks || (spec.xlog ? [31.5, 63, 125, 250, 500, 1000, 2000, 4000, 8000, 16000] : niceTicks(spec.x[0], spec.x[1], Math.max(3, Math.round((X1 - X0) / 90))))
+    .filter(v => v >= spec.x[0] - 1e-9 && v <= spec.x[1] + 1e-9);
+  g.textAlign = "center";
+  xticks.forEach(v => { const px = X(v); g.beginPath(); g.moveTo(px, Y0); g.lineTo(px, Y1); g.stroke(); g.fillText(spec.xlog ? bandText(v) : fmt(v), px, Y1 + 15); });
+  const yticks = spec.ylog ? [0.1, 0.2, 0.3, 0.5, 0.7, 1, 1.5, 2, 3, 5, 7, 10].filter(v => v >= spec.y[0] && v <= spec.y[1])
+    : niceTicks(spec.y[0], spec.y[1], Math.max(3, Math.round((Y1 - Y0) / 45)));
+  g.textAlign = "right";
+  yticks.forEach(v => { const py = Y(v); g.beginPath(); g.moveTo(X0, py); g.lineTo(X1, py); g.stroke(); g.fillText(fmt(v), X0 - 6, py + 4); });
+  g.strokeStyle = css("--rule-strong"); g.strokeRect(X0, Y0, X1 - X0, Y1 - Y0);
+  g.fillStyle = css("--muted"); g.textAlign = "center";
+  g.fillText(spec.xlabel || "", (X0 + X1) / 2, H - 8);
+  g.save(); g.translate(14, (Y0 + Y1) / 2); g.rotate(-Math.PI / 2); g.fillText(spec.ylabel || "", 0, 0); g.restore();
+
+  g.save(); g.beginPath(); g.rect(X0, Y0, X1 - X0, Y1 - Y0); g.clip();
+  (spec.bands || []).forEach(b => { g.fillStyle = b.color || "rgba(28,36,32,.05)"; g.fillRect(X0, Y(b.y1), X1 - X0, Y(b.y0) - Y(b.y1)); });
+  (spec.hlines || []).forEach(h => { g.strokeStyle = h.color || "#c9d1cd"; g.setLineDash(h.dash || [2, 3]); g.beginPath(); g.moveTo(X0, Y(h.y)); g.lineTo(X1, Y(h.y)); g.stroke(); g.setLineDash([]); });
+  for (const s of spec.series) drawSeries(g, s, X, Y, X0, X1, spec);
+  g.restore();
+  drawLegend(g, spec, X1, Y0, font);
+}
+
+function drawSeries(g, s, X, Y, X0, X1, spec) {
+  g.globalAlpha = s.alpha ?? 1;
+  g.strokeStyle = s.color; g.fillStyle = s.color; g.lineWidth = s.width || 1.5;
+  g.setLineDash(s.dash ? [6, 4] : []);
+  if (s.type === "stem") {
+    // パルス列：縦の線を下端から立てる（数が多いので 1 画素に 1 本までまとめる）
+    const base = Y(s.base ?? spec.y[0]);
+    const best = new Map();
+    for (let i = 0; i < s.x.length; i++) {
+      const px = Math.round(X(s.x[i]));
+      if (px < X0 - 1 || px > X1 + 1) continue;
+      const v = s.y[i]; if (v === null) continue;
+      if (!best.has(px) || v > best.get(px)) best.set(px, v);
+    }
+    g.lineWidth = 1; g.setLineDash([]);
+    g.beginPath();
+    best.forEach((v, px) => { g.moveTo(px + .5, base); g.lineTo(px + .5, Y(v)); });
+    g.stroke();
+  } else if (s.dt !== undefined) {
+    // 等間隔の長い曲線：1 画素ごとに最小と最大を結ぶ（山を落とさない）
+    const i0 = Math.max(0, Math.floor((spec._map.invX(X0) - s.t0) / s.dt) - 1);
+    const i1 = Math.min(s.y.length - 1, Math.ceil((spec._map.invX(X1) - s.t0) / s.dt) + 1);
+    const perPx = (i1 - i0) / (X1 - X0);
+    g.beginPath();
+    if (perPx < 2) {
+      let started = false;
+      for (let i = i0; i <= i1; i++) {
+        const v = s.y[i]; if (v === null) { started = false; continue; }
+        const px = X(s.t0 + i * s.dt), py = Y(v);
+        started ? g.lineTo(px, py) : g.moveTo(px, py); started = true;
+      }
+    } else {
+      let col = null, lo = Infinity, hi = -Infinity, first = true;
+      const flush = () => { if (col === null || lo === Infinity) return; if (first) { g.moveTo(col, Y(lo)); first = false; } else g.lineTo(col, Y(lo)); g.lineTo(col, Y(hi)); };
+      for (let i = i0; i <= i1; i++) {
+        const v = s.y[i]; if (v === null) continue;
+        const px = Math.round(X(s.t0 + i * s.dt));
+        if (px !== col) { flush(); col = px; lo = hi = v; } else { lo = Math.min(lo, v); hi = Math.max(hi, v); }
+      }
+      flush();
+    }
+    g.stroke();
+  } else {
+    g.beginPath();
+    let started = false;
+    s.x.forEach((x, i) => {
+      const v = s.y[i]; if (v === null || v === undefined) { started = false; return; }
+      started ? g.lineTo(X(x), Y(v)) : g.moveTo(X(x), Y(v)); started = true;
+    });
+    g.stroke();
+    if (s.marker) {
+      g.setLineDash([]);
+      s.x.forEach((x, i) => {
+        const v = s.y[i]; if (v === null || v === undefined) return;
+        g.beginPath(); g.arc(X(x), Y(v), 3.2, 0, Math.PI * 2);
+        if (s.dash) { g.fillStyle = "#fff"; g.fill(); g.lineWidth = 1.4; g.stroke(); } else { g.fill(); }
+      });
+    }
+  }
+  (s.fits || []).forEach(f => {
+    const t0 = Math.max((f.start - f.b) / f.a, 0), t1 = (f.end - f.b) / f.a;
+    g.setLineDash([]); g.globalAlpha = (s.alpha ?? 1) * 0.35; g.lineWidth = 6;
+    g.beginPath(); g.moveTo(X(t0), Y(f.a * t0 + f.b)); g.lineTo(X(t1), Y(f.a * t1 + f.b)); g.stroke();
+    g.globalAlpha = s.alpha ?? 1; g.setLineDash([]);
+    g.font = `11px ${css("--font")}`; g.fillText(f.name, X(t1) + 4, Y(f.a * t1 + f.b) - 3);
+  });
+  g.globalAlpha = 1; g.setLineDash([]);
+}
+
+function drawLegend(g, spec, right, top, font) {
+  const items = spec.legend || [];
+  if (!items.length) return;
+  g.font = font(11.5);
+  const lineH = 16;
+  const w = Math.min(Math.max(...items.map(i => g.measureText(i.text).width)) + 44, right - 80);
+  const x = right - w - 6, y = top + 6, h = items.length * lineH + 8;
+  g.fillStyle = "rgba(255,255,255,.9)"; g.fillRect(x, y, w, h);
+  g.strokeStyle = "#dfe5e2"; g.lineWidth = 1; g.strokeRect(x + .5, y + .5, w, h);
+  items.forEach((it, i) => {
+    const cy = y + 4 + i * lineH + lineH / 2;
+    g.globalAlpha = it.alpha ?? 1;
+    g.strokeStyle = it.color; g.lineWidth = 2.2; g.setLineDash(it.dash ? [5, 3] : []);
+    g.beginPath(); g.moveTo(x + 8, cy); g.lineTo(x + 32, cy); g.stroke(); g.setLineDash([]);
+    g.fillStyle = css("--ink"); g.textAlign = "left"; g.textBaseline = "middle";
+    g.fillText(it.text, x + 38, cy + 1);
+    g.globalAlpha = 1;
+  });
+  g.textBaseline = "alphabetic";
+}
+
+function drawPolar(g, W, H, spec, font) {
+  const cx = W / 2, cy = (H + 24) / 2, R = Math.min(W, H - 50) / 2 - 26;
+  const [lo, hi] = spec.y;                 // dB の範囲（外側が強い）
+  const r = v => R * Math.max(0, Math.min(1, (v - lo) / (hi - lo)));
+  g.strokeStyle = "#e3e8e5"; g.fillStyle = css("--muted"); g.font = font(10.5); g.textAlign = "left";
+  // 目盛りの数字は右下 45° に置く（上は「正面」の文字と重なる）
+  niceTicks(lo, hi, 4).forEach(v => { g.beginPath(); g.arc(cx, cy, r(v), 0, Math.PI * 2); g.stroke(); g.fillText(`${fmt(v)} dB`, cx + r(v) * 0.71 + 2, cy + r(v) * 0.71 + 10); });
+  for (let k = 0; k < 12; k++) { const a = k * Math.PI / 6; g.beginPath(); g.moveTo(cx, cy); g.lineTo(cx - R * Math.sin(a), cy - R * Math.cos(a)); g.stroke(); }
+  g.fillStyle = css("--ink"); g.font = font(12); g.textAlign = "center";
+  g.fillText("正面", cx, cy - R - 8); g.fillText("後ろ", cx, cy + R + 16);
+  g.textAlign = "right"; g.fillText("左", cx - R - 6, cy + 4); g.textAlign = "left"; g.fillText("右", cx + R + 6, cy + 4);
+  // 相対方位 a（0=正面・90=左）→ 図の (x, y) = (-sin a, -cos a)（上が正面）
+  for (const s of spec.series) {
+    g.globalAlpha = s.alpha ?? 1; g.strokeStyle = s.color; g.fillStyle = s.color; g.lineWidth = s.width || 1.8;
+    g.setLineDash(s.dash ? [6, 4] : []);
+    g.beginPath();
+    const n = s.y.length;
+    for (let k = 0; k <= n; k++) {
+      const i = k % n, a = (i + 0.5) * 2 * Math.PI / n, rr = r(s.y[i]);
+      const px = cx - rr * Math.sin(a), py = cy - rr * Math.cos(a);
+      k ? g.lineTo(px, py) : g.moveTo(px, py);
+    }
+    g.stroke(); g.globalAlpha = (s.alpha ?? 1) * 0.08; g.fill(); g.globalAlpha = 1; g.setLineDash([]);
+    if (s.direct !== undefined) {
+      const a = s.direct * Math.PI / 180;
+      g.lineWidth = 2; g.beginPath(); g.moveTo(cx - R * .98 * Math.sin(a), cy - R * .98 * Math.cos(a)); g.lineTo(cx - R * .8 * Math.sin(a), cy - R * .8 * Math.cos(a)); g.stroke();
+    }
+  }
+  // 頭（上が正面）
+  g.fillStyle = "#fff"; g.strokeStyle = css("--ink"); g.lineWidth = 1.2;
+  g.beginPath(); g.arc(cx, cy, 9, 0, Math.PI * 2); g.fill(); g.stroke();
+  g.beginPath(); g.moveTo(cx - 3.5, cy - 8.5); g.lineTo(cx, cy - 14); g.lineTo(cx + 3.5, cy - 8.5); g.fill(); g.stroke();
+  drawLegend(g, spec, W - 14, 30, font);
+}
+
+// =============================================================================
+// 窓の中身を組み立てる
+// =============================================================================
+/** 窓の中の「線の組」（条件 × 受音点）と、色の決め方。 */
+function combos(p) {
+  const recs = KINDS[p.kind].noRec ? [""] : p.recs;
+  const out = [];
+  p.conds.forEach(c => recs.forEach(r => out.push({ cond: c, rec: r })));
+  return out;
+}
+function styleFor(p, combo, method, i) {
+  const many = combos(p).length > 1;
+  const methods = KINDS[p.kind].methods;
+  const color = many || !methods ? PALETTE[i % PALETTE.length] : (method === "energy" ? css("--energy") : css("--phase"));
+  return { color, dash: method === "energy" };
+}
+function comboName(p, c) {
+  const parts = [];
+  if (catalog.shelves.length > 1 && p.shelf) parts.push(p.shelf);
+  if (c.cond) parts.push(c.cond);
+  if (c.rec) parts.push(c.rec === "平均" ? "平均" : c.rec.replace("rec", "R"));
+  return parts.join(" ");
+}
+const recLabel = r => r === "平均" ? "平均" : r.replace("rec", "R");
+
+async function build(p) {
+  const K = KINDS[p.kind];
+  const list = combos(p);
+  const methods = K.methods ? p.methods : ["phase"];
+  const spec = { series: [], legend: [], hlines: [], bands: [] };
+  const base = c => ({ shelf: p.shelf, rec: c.rec, cond: c.cond });
+  const missing = [];
+
+  if (p.kind === "decay") {
+    const [ra0, ra1] = rtany[p.band] || catalog.rt_any;
+    spec.title = `減衰曲線　${bandText(+p.band)} Hz`;
+    spec.xlabel = "時間 [s]"; spec.ylabel = "残留エネルギー [dB]";
+    let tEnd = 0.3;
+    for (const [i, c] of list.entries()) {
+      const d = await getJSON(`/api/decay?${q({ ...base(c), rtany: rtanyParam() })}`);
+      for (const m of methods) {
+        const part = d[m];
+        if (!part || !part.curves[p.band]) { missing.push(`${comboName(p, c)} ${METHOD_NAME[m]}`); continue; }
+        const st = styleFor(p, c, m, i);
+        const y = part.curves[p.band];
+        const fits = part.fits[p.band] || {};
+        const shown = Object.keys(p.lines).filter(k => p.lines[k] && fits[k]);
+        const where = y.findIndex(v => v !== null && v <= -65);
+        tEnd = Math.max(tEnd, (where > 0 ? where : y.length) * part.dt * 1.1);
+        spec.series.push({ t0: part.t0, dt: part.dt, y, color: st.color, dash: st.dash, width: 1.5,
+          fits: shown.map(k => ({ ...fits[k], name: k })), name: `${comboName(p, c)} ${METHOD_NAME[m]}` });
+        const vals = shown.map(k => `${k} ${fmt(fits[k].T)}`).join("  ");
+        spec.legend.push({ color: st.color, dash: st.dash, text: `${comboName(p, c)} ${METHOD_NAME[m]}${vals ? "　" + vals + " s" : ""}` });
+      }
+    }
+    spec.x = [0, Math.min(tEnd, 10)]; spec.y = [-70, 2];
+    if (p.lines.RTany) spec.bands.push({ y0: ra1, y1: ra0, color: "rgba(14,107,137,.06)" });
+    [-5, -25, -35].forEach(v => spec.hlines.push({ y: v }));
+  }
+
+  else if (K.freq && p.kind !== "absorption") {
+    const idx = p.index;
+    spec.xlog = true; spec.xlabel = "オクターブバンド中心周波数 [Hz]";
+    const unit = unitOf(idx);
+    spec.ylabel = p.kind === "rtdiff" ? `差 [${unit || "-"}]（位相考慮 − エネルギー和）` : `${INDEX_LABEL[idx]}${unit ? ` [${unit}]` : ""}`;
+    spec.title = p.kind === "rtdiff" ? `${INDEX_LABEL[idx]} の差（正＝位相考慮のほうが大きい）` : `${K.label}　${INDEX_LABEL[idx]}`;
+    let bands = catalog.bands;
+    let all = [];
+    for (const [i, c] of list.entries()) {
+      let d;
+      try { d = await getJSON(`/api/indices?${q({ ...base(c), rtany: rtanyParam() })}`); }
+      catch (e) { missing.push(`${comboName(p, c)}（${e.message}）`); continue; }
+      bands = d.bands;
+      if (p.kind === "rtdiff") {
+        const a = d.phase[idx], b = d.energy[idx];
+        if (!a || !b) { missing.push(comboName(p, c)); continue; }
+        const y = a.map((v, j) => v === null || b[j] === null ? null : v - b[j]);
+        const color = PALETTE[i % PALETTE.length];
+        spec.series.push({ x: bands, y, color, marker: true, name: comboName(p, c) });
+        spec.legend.push({ color, text: comboName(p, c) });
+        all.push(...y);
+      } else if (p.kind === "sti" || ENERGY_ONLY.has(idx)) {
+        const y = (d.only || {})[idx] || (idx === "Lp_A_dB" ? null : null);
+        if (!y) { missing.push(comboName(p, c)); continue; }
+        const color = combos(p).length > 1 ? PALETTE[i % PALETTE.length] : css("--energy");
+        spec.series.push({ x: bands, y, color, marker: true, name: comboName(p, c) });
+        spec.legend.push({ color, text: `${comboName(p, c)}${p.kind === "sti" && d.sti != null ? `　STI ${d.sti.toFixed(2)}` : ""}` });
+        all.push(...y);
+      } else {
+        for (const m of methods) {
+          const y = (d[m] || {})[idx];
+          if (!y) { missing.push(`${comboName(p, c)} ${METHOD_NAME[m]}`); continue; }
+          const st = styleFor(p, c, m, i);
+          spec.series.push({ x: bands, y, color: st.color, dash: st.dash, marker: true, name: `${comboName(p, c)} ${METHOD_NAME[m]}` });
+          spec.legend.push({ color: st.color, dash: st.dash, text: `${comboName(p, c)} ${METHOD_NAME[m]}` });
+          all.push(...y);
+        }
+        if (p.kind === "rt" && p.theory && i === 0) {
+          const greys = ["#6e7a75", "#9aa5a0", "#b9c2be"];
+          Object.entries(d.theory || {}).forEach(([name, y], k) => {
+            spec.series.push({ x: bands, y, color: greys[k % 3], width: 1.2, name: `理論値 ${name}`, dash: false });
+            spec.legend.push({ color: greys[k % 3], text: `理論値 ${name}（${c.cond}）` });
+            all.push(...y);
+          });
+        }
+      }
+    }
+    spec.x = [bands[0] / 1.5, bands[bands.length - 1] * 1.5];
+    const v = all.filter(x => x !== null && isFinite(x));
+    let lo = Math.min(...v), hi = Math.max(...v);
+    if (!v.length) { lo = 0; hi = 1; }
+    if (p.kind === "rtdiff") { const a = Math.max(Math.abs(lo), Math.abs(hi), 0.05); lo = -a; hi = a; spec.hlines.push({ y: 0, color: "#8b9691", dash: [] }); }
+    else if (unit === "s") { lo = 0; hi = hi * 1.15; }
+    else if (idx === "D50" || idx === "MTI") { lo = 0; hi = 1; }
+    else { const pad = (hi - lo) * 0.12 || 1; lo -= pad; hi += pad; }
+    spec.y = [lo, hi];
+  }
+
+  else if (p.kind === "absorption") {
+    spec.xlog = true; spec.xlabel = "オクターブバンド中心周波数 [Hz]"; spec.ylabel = "吸音率 α [-]（乱入射）";
+    const idx = p.index || "平均吸音率";
+    spec.title = `吸音率　${idx}`;
+    let bands = catalog.bands;
+    for (const [i, c] of list.entries()) {
+      const d = await getJSON(`/api/absorption?${q({ cond: c.cond })}`);
+      if (!d.bands) { missing.push(c.cond); continue; }
+      bands = d.bands;
+      if (idx === "全材料") {
+        d.materials.forEach((mat, k) => {
+          const color = PALETTE[k % PALETTE.length];
+          spec.series.push({ x: bands, y: mat.alpha, color, marker: true, dash: i > 0, name: `${c.cond} ${mat.name}` });
+          spec.legend.push({ color, dash: i > 0, text: `${list.length > 1 ? c.cond + " " : ""}${mat.name}（${mat.area != null ? mat.area.toFixed(1) : "—"} m²）` });
+        });
+      } else {
+        const y = idx === "平均吸音率" ? d.mean : (d.materials.find(mm => mm.name === idx) || {}).alpha;
+        if (!y) { missing.push(`${c.cond} ${idx}`); continue; }
+        const color = PALETTE[i % PALETTE.length];
+        spec.series.push({ x: bands, y, color, marker: true, name: c.cond });
+        spec.legend.push({ color, text: c.cond });
+      }
+    }
+    spec.x = [bands[0] / 1.5, bands[bands.length - 1] * 1.5]; spec.y = [0, 1.02];
+  }
+
+  else if (p.kind === "impulse") {
+    const db = p.ymode === "db";
+    spec.title = `インパルス応答　${p.band === "all" ? "全帯域" : bandText(+p.band) + " Hz"}　${db ? "（二乗・dB）" : "（振幅）"}`;
+    spec.xlabel = "時間 [s]"; spec.ylabel = db ? "レベル [dB]（最大を 0 dB）" : "振幅 [-]（最大で正規化）";
+    let tEnd = 0.2;
+    for (const [i, c] of list.entries()) {
+      const d = await getJSON(`/api/impulse?${q({ ...base(c), band: p.band })}`);
+      for (const m of methods) {
+        const st = styleFor(p, c, m, i);
+        if (m === "phase" && d.phase) {
+          let y = d.phase.y;
+          if (db) { const pk = Math.max(...y.map(Math.abs)) || 1; y = y.map(v => 10 * Math.log10(Math.max((v / pk) ** 2, 1e-12))); }
+          spec.series.push({ t0: d.phase.t0, dt: d.phase.dt, y, color: st.color, width: 1, name: `${comboName(p, c)} 波形` });
+          spec.legend.push({ color: st.color, text: `${comboName(p, c)} 位相考慮（波形）` });
+          const loud = lastAbove(y, db ? -60 : 1e-3, db);
+          tEnd = Math.max(tEnd, (loud + 1) * d.phase.dt * 1.05);
+        } else if (m === "energy" && d.energy) {
+          const y = db ? d.energy.db : d.energy.db.map(v => v === null ? null : Math.sqrt(Math.pow(10, v / 10)));
+          spec.series.push({ type: "stem", x: d.energy.t, y, color: st.color, base: db ? -120 : 0, name: `${comboName(p, c)} パルス列` });
+          spec.legend.push({ color: st.color, dash: true, text: `${comboName(p, c)} エネルギー和（パルス列${db ? "" : "・√E"}）` });
+          tEnd = Math.max(tEnd, Math.max(...d.energy.t) * 1.02);
+        } else missing.push(`${comboName(p, c)} ${METHOD_NAME[m]}`);
+      }
+    }
+    spec.x = [0, Math.min(tEnd, 10)]; spec.y = db ? [-80, 3] : [-1.05, 1.05];
+  }
+
+  else if (p.kind === "etc") {
+    spec.title = `エネルギー時間曲線　${p.band === "all" ? "全帯域" : bandText(+p.band) + " Hz"}（5 ms 移動平均）`;
+    spec.xlabel = "時間 [s]"; spec.ylabel = "レベル [dB]（最大を 0 dB）";
+    let tEnd = 0.3;
+    for (const [i, c] of list.entries()) {
+      const d = await getJSON(`/api/etc?${q({ ...base(c), band: p.band })}`);
+      for (const m of methods) {
+        const part = d[m];
+        if (!part) { missing.push(`${comboName(p, c)} ${METHOD_NAME[m]}`); continue; }
+        const st = styleFor(p, c, m, i);
+        spec.series.push({ t0: part.t0, dt: part.dt, y: part.y, color: st.color, dash: st.dash, width: 1.1, name: `${comboName(p, c)} ${METHOD_NAME[m]}` });
+        spec.legend.push({ color: st.color, dash: st.dash, text: `${comboName(p, c)} ${METHOD_NAME[m]}` });
+        tEnd = Math.max(tEnd, (lastAbove(part.y, -60, true) + 1) * part.dt * 1.05);
+      }
+    }
+    spec.x = [0, Math.min(tEnd, 10)]; spec.y = [-80, 3];
+  }
+
+  else if (p.kind === "direction") {
+    spec.polar = true;
+    const part = { all: "全体", early: "初期（50 ms まで）", late: "後期（50 ms 以降）" }[p.part];
+    spec.title = `到来方向（真上から・正面が上）　${p.band === "all" ? "全帯域" : bandText(+p.band) + " Hz"}　${part}`;
+    const raw = [];
+    for (const [i, c] of list.entries()) {
+      const d = await getJSON(`/api/direction?${q({ ...base(c), band: p.band, part: p.part })}`);
+      if (!d.energy) { missing.push(comboName(p, c)); continue; }
+      raw.push({ c, i, d });
+    }
+    const peak = Math.max(1e-30, ...raw.flatMap(r => r.d.energy));
+    raw.forEach(({ c, i, d }) => {
+      const color = PALETTE[i % PALETTE.length];
+      const y = d.energy.map(v => 10 * Math.log10(Math.max(v / peak, 1e-12)));
+      spec.series.push({ y, color, direct: d.direct_deg, name: comboName(p, c) });
+      spec.legend.push({ color, text: `${comboName(p, c)}　直接音 ${Math.round(d.direct_deg)}°` });
+    });
+    spec.y = [-30, 0];
+  }
+
+  if (!p.axis.auto) {
+    if (isFinite(p.axis.xmin) && isFinite(p.axis.xmax) && p.axis.xmax > p.axis.xmin && !spec.polar) spec.x = [p.axis.xmin, p.axis.xmax];
+    if (isFinite(p.axis.ymin) && isFinite(p.axis.ymax) && p.axis.ymax > p.axis.ymin) spec.y = [p.axis.ymin, p.axis.ymax];
+    if (spec.xlog === undefined && p.axis.xlog) spec.xlog = true;
+    if (p.axis.ylog && !spec.polar && spec.y[0] > 0) spec.ylog = true;
+  }
+  spec.missing = missing;
+  return spec;
+}
+function lastAbove(y, level, isDb) {
+  for (let i = y.length - 1; i >= 0; i--) { const v = y[i]; if (v !== null && (isDb ? v > level : Math.abs(v) > level)) return i; }
+  return y.length - 1;
+}
+
+// =============================================================================
+// 窓（DOM）
+// =============================================================================
+const grid = document.getElementById("grid");
+
+function renderAll() {
+  grid.dataset.count = count;
+  grid.innerHTML = "";
+  panes.slice(0, count).forEach((p, i) => grid.appendChild(paneElement(p, i)));
+  panes.slice(0, count).forEach((p, i) => refresh(i));
+  document.querySelectorAll("#countSeg button").forEach(b => b.setAttribute("aria-pressed", +b.dataset.count === count));
+}
+
+function option(value, label, selected) { return `<option value="${value}" ${selected ? "selected" : ""}>${label}</option>`; }
+
+function paneElement(p, i) {
+  const K = KINDS[p.kind];
+  const el = document.createElement("section");
+  el.className = "pane" + (i === focused ? " focus" : "");
+  el.dataset.index = i;
+  const kinds = Object.entries(KINDS).map(([k, v]) => option(k, v.label, k === p.kind)).join("");
+  const bandOpts = (K.bandAll ? option("all", "全帯域", p.band === "all") : "") + catalog.bands.map(b => option(String(b), `${bandText(b)} Hz`, String(b) === p.band)).join("");
+  let indexOpts = "";
+  if (p.kind === "absorption") indexOpts = ["平均吸音率", "全材料"].map(v => option(v, v, v === p.index)).join("");
+  else if (K.index && K.index.length > 1) indexOpts = K.index.map(v => option(v, INDEX_LABEL[v], v === p.index)).join("");
+  const shelfSel = catalog.shelves.length > 1 ? `<select data-act="shelf" title="音源の棚">${catalog.shelves.map(s => option(s, s || "（棚なし）", s === p.shelf)).join("")}</select>` : "";
+  el.innerHTML = `
+    <div class="bar">
+      <select class="kind" data-act="kind" aria-label="窓 ${i + 1} で見るもの">${kinds}</select>
+      ${indexOpts ? `<select data-act="index" aria-label="指標">${indexOpts}</select>` : ""}
+      ${K.band ? `<select data-act="band" aria-label="帯域">${bandOpts}</select>` : ""}
+      <span class="spacer"></span>
+      <button class="mini hold" data-act="hold" aria-pressed="${p.held.length > 0}" title="今の線を残す（押すたびに足していく）">ホールド${p.held.length ? ` ${p.held.length}` : ""}</button>
+      <button class="mini" data-act="clearhold" ${p.held.length ? "" : "disabled"} title="残した線を消す">消す</button>
+      <button class="mini" data-act="axis" aria-pressed="${!p.axis.auto}" title="縦軸・横軸の範囲">軸</button>
+      <button class="mini" data-act="copy" title="表示中の値を Excel に貼れる形でコピー">コピー</button>
+      <button class="mini" data-act="png" title="この窓を PNG で 図/見比べ/ に保存">画像</button>
+    </div>
+    <div class="bar">
+      ${shelfSel}
+      <button class="pick" data-act="conds" title="条件（複数選べる）">${summary(p.conds, catalog.conditions, "条件")}</button>
+      ${K.noRec ? "" : `<button class="pick" data-act="recs" title="受音点（複数選べる）">${summary(p.recs.map(recLabel), null, "受音点")}</button>`}
+      ${K.methods ? `<span class="lab">足し方</span>
+        <button class="mini m-phase" data-act="m-phase" aria-pressed="${p.methods.includes("phase")}">位相考慮</button>
+        <button class="mini m-energy" data-act="m-energy" aria-pressed="${p.methods.includes("energy")}">エネルギー和</button>` : ""}
+      ${p.kind === "decay" ? `<span class="checks">${["EDT", "T20", "T30", "RTany"].map(k => `<label><input type="checkbox" data-act="line" value="${k}" ${p.lines[k] ? "checked" : ""}>${k}</label>`).join("")}</span>` : ""}
+      ${p.kind === "rt" ? `<span class="checks"><label><input type="checkbox" data-act="theory" ${p.theory ? "checked" : ""}>理論値</label></span>` : ""}
+      ${p.kind === "impulse" ? `<div class="seg"><button data-act="ymode" data-v="amp" aria-pressed="${p.ymode !== "db"}">振幅</button><button data-act="ymode" data-v="db" aria-pressed="${p.ymode === "db"}">二乗 dB</button></div>` : ""}
+      ${p.kind === "direction" ? `<div class="seg">${[["all", "全体"], ["early", "初期"], ["late", "後期"]].map(([v, l]) => `<button data-act="part" data-v="${v}" aria-pressed="${p.part === v}">${l}</button>`).join("")}</div>` : ""}
+    </div>
+    <div class="plot"><canvas></canvas><div class="msg">読み込み中…</div></div>`;
+  el.addEventListener("pointerdown", () => { if (focused !== i) { focused = i; document.querySelectorAll(".pane").forEach((x, k) => x.classList.toggle("focus", k === i)); } });
+  el.querySelectorAll("[data-act]").forEach(ctrl => {
+    const act = ctrl.dataset.act;
+    const ev = ctrl.tagName === "SELECT" || ctrl.type === "checkbox" ? "change" : "click";
+    ctrl.addEventListener(ev, e => onControl(i, act, ctrl, e));
+  });
+  const canvas = el.querySelector("canvas");
+  canvas.addEventListener("mousemove", e => hover(i, e));
+  canvas.addEventListener("mouseleave", () => { document.getElementById("readout").style.display = "none"; redrawOnly(i); });
+  canvas.addEventListener("dblclick", () => { p.axis.auto = true; renderPane(i); });
+  return el;
+}
+function summary(values, all, noun) {
+  if (!values.length) return `${noun}：なし`;
+  if (all && values.length === all.length && all.length > 1) return `${noun}：全部（${all.length}）`;
+  return values.length === 1 ? values[0] || "（名前なし）" : `${values[0]} ほか ${values.length - 1}`;
+}
+function renderPane(i) {
+  const old = grid.children[i];
+  const el = paneElement(panes[i], i);
+  grid.replaceChild(el, old);
+  refresh(i);
+}
+
+function onControl(i, act, ctrl, e) {
+  const p = panes[i];
+  if (act === "kind") {
+    const kind = ctrl.value, K = KINDS[kind];
+    p.kind = kind;
+    if (K.index) { if (!K.index.includes(p.index)) p.index = K.index[0]; }
+    if (kind === "absorption") p.index = "平均吸音率";
+    if (K.freq && !K.noRec && !p.recs.length) p.recs = ["平均"];
+    if (!K.freq) { p.recs = p.recs.filter(r => r !== "平均"); if (!p.recs.length) p.recs = [(catalog.receivers[p.shelf] || ["rec1"])[0]]; }
+    if (p.band === "all" && !K.bandAll) p.band = String(catalog.bands.find(b => b === 500) || catalog.bands[0]);
+    p.axis = { auto: true }; p.held = [];
+    renderPane(i); return;
+  }
+  if (act === "index") { p.index = ctrl.value; p.axis.auto = true; }
+  else if (act === "band") p.band = ctrl.value;
+  else if (act === "shelf") { p.shelf = ctrl.value; const recs = catalog.receivers[p.shelf] || []; p.recs = p.recs.filter(r => r === "平均" || recs.includes(r)); if (!p.recs.length) p.recs = [recs[0]]; }
+  else if (act === "m-phase" || act === "m-energy") {
+    const m = act.slice(2);
+    p.methods = p.methods.includes(m) ? p.methods.filter(x => x !== m) : [...p.methods, m];
+    if (!p.methods.length) p.methods = [m];
+  }
+  else if (act === "line") p.lines[ctrl.value] = ctrl.checked;
+  else if (act === "theory") p.theory = ctrl.checked;
+  else if (act === "ymode") { p.ymode = ctrl.dataset.v; p.axis.auto = true; }
+  else if (act === "part") p.part = ctrl.dataset.v;
+  else if (act === "conds") { openPicker(ctrl, "条件", catalog.conditions.map(c => [c, c || "（名前なし）"]), p.conds, v => { p.conds = v; renderPane(i); }); return; }
+  else if (act === "recs") {
+    const recs = (catalog.receivers[p.shelf] || []).map(r => [r, recLabel(r)]);
+    if (KINDS[p.kind].freq) recs.push(["平均", "平均（全受音点）"]);
+    openPicker(ctrl, "受音点", recs, p.recs, v => { p.recs = v; renderPane(i); }); return;
+  }
+  else if (act === "hold") { hold(i); return; }
+  else if (act === "clearhold") { p.held = []; }
+  else if (act === "axis") { openAxis(ctrl, i); return; }
+  else if (act === "copy") { copyValues(i); return; }
+  else if (act === "png") { savePane(i); return; }
+  renderPane(i);
+}
+
+// ---- 選択の小窓 ----
+let openPop = null;
+function closePop() { if (openPop) { openPop.remove(); openPop = null; } }
+document.addEventListener("pointerdown", e => { if (openPop && !openPop.contains(e.target) && !e.target.closest("[data-act]")) closePop(); });
+document.addEventListener("keydown", e => { if (e.key === "Escape") closePop(); });
+function place(pop, anchor) {
+  const r = anchor.getBoundingClientRect();
+  pop.style.left = Math.min(r.left, innerWidth - pop.offsetWidth - 10) + "px";
+  pop.style.top = Math.min(r.bottom + 4, innerHeight - pop.offsetHeight - 10) + "px";
+}
+function openPicker(anchor, title, items, selected, done) {
+  closePop();
+  const pop = document.createElement("div");
+  pop.className = "pop";
+  pop.innerHTML = `<h3>${title}（複数選べる）</h3>` + items.map(([v, l]) => `<label><input type="checkbox" value="${v}" ${selected.includes(v) ? "checked" : ""}>${l}</label>`).join("")
+    + `<div class="row"><button class="btn" data-x="all">全部</button><button class="btn" data-x="none">解除</button><span style="flex:1"></span><button class="btn primary" data-x="ok">決定</button></div>`;
+  document.body.appendChild(pop); place(pop, anchor); openPop = pop;
+  const boxes = [...pop.querySelectorAll("input")];
+  pop.querySelector('[data-x="all"]').onclick = () => boxes.forEach(b => b.checked = true);
+  pop.querySelector('[data-x="none"]').onclick = () => boxes.forEach(b => b.checked = false);
+  pop.querySelector('[data-x="ok"]').onclick = () => {
+    const v = boxes.filter(b => b.checked).map(b => b.value);
+    closePop(); if (v.length) done(v); else toast("1 つ以上選んでください");
+  };
+}
+function openAxis(anchor, i) {
+  closePop();
+  const p = panes[i], spec = p._spec || {};
+  const a = p.axis;
+  const cur = (k, arr, j) => a[k] !== undefined && !a.auto ? a[k] : (arr ? +(+arr[j]).toPrecision(4) : "");
+  const pop = document.createElement("div");
+  pop.className = "pop";
+  pop.innerHTML = `<h3>軸の範囲（窓 ${i + 1}）</h3>
+    <label><input type="checkbox" data-k="auto" ${a.auto ? "checked" : ""}>自動（ダブルクリックでも戻る）</label>
+    <div class="axis-grid" style="margin-top:6px">
+      ${spec.polar ? "" : `<span>横軸</span><input type="number" step="any" data-k="xmin" value="${cur("xmin", spec.x, 0)}"><span>〜</span><input type="number" step="any" data-k="xmax" value="${cur("xmax", spec.x, 1)}">`}
+      <span>縦軸</span><input type="number" step="any" data-k="ymin" value="${cur("ymin", spec.y, 0)}"><span>〜</span><input type="number" step="any" data-k="ymax" value="${cur("ymax", spec.y, 1)}">
+    </div>
+    ${spec.polar ? "" : `<label style="margin-top:6px"><input type="checkbox" data-k="ylog" ${a.ylog ? "checked" : ""}>縦軸を対数にする（正の値のとき）</label>`}
+    <div class="row"><span style="flex:1"></span><button class="btn primary" data-x="ok">適用</button></div>`;
+  document.body.appendChild(pop); place(pop, anchor); openPop = pop;
+  const inputs = [...pop.querySelectorAll("[data-k]")];
+  inputs.filter(x => x.type === "number").forEach(x => x.addEventListener("input", () => pop.querySelector('[data-k="auto"]').checked = false));
+  const apply = () => {
+    const next = {};
+    inputs.forEach(x => next[x.dataset.k] = x.type === "checkbox" ? x.checked : parseFloat(x.value));
+    p.axis = next; closePop(); renderPane(i);
+  };
+  pop.querySelector('[data-x="ok"]').onclick = apply;
+  pop.addEventListener("keydown", e => { if (e.key === "Enter") apply(); });
+}
+
+// ---- 描く ----
+async function refresh(i) {
+  const p = panes[i];
+  const el = grid.children[i];
+  if (!el) return;
+  const msg = el.querySelector(".msg");
+  const token = (p._token = (p._token || 0) + 1);
+  msg.textContent = "読み込み中…"; msg.style.display = "grid";
+  try {
+    const spec = await build(p);
+    if (token !== p._token) return;
+    p._spec = spec;
+    if (!spec.series.length && !p.held.length) {
+      msg.textContent = spec.missing.length ? `この組み合わせの結果がありません：${spec.missing.slice(0, 3).join("、")}` : "表示するものがありません";
+      el.querySelector("canvas").getContext("2d").clearRect(0, 0, 9999, 9999);
+      return;
+    }
+    msg.style.display = "none";
+    redrawOnly(i);
+  } catch (e) {
+    if (token !== p._token) return;
+    msg.textContent = `読めませんでした：${e.message}`;
+  }
+}
+function withHeld(p) {
+  const spec = p._spec;
+  if (!spec) return null;
+  // 帯域をまたいでも残す（「500 Hz と 1 kHz を重ねる」ができるように）。指標が違うものは出さない
+  const held = p.held.filter(h => h.kind === p.kind && h.index === p.index);
+  if (!held.length) return spec;
+  const merged = Object.assign({}, spec);
+  // ★残した線は灰色の濃淡で描く（今の線と同じ色だと見分けられない）。
+  //   足し方の実線／破線はそのまま残す
+  const greys = ["#7d8783", "#a3aca8", "#5f6864", "#bcc4c0"];
+  merged.series = [...held.flatMap((h, k) => h.series.map(s => ({ ...s, color: greys[k % greys.length], alpha: 0.9, width: 1.2, fits: [], name: `保持${k + 1} ${s.name}` }))), ...spec.series];
+  merged.legend = [...held.flatMap((h, k) => h.series.map(s => ({ color: greys[k % greys.length], dash: s.dash, text: `保持${k + 1}：${s.name}` }))), ...spec.legend];
+  return merged;
+}
+function redrawOnly(i) {
+  const p = panes[i], el = grid.children[i];
+  if (!el || !p._spec) return;
+  const spec = withHeld(p);
+  drawPlot(el.querySelector("canvas"), spec);
+  p._drawn = spec;
+}
+function hold(i) {
+  const p = panes[i];
+  if (!p._spec || !p._spec.series.length) { toast("残す線がありません"); return; }
+  const label = `${p._spec.title.replace(/\s+/g, " ")}　${p.conds.join("・")}${KINDS[p.kind].noRec ? "" : " " + p.recs.map(recLabel).join("・")}`;
+  const tag = KINDS[p.kind].band ? `${p.band === "all" ? "全帯域" : bandText(+p.band) + " Hz"} ` : "";
+  p.held.push({ kind: p.kind, index: p.index, band: p.band, label, series: p._spec.series.map(s => ({ ...s, name: tag + s.name })) });
+  toast(`線を残しました（${p.held.length} 組）。条件などを切り替えると重ねて見られます`);
+  renderPane(i);
+}
+
+// ---- カーソルで値を読む ----
+function hover(i, e) {
+  const p = panes[i], spec = p._drawn, ro = document.getElementById("readout");
+  if (!spec || spec.polar || !spec._map) { ro.style.display = "none"; return; }
+  const canvas = e.currentTarget, r = canvas.getBoundingClientRect();
+  const px = e.clientX - r.left;
+  const m = spec._map;
+  if (px < m.X0 || px > m.X1) { ro.style.display = "none"; return; }
+  let x = m.invX(px);
+  const rows = [];
+  if (spec.xlog) {
+    const bands = spec.series[0]?.x || catalog.bands;
+    x = bands.reduce((a, b) => Math.abs(Math.log(b / x)) < Math.abs(Math.log(a / x)) ? b : a, bands[0]);
+    rows.push(`<b>${bandText(x)} Hz</b>`);
+    spec.series.forEach(s => { const j = (s.x || []).indexOf(x); if (j >= 0 && s.y[j] !== null) rows.push(`<span style="color:${s.color}">${s.name}　${fmt(s.y[j])}</span>`); });
+  } else {
+    rows.push(`<b>${x.toFixed(3)} s</b>`);
+    spec.series.forEach(s => {
+      if (s.dt === undefined) return;
+      const j = Math.round((x - s.t0) / s.dt);
+      if (j >= 0 && j < s.y.length && s.y[j] !== null) rows.push(`<span style="color:${s.color}">${s.name}　${fmt(s.y[j])}</span>`);
+    });
+  }
+  redrawOnly(i);
+  const g = canvas.getContext("2d");
+  const cx = spec.xlog ? m.X(x) : px;
+  g.save(); g.strokeStyle = "rgba(28,36,32,.45)"; g.setLineDash([3, 3]); g.beginPath(); g.moveTo(cx, m.Y0); g.lineTo(cx, m.Y1); g.stroke(); g.restore();
+  ro.innerHTML = rows.join("<br>");
+  ro.style.display = "block";
+  ro.style.left = Math.min(e.clientX + 14, innerWidth - ro.offsetWidth - 8) + "px";
+  ro.style.top = Math.min(e.clientY + 12, innerHeight - ro.offsetHeight - 8) + "px";
+}
+
+// ---- 値をコピー・画像 ----
+function copyValues(i) {
+  const spec = panes[i]._drawn;
+  if (!spec) return;
+  let text = "";
+  if (spec.xlog) {
+    const bands = spec.series[0].x;
+    text = ["系列", ...bands.map(b => `${bandText(b)} Hz`)].join("\t") + "\n";
+    spec.series.forEach(s => text += [s.name, ...s.x.map((_, j) => s.y[j] === null ? "" : s.y[j])].join("\t") + "\n");
+  } else if (spec.polar) {
+    const n = spec.series[0].y.length;
+    text = ["系列", ...Array.from({ length: n }, (_, k) => `${(k + 0.5) * 360 / n}°`)].join("\t") + "\n";
+    spec.series.forEach(s => text += [s.name, ...s.y.map(v => v.toFixed(2))].join("\t") + "\n");
+  } else {
+    const dense = spec.series.filter(s => s.dt !== undefined);
+    if (!dense.length) { toast("この図は値のコピーに対応していません"); return; }
+    const step = Math.max(...dense.map(s => s.dt));
+    const tmax = spec.x[1];
+    text = ["時間 [s]", ...dense.map(s => s.name)].join("\t") + "\n";
+    for (let t = spec.x[0]; t <= tmax + 1e-9; t += step) {
+      text += [t.toFixed(4), ...dense.map(s => { const j = Math.round((t - s.t0) / s.dt); const v = s.y[j]; return v === null || v === undefined ? "" : v; })].join("\t") + "\n";
+    }
+    (dense[0].fits || []).length && dense.forEach(s => (s.fits || []).forEach(f => text += `${s.name} ${f.name}\t${f.T}\n`));
+  }
+  navigator.clipboard.writeText(text).then(() => toast("値をコピーしました（Excel に貼れます）"), () => toast("コピーできませんでした"));
+}
+async function postPng(canvas, name) {
+  const blob = await new Promise(r => canvas.toBlob(r, "image/png"));
+  const res = await fetch(`/api/figure?name=${encodeURIComponent(name)}`, { method: "POST", body: blob });
+  const body = await res.json();
+  toast(body.path ? `保存しました：${body.path}` : `保存できませんでした：${body.error}`, 6000);
+}
+function stamp() { const d = new Date(); const z = n => String(n).padStart(2, "0"); return `${d.getFullYear()}${z(d.getMonth() + 1)}${z(d.getDate())}_${z(d.getHours())}${z(d.getMinutes())}${z(d.getSeconds())}`; }
+function savePane(i) {
+  const p = panes[i];
+  redrawOnly(i);
+  postPng(grid.children[i].querySelector("canvas"), `${catalog.room}_${KINDS[p.kind].label}_${stamp()}`);
+}
+document.getElementById("saveAll").onclick = () => {
+  const canvases = [...grid.querySelectorAll("canvas")].slice(0, count);
+  panes.slice(0, count).forEach((_, i) => redrawOnly(i));
+  const cols = count === 6 ? 3 : count === 1 ? 1 : 2;
+  const rows = Math.ceil(canvases.length / cols);
+  const w = Math.max(...canvases.map(c => c.width)), h = Math.max(...canvases.map(c => c.height));
+  const out = document.createElement("canvas");
+  out.width = w * cols; out.height = h * rows;
+  const g = out.getContext("2d"); g.fillStyle = "#fff"; g.fillRect(0, 0, out.width, out.height);
+  canvases.forEach((c, k) => g.drawImage(c, (k % cols) * w, Math.floor(k / cols) * h));
+  postPng(out, `${catalog.room}_見比べ_${stamp()}`);
+};
+
+// =============================================================================
+// RTany の表
+// =============================================================================
+function renderRtany() {
+  const t = document.getElementById("rtanyTable");
+  const [d0, d1] = catalog.rt_any;
+  t.innerHTML = `<tr><th>帯域</th><th>開始 dB</th><th>終了 dB</th></tr>
+    <tr class="all"><td>全帯域</td><td><input type="number" step="1" id="allStart" value="${d0}"></td><td><input type="number" step="1" id="allEnd" value="${d1}"></td></tr>`
+    + catalog.bands.map(b => {
+      const [s, e] = rtany[String(b)] || [d0, d1];
+      const changed = s !== d0 || e !== d1 ? "changed" : "";
+      return `<tr><td>${bandText(b)} Hz</td><td><input type="number" step="1" class="${changed}" data-b="${b}" data-k="0" value="${s}"></td><td><input type="number" step="1" class="${changed}" data-b="${b}" data-k="1" value="${e}"></td></tr>`;
+    }).join("");
+  t.querySelectorAll("input[data-b]").forEach(inp => inp.addEventListener("change", () => {
+    const b = inp.dataset.b, v = parseFloat(inp.value);
+    const cur = rtany[b] ? [...rtany[b]] : [...catalog.rt_any];
+    cur[+inp.dataset.k] = v;
+    if (!(cur[1] < cur[0])) { toast("終了は開始より低い値にしてください（例：-5 → -35）"); renderRtany(); return; }
+    rtany[b] = cur; afterRtany();
+  }));
+  ["allStart", "allEnd"].forEach(id => document.getElementById(id).addEventListener("change", () => {
+    const s = parseFloat(document.getElementById("allStart").value), e = parseFloat(document.getElementById("allEnd").value);
+    if (!(e < s)) { toast("終了は開始より低い値にしてください"); return; }
+    catalog.bands.forEach(b => rtany[String(b)] = [s, e]); afterRtany();
+  }));
+}
+let rtanyTimer = null;
+function afterRtany() {
+  renderRtany();
+  clearTimeout(rtanyTimer);
+  rtanyTimer = setTimeout(() => {
+    panes.slice(0, count).forEach((p, i) => { if (["decay", "rt", "rtdiff"].includes(p.kind)) refresh(i); });
+  }, 250);
+}
+document.getElementById("rtanyReset").onclick = () => { rtany = {}; catalog.bands.forEach(b => rtany[String(b)] = [...catalog.rt_any]); afterRtany(); };
+
+// =============================================================================
+// はじめ
+// =============================================================================
+document.querySelectorAll("#countSeg button").forEach(b => b.onclick = () => { count = +b.dataset.count; renderAll(); });
+document.getElementById("railToggle").onclick = () => { document.getElementById("app").classList.toggle("rail-closed"); setTimeout(() => panes.slice(0, count).forEach((_, i) => redrawOnly(i)), 30); };
+document.getElementById("rescan").onclick = async () => {
+  cache.clear();
+  catalog = await (await fetch("/api/catalog?rescan=1")).json();
+  toast("結果を読み直しました"); renderAll();
+};
+document.getElementById("saveLayout").onclick = async () => {
+  const data = { count, rtany, panes: panes.map(p => { const { held, _spec, _drawn, _token, ...rest } = p; return rest; }) };
+  const res = await fetch("/api/layout", { method: "POST", body: JSON.stringify(data) });
+  const body = await res.json();
+  toast(body.path ? `並びを保存しました：${body.path}` : `保存できませんでした：${body.error}`, 5000);
+};
+let resizeTimer = null;
+addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => panes.slice(0, count).forEach((_, i) => redrawOnly(i)), 120); });
+setInterval(() => fetch("/api/ping").catch(() => {}), 30000);
+addEventListener("pagehide", () => navigator.sendBeacon("/api/bye"));
+
+(async function start() {
+  catalog = await (await fetch("/api/catalog")).json();
+  document.getElementById("where").textContent = `${catalog.project}　条件 ${catalog.conditions.length}・受音点 ${(catalog.receivers[catalog.shelves[0]] || []).length}${catalog.shelves.length > 1 ? `・音源の棚 ${catalog.shelves.length}` : ""}`;
+  document.title = `結果を見比べる｜${catalog.project}`;
+  catalog.bands.forEach(b => rtany[String(b)] = [...catalog.rt_any]);
+  const saved = await (await fetch("/api/layout")).json();
+  const base = defaultLayout();
+  if (saved && Array.isArray(saved.panes)) {
+    count = saved.count || 4;
+    Object.assign(rtany, saved.rtany || {});
+    saved.panes.forEach((sp, k) => {
+      if (!KINDS[sp.kind]) return;
+      const p = Object.assign(defaultPane(sp.kind), sp, { held: [] });
+      p.conds = p.conds.filter(c => catalog.conditions.includes(c));
+      if (!p.conds.length) p.conds = [catalog.conditions[0] || ""];
+      if (!catalog.shelves.includes(p.shelf)) p.shelf = catalog.shelves[0] || "";
+      base[k] = p;
+    });
+  }
+  panes.push(...base);
+  if (!catalog.conditions.length) {
+    grid.innerHTML = `<div class="pane"><div class="plot"><div class="msg">このプロジェクトにはまだ計算結果がありません。設定画面の「計算する ▶」を先に実行してください。</div></div></div>`;
+    return;
+  }
+  renderRtany();
+  renderAll();
+})();
+</script>
+</body>
+</html>
