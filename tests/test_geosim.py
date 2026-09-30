@@ -6859,6 +6859,15 @@ def test_result_viewer():
         each = [r.indices("", rec, "条件A", {})["energy"]["T20"][0] for rec in ("rec1", "rec2")]
         mean = r.indices("", "平均", "条件A", {})["energy"]["T20"][0]
         check("受音点の平均（残響時間は算術平均）", abs(mean - np.mean(each)) < 1e-3, f"{mean} / {each}")
+        avg = r.decay("", "平均", "条件A", {})
+        t_avg = avg["energy"]["fits"]["500"]["T20"]["T"]
+        check("減衰曲線の「平均」は各点の曲線をエネルギーで平均（2 点・T20 は 2 点の間に入る）",
+              avg["count"] == 2 and min(each) - 1e-6 <= t_avg <= max(each) + 1e-6
+              and avg["phase"]["curves"]["500"][0] == 0.0, f"{t_avg:.3f} / {each}")
+        etc = r.time_curve("", "平均", "条件A", "500")
+        check("エネルギー時間曲線・到来方向も「平均」を選べる（割合の平均は合計 1）",
+              etc["count"] == 2 and max(etc["energy"]["y"]) == 0.0
+              and abs(sum(r.direction("", "平均", "条件A", "all", "all")["energy"]) - 1.0) < 1e-6)
         ab_ = r.absorption("条件A")
         check("★吸音率の面積は後の区分（垂直入射・面積は空欄）に上書きされない",
               ab_["materials"][0]["area"] == 12.5 and ab_["materials"][0]["alpha"] == [0.3, 0.4],

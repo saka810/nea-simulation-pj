@@ -286,35 +286,71 @@ class Results:
                 "xi": info["xi"], "start": start, "end": end}
         return out
 
-    def decay(self, shelf, rec, cond, rt_any):
-        """両方の足し方の減衰曲線（1 ms 刻み）と、EDT/T20/T30/RTany の回帰。"""
+    def _full_curves(self, shelf, rec, cond):
+        """全分解能の減衰曲線 {足し方: (刻み, {帯域: dB})}。"""
         files = self._files(shelf, rec, cond)
         out = {}
         phase = self._phase_decay(files)
         if phase is not None:
-            dt, curves = phase
+            out["phase"] = phase
+        p = self.pulses(shelf, rec, cond)
+        if p is not None and len(p["time"]):
+            full = es.decay_curves(p["time"], p["received"])
+            out["energy"] = (1.0 / es.FS, {_band_key(fc): full[j]
+                                           for j, fc in enumerate(p["frequencies"])})
+        return out
+
+    def _receivers_of(self, shelf, cond):
+        recs = [r for r in self.receivers.get(shelf, []) if (shelf, r, cond) in self.entries]
+        if not recs:
+            raise KeyError(f"{shelf}/{AVERAGE}/{cond}")
+        return recs
+
+    @staticmethod
+    def _mean_linear(arrays):
+        """長さの違う配列を後ろに 0 を足して揃え、平均する。"""
+        n = max(len(a) for a in arrays)
+        return np.mean([np.pad(a, (0, n - len(a))) for a in arrays], axis=0)
+
+    def _average_curves(self, shelf, cond):
+        """★受音点の平均の減衰曲線。各点の曲線（0 dB に揃えたもの）を**エネルギーで
+        平均してから** dB に戻す（ISO 3382-2 の減衰曲線の平均）。周波数特性の窓の
+        「平均」は各点の値の算術平均（`summary.py` と同じ）なので、少し違う値になる。"""
+        each = [self._full_curves(shelf, r, cond) for r in self._receivers_of(shelf, cond)]
+        out = {}
+        for method in ("phase", "energy"):
+            parts = [e[method] for e in each if method in e]
+            if not parts:
+                continue
+            dt = parts[0][0]
+            curves = {}
+            for fc in parts[0][1]:
+                linear = self._mean_linear([10.0 ** (np.asarray(pt[1][fc], float) / 10.0)
+                                            for pt in parts if fc in pt[1]])
+                with np.errstate(divide="ignore"):
+                    curves[fc] = 10.0 * np.log10(np.maximum(linear / (linear[0] or 1.0), 1e-300))
+            out[method] = (dt, curves)
+        return out, len(each)
+
+    def decay(self, shelf, rec, cond, rt_any):
+        """両方の足し方の減衰曲線（1 ms 刻み）と、EDT/T20/T30/RTany の回帰。"""
+        count = 1
+        if rec == AVERAGE:
+            full, count = self._average_curves(shelf, cond)
+        else:
+            full = self._full_curves(shelf, rec, cond)
+        out = {"count": count}
+        for method, (dt, curves) in full.items():
             step = max(1, int(round(DISPLAY_STEP / dt)))
             fits = {}
             for fc, curve in curves.items():
                 ranges = dict(es.RANGES)
                 ranges["RTany"] = tuple(rt_any.get(fc, rt_any.get("*", self.rt_any)))
-                fits[fc] = self._fits(curve.astype(float), dt, ranges)
-            out["phase"] = {"t0": 0.0, "dt": dt * step,
-                            "curves": {fc: _round(np.maximum(c[::step], -200.0), 2)
-                                       for fc, c in curves.items()},
-                            "fits": fits}
-        p = self.pulses(shelf, rec, cond)
-        if p is not None and len(p["time"]):
-            full = es.decay_curves(p["time"], p["received"])
-            step = int(round(es.FS * DISPLAY_STEP))
-            fits, curves = {}, {}
-            for j, fc in enumerate(p["frequencies"]):
-                key = _band_key(fc)
-                ranges = dict(es.RANGES)
-                ranges["RTany"] = tuple(rt_any.get(key, rt_any.get("*", self.rt_any)))
-                fits[key] = self._fits(full[j], 1.0 / es.FS, ranges)
-                curves[key] = _round(np.maximum(full[j, ::step], -200.0), 2)
-            out["energy"] = {"t0": 0.0, "dt": step / es.FS, "curves": curves, "fits": fits}
+                fits[fc] = self._fits(np.asarray(curve, float), dt, ranges)
+            out[method] = {"t0": 0.0, "dt": dt * step,
+                           "curves": {fc: _round(np.maximum(np.asarray(c, float)[::step], -200.0), 2)
+                                      for fc, c in curves.items()},
+                           "fits": fits}
         return out
 
     # ---- 周波数特性（残響時間・明瞭度・音圧レベル・STI）---------------------------
@@ -468,8 +504,8 @@ class Results:
         keys = [_band_key(f) for f in p["frequencies"]]
         return keys.index(_band_key(band))
 
-    def time_curve(self, shelf, rec, cond, band):
-        """エネルギー時間曲線（1 ms 刻み・最大を 0 dB）。"""
+    def _time_linear(self, shelf, rec, cond, band):
+        """エネルギー時間曲線（線形・最大を 1、1 ms 刻み・5 ms 移動平均）{足し方: (刻み, 配列)}。"""
         out = {}
         loaded = self.impulse(shelf, rec, cond)
         if loaded is not None:
@@ -484,9 +520,7 @@ class Results:
             # 刻みの中の最大（間引きで山を落とさない）
             n = len(envelope) // step
             env = envelope[:n * step].reshape(n, step).max(axis=1)
-            with np.errstate(divide="ignore"):
-                db = 10.0 * np.log10(np.maximum(env / (env.max() or 1.0), 1e-12))
-            out["phase"] = {"t0": 0.0, "dt": step / fs, "y": _round(db, 2)}
+            out["phase"] = (step / fs, env / (env.max() or 1.0))
         p = self.pulses(shelf, rec, cond)
         if p is not None and len(p["time"]):
             energy = p["received"]
@@ -496,14 +530,43 @@ class Results:
             grid = es.energy_grid(p["time"], e, 1.0 / DISPLAY_STEP)[0]
             window = max(1, int(round(ENVELOPE_S / DISPLAY_STEP)))
             smooth = np.convolve(grid, np.ones(window) / window, mode="same")
+            out["energy"] = (DISPLAY_STEP, smooth / (smooth.max() or 1.0))
+        return out
+
+    def time_curve(self, shelf, rec, cond, band):
+        """エネルギー時間曲線（1 ms 刻み・最大を 0 dB）。平均は各点を最大 1 に揃えてから平均。"""
+        count = 1
+        if rec == AVERAGE:
+            each = [self._time_linear(shelf, r, cond, band) for r in self._receivers_of(shelf, cond)]
+            count = len(each)
+            linear = {}
+            for method in ("phase", "energy"):
+                parts = [e[method] for e in each if method in e]
+                if parts:
+                    mean = self._mean_linear([pt[1] for pt in parts])
+                    linear[method] = (parts[0][0], mean / (mean.max() or 1.0))
+        else:
+            linear = self._time_linear(shelf, rec, cond, band)
+        out = {"count": count}
+        for method, (dt, y) in linear.items():
             with np.errstate(divide="ignore"):
-                db = 10.0 * np.log10(np.maximum(smooth / (smooth.max() or 1.0), 1e-12))
-            out["energy"] = {"t0": 0.0, "dt": DISPLAY_STEP, "y": _round(np.maximum(db, -120.0), 2)}
+                db = 10.0 * np.log10(np.maximum(y, 1e-12))
+            out[method] = {"t0": 0.0, "dt": dt, "y": _round(np.maximum(db, -120.0), 2)}
         return out
 
     # ---- 到来方向 ------------------------------------------------------------
 
     def direction(self, shelf, rec, cond, band, part):
+        if rec == AVERAGE:
+            # ★各点の「全エネルギーに対する割合」を平均する（近い点が勝たないように）。
+            #   方位は点ごとに頭の向きからの相対。直接音の向きは点ごとに違うので出さない
+            each = [self.direction(shelf, r, cond, band, part)
+                    for r in self._receivers_of(shelf, cond)]
+            each = [e for e in each if e]
+            if not each:
+                return {}
+            return {"sectors": SECTORS, "count": len(each), "direct_deg": None,
+                    "energy": _round(np.mean([e["energy"] for e in each], axis=0), 8)}
         p = self.pulses(shelf, rec, cond)
         if p is None or p.get("direction") is None:
             return {}

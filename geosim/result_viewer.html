@@ -448,7 +448,7 @@ function drawPolar(g, W, H, spec, font) {
       k ? g.lineTo(px, py) : g.moveTo(px, py);
     }
     g.stroke(); g.globalAlpha = (s.alpha ?? 1) * 0.08; g.fill(); g.globalAlpha = 1; g.setLineDash([]);
-    if (s.direct !== undefined) {
+    if (s.direct !== undefined && s.direct !== null) {
       const a = s.direct * Math.PI / 180;
       g.lineWidth = 2; g.beginPath(); g.moveTo(cx - R * .98 * Math.sin(a), cy - R * .98 * Math.cos(a)); g.lineTo(cx - R * .8 * Math.sin(a), cy - R * .8 * Math.cos(a)); g.stroke();
     }
@@ -512,7 +512,8 @@ async function build(p) {
         spec.series.push({ t0: part.t0, dt: part.dt, y, color: st.color, dash: st.dash, width: 1.5,
           fits: shown.map(k => ({ ...fits[k], name: k })), name: `${comboName(p, c)} ${METHOD_NAME[m]}` });
         const vals = shown.map(k => `${k} ${fmt(fits[k].T)}`).join("  ");
-        spec.legend.push({ color: st.color, dash: st.dash, text: `${comboName(p, c)} ${METHOD_NAME[m]}${vals ? "　" + vals + " s" : ""}` });
+        const avg = c.rec === "平均" ? `（${d.count} 点の曲線を平均）` : "";
+        spec.legend.push({ color: st.color, dash: st.dash, text: `${comboName(p, c)}${avg} ${METHOD_NAME[m]}${vals ? "　" + vals + " s" : ""}` });
       }
     }
     spec.x = [0, Math.min(tEnd, 10)]; spec.y = [-70, 2];
@@ -664,7 +665,7 @@ async function build(p) {
       const color = PALETTE[i % PALETTE.length];
       const y = d.energy.map(v => 10 * Math.log10(Math.max(v / peak, 1e-12)));
       spec.series.push({ y, color, direct: d.direct_deg, name: comboName(p, c) });
-      spec.legend.push({ color, text: `${comboName(p, c)}　直接音 ${Math.round(d.direct_deg)}°` });
+      spec.legend.push({ color, text: d.direct_deg == null ? `${comboName(p, c)}（${d.count} 点の割合を平均）` : `${comboName(p, c)}　直接音 ${Math.round(d.direct_deg)}°` });
     });
     spec.y = [-30, 0];
   }
@@ -766,7 +767,7 @@ function onControl(i, act, ctrl, e) {
     if (K.index) { if (!K.index.includes(p.index)) p.index = K.index[0]; }
     if (kind === "absorption") p.index = "平均吸音率";
     if (K.freq && !K.noRec && !p.recs.length) p.recs = ["平均"];
-    if (!K.freq) { p.recs = p.recs.filter(r => r !== "平均"); if (!p.recs.length) p.recs = [(catalog.receivers[p.shelf] || ["rec1"])[0]]; }
+    if (kind === "impulse") { p.recs = p.recs.filter(r => r !== "平均"); if (!p.recs.length) p.recs = [(catalog.receivers[p.shelf] || ["rec1"])[0]]; }
     if (p.band === "all" && !K.bandAll) p.band = String(catalog.bands.find(b => b === 500) || catalog.bands[0]);
     p.axis = { auto: true }; p.held = [];
     renderPane(i); return;
@@ -786,7 +787,8 @@ function onControl(i, act, ctrl, e) {
   else if (act === "conds") { openPicker(ctrl, "条件", catalog.conditions.map(c => [c, c || "（名前なし）"]), p.conds, v => { p.conds = v; renderPane(i); }); return; }
   else if (act === "recs") {
     const recs = (catalog.receivers[p.shelf] || []).map(r => [r, recLabel(r)]);
-    if (KINDS[p.kind].freq) recs.push(["平均", "平均（全受音点）"]);
+    // ★平均はインパルス応答以外で選べる（波形を平均すると位相で打ち消し合うので意味が無い）
+    if (p.kind !== "impulse") recs.push(["平均", KINDS[p.kind].freq ? "平均（各点の値の平均）" : "平均（全受音点）"]);
     openPicker(ctrl, "受音点", recs, p.recs, v => { p.recs = v; renderPane(i); }); return;
   }
   else if (act === "hold") { hold(i); return; }
