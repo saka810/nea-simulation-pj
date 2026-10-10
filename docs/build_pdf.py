@@ -404,16 +404,28 @@ def html_to_pdf(html_path, pdf_path, browser=None, verbose=True):
         raise RuntimeError("Edge か Chrome が見つかりません（PDF 化に使います）。"
                            "HTML はできているので、それをブラウザで開いて"
                            "「印刷 → PDF として保存」でも同じものが作れます")
+    # ★★URL は `as_uri()` で作る（2026-10-10）。`file:///C:/…/技術説明書.html` と
+    #   日本語をそのまま渡すと Edge が ERR_FILE_NOT_FOUND の 1 ページを PDF にしていた
+    #   （2026-09-17 以降の技術説明書などがその中身でコミットされていた）
+    # ★★**いったん別名に書いてから置き換える**。前の PDF が残っていると
+    #   「書けた」と取り違えて、作れていないことに気づけなかった
+    import pathlib
+
+    uri = pathlib.Path(os.path.abspath(html_path)).as_uri()
+    scratch = os.path.splitext(pdf_path)[0] + ".__printing__.pdf"
+    if os.path.exists(scratch):
+        os.remove(scratch)
     command = [browser, "--headless=new", "--disable-gpu", "--no-pdf-header-footer",
-               f"--print-to-pdf={pdf_path}", f"file:///{html_path}"]
+               f"--print-to-pdf={scratch}", uri]
     result = subprocess.run(command, capture_output=True, timeout=180)
-    if not os.path.exists(pdf_path):
+    if not os.path.exists(scratch):
         # 古い Edge は `--headless=new` を知らないので、素の --headless で試す
         command[1] = "--headless"
         result = subprocess.run(command, capture_output=True, timeout=180)
-    if not os.path.exists(pdf_path):
+    if not os.path.exists(scratch) or os.path.getsize(scratch) == 0:
         raise RuntimeError(f"PDF を作れませんでした: "
                            f"{result.stderr.decode('utf-8', 'replace')[:400]}")
+    os.replace(scratch, pdf_path)
     return pdf_path
 
 
