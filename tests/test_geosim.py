@@ -7099,6 +7099,171 @@ def test_html_viewer_patches():
           len(picked) == len(editor.groups) + 1, f"{len(picked)} 本")
 
 
+def test_reflection_filter_and_contribution():
+    """[65] 定在波を反射回数で絞る（G-42）／効いている壁・方向を出す（G-43）。
+
+    ★2026-10-02 ユーザー要望（2026-10-10 に着手）
+    > 1〜3 回反射くらいだけでどうかを確認した方が良いかなと思っています。
+    > 〇Hz の定在波がどの方向からあるいはどの壁由来の伝搬経路が影響しているかを
+    > 確認できると、その壁を吸音すれば良い、とかがわかるかな
+    """
+    print("\n[65] 反射回数で絞る（G-42）／効いている壁・方向（G-43）")
+    import copy
+    import tempfile
+
+    import atmosphere as at_
+    import frequency_response as fr
+    import mode_shape as ms
+    import path_cache as pc
+    import path_contribution as pcn
+    import project as pj
+    import run_project as rp
+
+    # ---- ① 反射回数の範囲の読み方 ----
+    check("範囲の書き方（1:3 / :3 / 2: / 2 / 空）",
+          fr.parse_reflections("1:3") == (1, 3)
+          and fr.parse_reflections(":3") == (None, 3)
+          and fr.parse_reflections("2:") == (2, None)
+          and fr.parse_reflections("2") == (2, 2)
+          and fr.parse_reflections("") is None and fr.parse_reflections(None) is None)
+    try:
+        fr.parse_reflections("3:1")
+        reversed_ok = False
+    except ValueError:
+        reversed_ok = True
+    check("逆の範囲は止める（黙って空にしない）", reversed_ok)
+    check("★ファイル名を分ける（絞らない結果を上書きしない）",
+          fr.reflection_suffix(None) == "" and fr.reflection_suffix((1, 3)) == "_反射1-3回")
+
+    # ---- 計算（test.dxf を小さく回す。経路の npz と同じモデルで）----
+    folder = tempfile.mkdtemp(prefix="geosim_g43_")
+    project = pj.Project(folder, dxf=TEST_DXF, band_number=6, rays=3000,
+                         nref=12, radius=0.3)
+    model = rp._model_for(project)
+    mesh = model.mesh
+    source = np.asarray(model.source_points[0], float)
+    receiver = np.asarray(model.receiver_points[0], float)
+    history = lr.loop(source, receiver, sr.soundray_generator(3000), 12, mesh, 0.3)
+    pulses = ln.loop(source, receiver, ld.delete(history), mesh, band_number=6,
+                     verbose=False)
+    pulses.sort_by_time()
+    air = at_.Atmosphere()
+
+    # ---- ② 絞った伝達関数は、その経路だけを足したものと一致する ----
+    grid = np.arange(40.0, 200.0, 2.0)
+    picked = fr.select(pulses, (1, 3))
+    keep = (pulses.reflection_count >= 1) & (pulses.reflection_count <= 3)
+    check("絞った本数が反射回数の範囲と一致", len(picked.distance) == int(keep.sum()),
+          f"{len(picked.distance)} / 全 {len(pulses.distance)} 本")
+    check("元のパルス列は書き換えない", len(pulses.distance) == len(keep))
+    manual = pcn.path_terms(pulses, grid, air)[:, keep].sum(axis=1)
+    check("★絞った H(f) ＝ その経路だけの複素和",
+          np.allclose(fr.response(picked, grid, air), manual, rtol=1e-12, atol=0))
+    check("経路ごとの項を全部足すと response と一致",
+          np.allclose(pcn.path_terms(pulses, grid, air).sum(axis=1),
+                      fr.response(pulses, grid, air), rtol=1e-12, atol=0))
+    check("★絞ると分解能は粗くなる（最長経路が短くなる）",
+          fr.resolution(picked, air) >= fr.resolution(pulses, air),
+          f"{fr.resolution(picked, air):.1f} Hz ≧ {fr.resolution(pulses, air):.1f} Hz")
+
+    # ---- ③ 直方体の虚音源も反射回数で選べる ----
+    size, src = np.array([4.0, 5.0, 3.0]), np.array([1.0, 2.0, 1.2])
+    allimg, allw = ms.box_images(size, src, order=3)
+    oneimg, onew = ms.box_images(size, src, order=3, reflections=(1, 1))
+    check("★1 回反射の虚音源は 6 個（6 面の鏡像）", len(oneimg) == 6, f"{len(oneimg)} 個")
+    zero, _w = ms.box_images(size, src, order=3, reflections=(0, 0))
+    check("0 回は音源そのもの 1 個", len(zero) == 1 and np.allclose(zero[0], src))
+    check("絞らなければ従来と同じ", len(ms.box_images(size, src, order=3)[0]) == len(allimg))
+
+    # ---- ④ pulses.csv と経路の npz を突き合わせる ----
+    project.receiver_index = 1
+    project.ensure_dirs()
+    faces = mm.collision_arrays(mesh)
+    mark = pc.fingerprint(mesh, faces, source, receiver, 3000, 12, 0.3, False)
+    pc.save(project.paths_cache(), pulses, mark, verbose=False)
+    pulses.save_csv(project.result_path("pulses"))
+    from_csv = ln.PulseList.from_csv(project.result_path("pulses"))
+    paths = pc.load(project.paths_cache(), verbose=False)
+    shuffled = copy.copy(paths)
+    order = np.random.default_rng(0).permutation(len(paths.distance))
+    for name in ("reflection_count", "distance", "direction", "walls", "cos_theta"):
+        setattr(shuffled, name, getattr(paths, name)[order])
+    joined = pcn.attach_geometry(from_csv, shuffled)
+    check("★並びが違っても壁の並びを正しく対応づける",
+          np.array_equal(joined.walls, pulses.walls))
+    broken = copy.copy(shuffled)
+    broken.distance = shuffled.distance.copy()
+    broken.distance[0] += 0.01
+    try:
+        pcn.attach_geometry(from_csv, broken)
+        refused = False
+    except ValueError:
+        refused = True
+    check("★中身が合わなければ止める（別の計算の npz）", refused)
+    check("いまのモデルと同じ形なら照合が通る",
+          pcn.check_geometry(project.paths_cache(), mesh) == "")
+
+    # ---- ⑤ 「除いたときの変化」は、その面を R = 0 にした計算と一致する ----
+    surfaces = pcn.Surfaces(model)
+    found = pcn.groups(joined, surfaces)
+    frequency = 57.0
+    terms = pcn.path_terms(joined, [frequency], air)
+    name, mask = found["面"][0]
+    target = [p for p in range(surfaces.count) if surfaces.name[p] == name][0]
+    removed, _own, _share = pcn.measures(terms, mask)
+    absorption = np.array([np.atleast_1d(m.absorption_coefficient) for m in mesh])
+    energy = ln.energy_from_geometry(joined.walls, joined.cos_theta, absorption)
+    touched = (surfaces.patches(joined.walls) == target).any(axis=1)
+    energy[touched] = 0.0                      # その面で反射が起きない
+    silent = copy.copy(joined)
+    silent.energy = energy
+    exact = 20.0 * np.log10(abs(fr.response(silent, [frequency], air)[0])
+                            / abs(fr.response(joined, [frequency], air)[0]))
+    check("★除いたときの変化 ＝ その面の反射を 0 にした計算",
+          abs(removed - exact) < 1e-9, f"{removed:.4f} / {exact:.4f} dB（{name}）")
+    for section in ("壁の組", "到来方向", "反射回数"):
+        total = sum(pcn.measures(terms, m)[2] for _n, m in found[section])
+        covered = np.sum([m for _n, m in found[section]], axis=0)
+        check(f"{section}は重なりなし（同位相の割合を足すと 1）",
+              abs(total - 1.0) < 1e-9 and np.all(covered == 1), f"{total:.12f}")
+    check("直接音は壁の組の『直接音』に入る",
+          any(n_ == pcn.DIRECT and m.sum() == int((joined.reflection_count == 0).sum())
+              for n_, m in found["壁の組"]))
+    check("向かい合う壁を位置で見分ける（呼び名に座標が入る）",
+          len(set(surfaces.name)) == surfaces.count and all("=" in n_ for n_ in surfaces.name),
+          str(surfaces.name[:2]))
+
+    # ---- ⑥ 直方体の軸モードは、その方向の壁が効く ----
+    c = air.sound_velocity
+    low, high = np.asarray(model.extents[0]), np.asarray(model.extents[1])
+    length = float((high - low)[1])            # y 方向（3 m）
+    axial = pcn.analyse(joined, surfaces, [c / (2.0 * length)], air, width=4.0)
+    faces_rows = [(item, values[0][0]) for sec, item, _c, values in axial["rows"]
+                  if sec == "面"]
+    best = min(faces_rows, key=lambda item: item[1])[0]
+    check("★y 方向の軸モードでいちばん効くのは y の壁",
+          "y=" in best, f"{c / (2 * length):.1f} Hz → {best}")
+
+    # ---- ⑦ 山を拾う ----
+    f_ = np.linspace(0, 10, 101)
+    wave = np.exp(-(f_ - 3) ** 2) + 0.5 * np.exp(-(f_ - 7) ** 2)
+    check("山を大きい順に拾い、低い順に返す", pcn.pick_peaks(f_, wave, 2) == [3.0, 7.0])
+    check("近すぎる山は 1 つにする", pcn.pick_peaks(f_, wave, 2, spacing=5.0) == [3.0])
+
+    # ---- ⑧ プロジェクトから回す（表と図）----
+    results = pcn.run(project, frequencies=[57.0], verbose=False)
+    path = os.path.join(os.path.dirname(project.result_path("pulses")),
+                        project.prefixed(pcn.FILE_NAME))
+    check("寄与の表を書く", os.path.isfile(path), os.path.basename(path))
+    with open(path, encoding="utf-8-sig") as handle:
+        header = next(line for line in handle if not line.startswith("#"))
+    check("★周波数は列名に入れる（表の約束）", "除いたときの変化_57.0Hz_dB" in header)
+    narrowed = pcn.run(project, frequencies=[57.0], reflections="1:2", verbose=False)
+    check("絞った結果は別のファイルに書く",
+          os.path.isfile(path.replace("寄与.csv", "寄与_反射1-2回.csv"))
+          and narrowed["rec1"]["pulses"] < results["rec1"]["pulses"])
+
+
 def main():
     print("geosim 数値検証")
     print(f"  Python {sys.version.split()[0]} / numpy {np.__version__}")
@@ -7129,7 +7294,8 @@ def main():
                test_decay_floor, test_point_order_changed, test_model_reuse,
                test_triangle_cleanup, test_conditions_shelf,
                test_reports_19_to_22, test_html_viewer_patches,
-               test_auralize, test_result_viewer, test_dialog_dirs):
+               test_auralize, test_result_viewer, test_dialog_dirs,
+               test_reflection_filter_and_contribution):
         fn()
 
     failed = [name for name, ok in _results if not ok]

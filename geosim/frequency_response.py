@@ -17,6 +17,14 @@
   ・固有周波数は**直方体とみなした目安**（`modal_frequencies`）。
     形が箱から離れるほど当てにならないので、そう書いて添える
   ・回折は解いていない。**低域は「傾向を見る道具」**という位置づけを崩さない
+  ・★**反射回数で絞れる**（`--reflections 1:3`。TODO G-42。2026-10-10）。
+    2026-10-02 ユーザー要望「1〜3 回反射くらいだけでどうかを確認した方が良いかな」。
+    全反射だと拡散したあとの音まで足し込まれて山が埋もれるので、
+    低次の反射だけにすると**どの平行面のモードか**が見えやすくなる
+    - **計算はやり直さない**（パルス列の 1 列目 `reflection_count` で間引くだけ）
+    - ★絞った `H(f)` は**本来の応答ではない**（絶対値が下がる）。形状検討の道具。
+      図とファイル名にそう出す（絞っていない結果を上書きしない）
+    - ★**分解能も粗くなる**（Δf ≈ c / 残した最長経路）。図と端末に出す
 """
 import io
 import math
@@ -39,6 +47,85 @@ RESPONSE_CHUNK = 256
 
 # 固有周波数を並べる上限。大きい室・高い周波数では数万個になるので頭打ちにする
 MODE_LIMIT = 20000
+
+
+# ---- 反射回数で絞る（G-42）--------------------------------------------------
+
+def parse_reflections(text):
+    """`1:3` / `:3` / `2:` / `3` を (下限, 上限) にする（どちらも含む。None は端なし）。
+
+    空や None は「絞らない」で None を返す。
+    """
+    if text is None:
+        return None
+    if isinstance(text, (tuple, list)):
+        low, high = text
+    else:
+        text = str(text).strip().replace("〜", ":").replace("-", ":")
+        if not text:
+            return None
+        if ":" in text:
+            low, high = text.split(":", 1)
+        else:
+            low = high = text
+    low = None if low in (None, "") else int(low)
+    high = None if high in (None, "") else int(high)
+    if low is not None and low < 0:
+        raise ValueError(f"反射回数の下限が負です: {low}")
+    if low is not None and high is not None and high < low:
+        raise ValueError(f"反射回数の範囲が逆です: {low}〜{high}")
+    if low is None and high is None:
+        return None
+    return (low, high)
+
+
+def reflection_mask(counts, reflections):
+    """反射回数がその範囲に入るか (n,) bool。`reflections=None` なら全部 True。"""
+    counts = np.asarray(counts)
+    keep = np.ones(len(counts), dtype=bool)
+    if reflections is None:
+        return keep
+    low, high = reflections
+    if low is not None:
+        keep &= counts >= int(low)
+    if high is not None:
+        keep &= counts <= int(high)
+    return keep
+
+
+def reflection_label(reflections):
+    """図・端末に出す言い方（`反射 1〜3 回`）。絞らないなら空文字。"""
+    if reflections is None:
+        return ""
+    low, high = reflections
+    if low is not None and high is not None:
+        return (f"反射 {low} 回のみ" if low == high
+                else f"反射 {low}〜{high} 回")
+    if low is not None:
+        return f"反射 {low} 回以上"
+    return f"反射 {high} 回まで"
+
+
+def reflection_suffix(reflections):
+    """ファイル名に付ける印（`_反射1-3回`）。★絞った結果で元の結果を上書きしない。"""
+    if reflections is None:
+        return ""
+    low, high = reflections
+    return f"_反射{'' if low is None else low}-{'' if high is None else high}回"
+
+
+def select(pulses, reflections):
+    """反射回数で絞ったパルス列（**新しい** PulseList。元は触らない）。"""
+    import copy
+
+    keep = reflection_mask(pulses.reflection_count, reflections)
+    out = copy.copy(pulses)
+    for name in ("reflection_count", "time", "distance", "direction", "energy"):
+        setattr(out, name, np.asarray(getattr(pulses, name))[keep])
+    if len(pulses.walls) == len(keep):
+        out.walls = pulses.walls[keep]
+        out.cos_theta = pulses.cos_theta[keep]
+    return out
 
 
 # ---- 伝達関数 --------------------------------------------------------------
@@ -238,8 +325,11 @@ def _reverberation_time(project, index):
 
 
 def evaluate(project, low=DEFAULT_LOW, high=DEFAULT_HIGH, step=DEFAULT_STEP,
-             band=None, receivers=None, verbose=True):
-    """受音点ごとの伝達関数と、固有周波数の目安を出す。→ 結果の辞書"""
+             band=None, receivers=None, verbose=True, reflections=None):
+    """受音点ごとの伝達関数と、固有周波数の目安を出す。→ 結果の辞書
+
+    `reflections` は (下限, 上限)。渡すと**その反射回数のパルスだけ**で作る（G-42）。
+    """
     import atmosphere as at
     import loop_noredundancy as ln
 
@@ -260,8 +350,9 @@ def evaluate(project, low=DEFAULT_LOW, high=DEFAULT_HIGH, step=DEFAULT_STEP,
     if receivers:
         wanted = {int(str(value).lower().replace("rec", "")) for value in receivers}
 
+    reflections = parse_reflections(reflections)
     result = {"frequencies": frequencies, "receivers": {}, "modes": [],
-              "sound_velocity": air.sound_velocity}
+              "sound_velocity": air.sound_velocity, "reflections": reflections}
 
     if model is not None:
         low_corner, high_corner = model.extents
@@ -290,11 +381,13 @@ def evaluate(project, low=DEFAULT_LOW, high=DEFAULT_HIGH, step=DEFAULT_STEP,
                 break
             continue
         missing = 0
-        pulses = ln.PulseList.from_csv(path)
+        everything = ln.PulseList.from_csv(path)
+        pulses = select(everything, reflections)
         result["receivers"][f"rec{index}"] = {
             "response": response(pulses, frequencies, air, band=band),
             "resolution": resolution(pulses, air),
             "pulses": len(pulses.distance),
+            "pulses_all": len(everything.distance),
             "rt": _reverberation_time(project, index),
         }
     if result["receivers"] and result.get("volume"):
@@ -309,11 +402,17 @@ def evaluate(project, low=DEFAULT_LOW, high=DEFAULT_HIGH, step=DEFAULT_STEP,
 
 
 def _report(result):
+    if result.get("reflections") is not None:
+        print(f"[伝達関数] ★{reflection_label(result['reflections'])}のパルスだけで作ります"
+              f"（本来の応答ではありません。形状検討の目安）")
     print(f"[伝達関数] 受音点 {len(result['receivers'])} 点 / "
           f"{result['frequencies'][0]:.0f}〜{result['frequencies'][-1]:.0f} Hz / "
           f"刻み {result['frequencies'][1] - result['frequencies'][0]:.2f} Hz")
     for name, data in list(result["receivers"].items())[:3]:
-        print(f"[伝達関数]   {name}: パルス {data['pulses']} 本 / "
+        print(f"[伝達関数]   {name}: パルス {data['pulses']} 本"
+              + (f"（全 {data['pulses_all']} 本のうち）"
+                 if data.get("pulses_all", data["pulses"]) != data["pulses"] else "")
+              + " / "
               f"出せる分解能の目安 {data['resolution']:.2f} Hz")
     if result.get("modes"):
         modes = result["modes"]
@@ -336,11 +435,16 @@ def write_csv(project, result, verbose=True):
     for name, data in result["receivers"].items():
         sub = _on_shelf(project, int(name.replace("rec", "")))
         path = os.path.join(os.path.dirname(sub.result_path("pulses")),
-                            sub.prefixed(FILE_NAME))
+                            sub.prefixed(FILE_NAME.replace(
+                                ".csv", reflection_suffix(result.get("reflections"))
+                                + ".csv")))
         os.makedirs(os.path.dirname(path), exist_ok=True)
         pressure = data["response"]
         peak = float(np.max(np.abs(pressure))) or 1.0
         with io.open(path, "w", encoding="utf-8-sig", newline="") as handle:
+            if result.get("reflections") is not None:
+                handle.write(f"# {reflection_label(result['reflections'])}のパルスだけで"
+                             f"作った応答（本来の応答ではない。形状検討の目安）\n")
             handle.write("周波数_Hz,大きさ_dB,最大を0dBとした_dB,位相_deg\n")
             for frequency, value in zip(result["frequencies"], pressure):
                 magnitude = abs(value)
@@ -419,14 +523,19 @@ def write_figures(project, result, receivers=None, verbose=True):
         axis.set_ylim(max(-60.0, float(np.percentile(level, 1)) - 5.0), 3.0)
         axis.set_xlabel("周波数 [Hz]")
         axis.set_ylabel("伝達関数の大きさ [dB]（最大を 0 dB）")
+        picked = reflection_label(result.get("reflections"))
         axis.set_title(f"{project.room_label}／{project.condition_label}　{name}"
-                       f"　伝達関数（位相ごと重ねた複素和）\n"
+                       f"　伝達関数（位相ごと重ねた複素和）"
+                       + (f"　★{picked}のみ" if picked else "") + "\n"
                        f"分解能の目安 {data['resolution']:.2f} Hz"
-                       f"（パルス {data['pulses']} 本）", fontsize=10)
+                       f"（パルス {data['pulses']} 本）"
+                       + ("　※絞った応答は本来の応答ではない（形状検討の目安）"
+                          if picked else ""), fontsize=10)
         axis.grid(alpha=0.25)
         axis.legend(fontsize=8, loc="lower right")
         figure.tight_layout()
-        path = project.figure_path(f"伝達関数_{name}.png")
+        path = project.figure_path(
+            f"伝達関数_{name}{reflection_suffix(result.get('reflections'))}.png")
         figure.savefig(path, dpi=140)
         plt.close(figure)
         written.append(path)
@@ -437,9 +546,10 @@ def write_figures(project, result, receivers=None, verbose=True):
 
 
 def run(project, low=DEFAULT_LOW, high=DEFAULT_HIGH, step=DEFAULT_STEP,
-        band=None, receivers=None, verbose=True):
+        band=None, receivers=None, verbose=True, reflections=None):
     result = evaluate(project, low=low, high=high, step=step, band=band,
-                      receivers=receivers, verbose=verbose)
+                      receivers=receivers, verbose=verbose,
+                      reflections=reflections)
     if not result["receivers"]:
         print("[伝達関数] パルス列が見つかりません（先に計算してください）")
         return result
@@ -466,7 +576,11 @@ def main(argv=None):
                         help="使う帯域の番号（省略すると全帯域の合計）")
     parser.add_argument("--receiver", type=int, action="append", default=None,
                         help="受音点の番号（繰り返し指定可。省略すると全部）")
+    parser.add_argument("--reflections", default=None,
+                        help="反射回数の範囲 下限:上限（例 1:3、:3、2:）。"
+                             "省略すると全部。★絞ると本来の応答ではなくなる")
     args = parser.parse_args(argv)
+    reflections = parse_reflections(args.reflections)
 
     base = pj.Project.load(args.folder)
     sheets = ([args.sheet] if args.sheet
@@ -483,7 +597,8 @@ def main(argv=None):
         print(f"[伝達関数] 条件『{project.condition_label}』")
         run(project, low=args.low, high=args.high, step=args.step,
             band=args.band,
-            receivers=[f"rec{n}" for n in args.receiver] if args.receiver else None)
+            receivers=[f"rec{n}" for n in args.receiver] if args.receiver else None,
+            reflections=reflections)
     return 0
 
 
