@@ -436,6 +436,24 @@ Fibonacci スパイラルで球面上に均等分布する単位音線ベクト�
 ※2026-08-12 に `np.zeros(ray_number, 3)` → `np.zeros((ray_number, 3))`、`sound_rays(i, 2)` → `sound_rays[i, 2]`（2 か所）を修正。
 ※添字は 0 始まりで、Fortran（1 始まり、最終音線が z>1 で NaN 化）と 1 本ずれるが数学的には Python 側が正しい形。
 検証: nray=1000 で NaN なし・全ベクトルのノルム 1.0・重心が原点。
+※2026-10-21 に**配列でまとめて作る形**にした（1,000 万本を超えるとループでは遅い。
+1,277 万本で 0.7 秒）。以前の版との差は cos/sin の丸めで最大 3e-16。
+
+### ray_count.py（2026-10-21 新設）
+
+**音線の本数を応答の長さから決める**（豊田氏の修正版 backtrace_rev.f90 の改善 3）。
+`N = 4k(c·t_max)²/r²`（Vorländer 1989 式(9)）。期待値は `k = N r²/(4(ct)²)`。
+- `plan(project)` → `Plan`（`rays` 使う本数 / `hits` 応答の長さの時刻での期待値 /
+  `one_hit_time` 期待値 1 本の時刻 / `doubtful` 1 本を切ったか / `warning()` / `rows()`）
+- 設定は `rays_mode`（`auto` / `manual`）と `rays_hits`（既定 3）。
+  ★**本数を渡して作ったプロジェクト・`rays_mode` の無い昔の project.json は `manual`**
+  （`Project.__init__`）。新しいプロジェクトの既定は `auto`
+- `run_project._freeze_ray_count()` が実行の頭で `project.rays` に焼き付ける
+  （`save()` のあとなので設定ファイルには残さない）。「精度が怪しい」は実行ログ・
+  `計算情報.csv`（`write_run_info`）・設定画面（`SetupWindow._update_ray_note`）に出る
+- ★追跡は**伝搬距離 `音速 × 応答の長さ` で打ち切る**（`loop_reflectionmesh.loop(max_length=…, stats=…)`。
+  `procedure.process(limit_length=True)` と共有追跡の両方）。応答の中の経路は打ち切らないときと
+  同じ（テスト [67]）。`report_stats` が「応答の長さに届く前に反射回数の上限で止まった音線」を数える
 
 ```python
 normalized_soundray(sound_ray) -> ndarray (3,)          # L2ノルムで正規化（関数名は normalized の綴りミス）

@@ -46,7 +46,8 @@ import receiver_sphere as rs
 #       → よくない。両者は独立。上記のとおり追記条件が別。
 # ------------------------------------------------------------------------------
 def loop(soundsource_point, receiver_point, soundray_list, nref, mesh, sphere_radius,
-         recorder=None, ray_chunk=20000, two_sided=False, progress=None):
+         recorder=None, ray_chunk=20000, two_sided=False, progress=None,
+         max_length=None, stats=None):
     """音線追跡。
 
     引数:
@@ -68,6 +69,17 @@ def loop(soundsource_point, receiver_point, soundray_list, nref, mesh, sphere_ra
             詳細は ray_recorder.py と docs/出力・可視化方針.md を参照。
         ray_chunk         : int  一度にまとめて追跡する音線の本数（メモリと速度の兼ね合い）
         two_sided         : bool 面の裏からの入射も当てるか。mesh_method.FaceArrays を参照
+        max_length        : float | None
+            ★伝搬距離の上限 [m]（2026-10-21。豊田氏の修正版の改善 3）。
+            ふつうは「音速 × 応答の長さ」。これを超えた音線は追跡をやめ、
+            受音もこの距離まで（`経路の長さ − 受音半径 ≦ max_length`）に限る。
+            応答の外に届く経路は使わないので、**その分の計算を省くだけ**。
+            None なら従来どおり反射回数（nref）だけで打ち切る
+        stats             : dict | None
+            渡すと打ち切りの内訳を足し込む（`length` 距離で打ち切り /
+            `nref` 反射回数の上限に達した / `escaped` 壁に当たらず抜けた）。
+            ★`max_length` があるときの `nref` は「**応答の長さ以内なのに**反射回数が
+            足りなかった」音線の数（多ければ nref を増やす）
 
     【2026-08-14 高速化（TODO F-1）】
     元コードは「音線 1 本ずつ × 面 1 枚ずつ」の二重ループだったが、Python では
@@ -116,7 +128,8 @@ def loop(soundsource_point, receiver_point, soundray_list, nref, mesh, sphere_ra
         _trace_chunk(origins[start:stop], receivers,
                      directions[start:stop], ray_ids[start:stop],
                      ray_source[start:stop],
-                     nref, mesh, faces, sphere_radius, results, recorder)
+                     nref, mesh, faces, sphere_radius, results, recorder,
+                     max_length=max_length, stats=stats)
         if progress is not None:
             # 塊ごとに進み具合を知らせる（GUI の進捗表示用。本線の計算には影響しない）
             progress(stop / total)
@@ -126,8 +139,30 @@ def loop(soundsource_point, receiver_point, soundray_list, nref, mesh, sphere_ra
     return [r[0] for r in results] if one_receiver else results
 
 
+def report_stats(stats, nref, limited=True):
+    """打ち切りの内訳を知らせる（修正版 backtrace_rev.f90 の表示と同じ）。
+
+    ★応答の長さで打ち切っているときに `nref` で止まった音線が多ければ、
+      **反射回数が足りず応答の後ろが欠けている**ので nref を増やすよう言う。
+    """
+    if not stats:
+        return
+    escaped, capped = stats.get("escaped", 0), stats.get("nref", 0)
+    if limited:
+        print(f"[音線追跡] 応答の長さで打ち切り {stats.get('length', 0):,} 本 / "
+              f"反射回数の上限（{nref} 回）で打ち切り {capped:,} 本 / "
+              f"壁に当たらず抜けた {escaped:,} 本")
+        if capped:
+            print(f"[音線追跡] ★応答の長さに届く前に反射回数の上限で止まった音線が "
+                  f"{capped:,} 本あります。多ければ最大反射回数を増やしてください")
+    else:
+        print(f"[音線追跡] 反射回数の上限（{nref} 回）で打ち切り {capped:,} 本 / "
+              f"壁に当たらず抜けた {escaped:,} 本")
+
+
 def _trace_chunk(ray_origins, receivers, soundray_list, ray_ids, ray_source,
-                 nref, mesh, faces, sphere_radius, results, recorder):
+                 nref, mesh, faces, sphere_radius, results, recorder,
+                 max_length=None, stats=None):
     """音線の塊 1 つぶんを追跡する。処理の順序は元コードと同じ。
 
     `receivers` は (R,3)、`ray_origins` は音線ごとの出発点 (A,3)、
@@ -159,6 +194,9 @@ def _trace_chunk(ray_origins, receivers, soundray_list, ray_ids, ray_source,
         for i in np.nonzero(recorded)[0]:
             recorder.start_ray(int(ray_ids[i]), directions[i], origins[i])
     termination = np.full(n_ray, "nref", dtype=object)
+    # 音源からここまでの伝搬距離（`max_length` で打ち切るため。修正版の plen）
+    travelled = np.zeros(n_ray)
+    counts = {"length": 0, "nref": 0, "escaped": 0}
 
     # ■反射回数ループ■ 元コード 545行 do k = 0, nref
     # k = 0 は直接音の区間。k = nref まで回すので反射回数は 0〜nref 回になる。
@@ -185,6 +223,11 @@ def _trace_chunk(ray_origins, receivers, soundray_list, ray_ids, ray_source,
         for r, receiver in enumerate(receivers):
             inside = rs.inside_sphere_batch(sphere_radius, direction_alive, origin_alive,
                                             receiver, min_distance)
+            if max_length is not None:
+                # ★応答の長さの外で受音したものは数えない（修正版 424 行と同じ条件）
+                along = np.einsum("ij,ij->i", direction_alive, receiver[None, :] - origin_alive)
+                along = np.clip(along, 0.0, min_distance)
+                inside &= travelled[alive] + along - sphere_radius <= max_length
             for local in np.nonzero(inside)[0]:
                 ray = alive[local]
                 # 受音経路として保存（元コード 666〜669行 traceff への書き込み）
@@ -196,6 +239,17 @@ def _trace_chunk(ray_origins, receivers, soundray_list, ray_ids, ray_source,
         # 当たる壁がなければその音線は終了（元コード 709〜712行）
         collision = hit_id >= 0
         termination[alive[~collision]] = "no_hit"
+        counts["escaped"] += int(np.count_nonzero(~collision))
+
+        if max_length is not None:
+            # ★次の区間の始点が応答の長さに当たる距離を超えたら追跡をやめる
+            #   （修正版 438 行。その先で受音しても応答の外なので使わない）
+            travelled[alive[collision]] += min_distance[collision]
+            over = np.zeros(len(alive), dtype=bool)
+            over[collision] = travelled[alive[collision]] - sphere_radius > max_length
+            termination[alive[over]] = "length"
+            counts["length"] += int(np.count_nonzero(over))
+            collision = collision & ~over
 
         alive_next = alive[collision]
         if len(alive_next) == 0:
@@ -233,6 +287,12 @@ def _trace_chunk(ray_origins, receivers, soundray_list, ray_ids, ray_source,
         directions[alive_next] = reflected / np.linalg.norm(reflected, axis=1)[:, None]
 
         alive = alive_next
+
+    # 反射回数の上限まで回っても追跡が続いていた音線（＝nref で打ち切った）
+    counts["nref"] += int(len(alive))
+    if stats is not None:
+        for key, value in counts.items():
+            stats[key] = stats.get(key, 0) + value
 
     if recorder is not None:
         for ray in np.nonzero(recorded)[0]:

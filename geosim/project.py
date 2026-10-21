@@ -186,6 +186,12 @@ DEFAULTS = {
     "closed_model": CLOSED_AUTO,
     "two_sided": False,
     "rays": 200000,
+    # ★音線数の決め方（2026-10-21。豊田氏の修正版の改善 3。`ray_count.py`）。
+    #   `auto` … 応答の長さ（max_time）の時刻で受音球に `rays_hits` 本届く本数にする
+    #   `manual` … `rays` の本数で回す（計算時間優先）。足りなければ「精度が怪しい」と知らせる
+    #   ★昔の project.json（この項目が無い）は `manual` として読む（本数を勝手に変えない）
+    "rays_mode": "auto",
+    "rays_hits": 3.0,
     "nref": 120,
     "radius": 1.0,
     "max_time": 3.0,
@@ -261,6 +267,11 @@ class Project:
 
     def __init__(self, folder, **values):
         self.folder = os.path.abspath(folder)
+        # ★本数を渡されて決め方が無いなら「指定した本数」（2026-10-21）。
+        #   昔の project.json も、`Project(…, rays=2000)` と書いた呼び出し側も、
+        #   既定の `auto` で読むと本数が黙って変わる（100 万本 → 数千万本）
+        if "rays" in values and "rays_mode" not in values:
+            values = dict(values, rays_mode="manual")
         for key, default in DEFAULTS.items():
             setattr(self, key, values.get(key, default))
         # ★`name` は**空のままにしておく**（既定はフォルダ名ではない）。
@@ -744,6 +755,7 @@ class Project:
         unknown = sorted(set(data) - set(DEFAULTS) - {"folder"})
         if unknown:
             print(f"[project] 注意: 知らない項目があります（無視します）: {unknown}")
+        # ★音線数の決め方が無い昔の設定は「指定した本数」のまま（`__init__` で決める）
         return cls(folder, **{k: v for k, v in data.items() if k in DEFAULTS})
 
     @classmethod

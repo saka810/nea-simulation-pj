@@ -37,11 +37,13 @@ def soundray_generator(ray_number):
     # 添字は 0 始まり（元コードは do i = 1, nray）。
     # 元コードは i = nray のとき z = 1 + 1/nray > 1 となり sqrt(1 - z^2) が NaN になるが、
     # 0 始まりだと z は -1 + 1/nray 〜 1 - 1/nray に収まり、球面上に正しく均等分布する。
-    for i in range(ray_number):
-        # 2026-08-12 修正: sound_rays(i, 2) → sound_rays[i, 2]（丸括弧では呼び出し扱いになる）
-        sound_rays[i, 2] = dz * i - 1.0 + 1.0 / ray_number
-        sound_rays[i, 0] = np.sqrt(1.0 - sound_rays[i, 2] ** 2.0) * np.cos(dt * i)
-        sound_rays[i, 1] = np.sqrt(1.0 - sound_rays[i, 2] ** 2.0) * np.sin(dt * i)
+    # ★配列でまとめて作る（2026-10-21）。音線数を応答の長さから決めると 1,000 万本を
+    #   超えるので、1 本ずつの Python のループでは作るだけで時間がかかる。式は同じ
+    i = np.arange(ray_number, dtype=float)
+    sound_rays[:, 2] = dz * i - 1.0 + 1.0 / ray_number
+    ring = np.sqrt(1.0 - sound_rays[:, 2] ** 2.0)
+    sound_rays[:, 0] = ring * np.cos(dt * i)
+    sound_rays[:, 1] = ring * np.sin(dt * i)
 
     return sound_rays
 

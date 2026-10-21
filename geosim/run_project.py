@@ -118,6 +118,29 @@ def _stem_is_named(project):
     return bool(stem) and stem not in pj.DEFAULT_CONDITION_STEMS
 
 
+def _freeze_ray_count(project, verbose=True):
+    """**この実行で使う音線の本数を、計算を始める前に確定させる**（2026-10-21）。
+
+    `rays_mode` が `auto` なら応答の長さから本数を決め（`ray_count.plan`）、
+    `project.rays` に焼き付ける。`manual` なら指定の本数のまま。
+    ★どちらでも、応答の長さの時刻で届く本数の期待値が 1 本を切れば
+      「**精度が怪しい**」と知らせる（2026-10-21 ユーザー指示）。
+
+    ★`save()` のあとに呼ぶ（自動で決めた本数を設定として残さない）。
+      子プロジェクト（受音点・音源ごと）には `DEFAULTS` 経由でそのまま伝わる。
+    """
+    import ray_count as rc
+
+    plan = rc.plan(project)
+    project.rays = plan.rays
+    if verbose:
+        print(f"[run] {plan.summary()}")
+        warning = plan.warning()
+        if warning:
+            print(f"[run] {warning}")
+    return plan
+
+
 def run(project, verbose=True, make_figures=True, progress=None,
         reuse_paths=True, save_settings=True):
     """プロジェクトの条件で計算し、結果 CSV と図を書き出す。
@@ -137,6 +160,7 @@ def run(project, verbose=True, make_figures=True, progress=None,
         project.save()  # 実行した条件を必ず残す（あとで再現できるように）
     _freeze_condition_name(project, verbose=verbose)
     _warn_stale_points(project, verbose=verbose)
+    _freeze_ray_count(project, verbose=verbose)
 
     dxf = project.dxf_path
     if not dxf or not os.path.exists(dxf):
@@ -645,7 +669,14 @@ def write_run_info(project, elapsed=None, conditions=None, verbose=True):
         rows.append(("計算にかかった時間", _clock(elapsed)))
     if conditions:
         rows.append(("回した条件の数", conditions))
-    rows += [("音線数", project.rays), ("最大反射回数", project.nref),
+    # ★音線数の決め方と見込み（期待値・見落とし・精度の注意）も残す（2026-10-21）
+    try:
+        import ray_count as rc
+        rows += rc.plan(project).rows()
+    except Exception as error:      # 見込みが出せなくても本数だけは残す
+        print(f"[run] 音線数の見込みを出せませんでした: {type(error).__name__}: {error}")
+        rows.append(("音線数", project.rays))
+    rows += [("最大反射回数", project.nref),
              ("受音球の半径 [m]", project.radius),
              ("応答の長さ [s]", project.max_time),
              ("周波数バンド", project.band_number)]
@@ -807,12 +838,20 @@ def _trace_once(project, receivers, verbose=True, progress=None):
                                band_number=project.band_number)
         if verbose:
             print("[run] 音線追跡（全受音点ぶんを 1 回で）")
+        velocity = Atmosphere(temperature=project.temperature,
+                              humidity=project.humidity,
+                              pressure=project.pressure).sound_velocity
+        # ★伝搬距離が「音速 × 応答の長さ」を超えた音線は追跡をやめる（2026-10-21。
+        #   修正版の改善 3）。`procedure.process(limit_length=True)` と揃える
+        trace_stats = {}
         histories = lr.loop(np.asarray(source, dtype=float),
                             np.asarray(receivers, dtype=float), rays,
                             project.nref, model.mesh, project.radius,
                             recorder=recorder, two_sided=project.two_sided,
                             progress=(lambda f: progress("音線追跡（共有）", f))
-                            if progress else None)
+                            if progress else None,
+                            max_length=velocity * project.max_time, stats=trace_stats)
+        lr.report_stats(trace_stats, project.nref)
         print("音線軌跡:", recorder.summary())
         # ★軌跡の保存は**呼び出し側が `_run_one` のあとで**行う。
         #   `_run_one` の頭で `clear_results()` が走るので、先に置くと消される

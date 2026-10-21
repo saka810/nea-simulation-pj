@@ -7326,6 +7326,66 @@ def test_plane_matching():
     check("1 mm ずれた面は同じ平面とみなさない", faces3.plane_count == 2, f"{faces3.plane_count} 平面")
 
 
+def test_ray_count():
+    """[67] 音線の本数を応答の長さから決める（2026-10-21。修正版 backtrace_rev.f90 の改善 3）。"""
+    print("\n[67] 音線の本数を応答の長さから決める・足りなければ精度の注意")
+    import json
+    import tempfile
+    import ray_count as rc
+    import project as pj
+
+    # 修正版の既定（3 s・3 本・半径 1 m・340 m/s）は 12,484,800 本（説明 PDF 4.3 節）
+    n = rc.rays_for(3.0, 1.0, 3.0, 340.0)
+    check("修正版の既定と同じ本数（3 s・3 本・r=1 m・c=340）", n == 12_484_800, f"{n:,}")
+    check("その本数なら 3 s で期待値 3 本",
+          abs(rc.expected_hits(n, 3.0, 1.0, 340.0) - 3.0) < 1e-6)
+    t1 = rc.time_for_hits(1_000_000, 1.0, 1.0, 343.0)
+    check("100 万本・r=1 m で期待値 1 本の時刻は約 1.46 s", abs(t1 - 1.4577) < 1e-3, f"{t1:.4f}")
+
+    folder = tempfile.mkdtemp(prefix="geosim_rays_")
+    auto = pj.Project(folder, max_time=2.0, radius=1.0)
+    plan = rc.plan(auto, sound_velocity=343.0)
+    check("新しいプロジェクトの既定は自動", auto.rays_mode == "auto" and plan.mode == "auto")
+    check("自動なら精度の注意は出ない", not plan.doubtful and plan.warning() is None,
+          f"{plan.rays:,} 本 / 期待値 {plan.hits:.2f}")
+
+    manual = pj.Project(folder, rays=200000, max_time=3.0, radius=1.0)
+    plan = rc.plan(manual, sound_velocity=343.0)
+    check("★本数を渡したら「指定」のまま（黙って増やさない）",
+          manual.rays_mode == "manual" and plan.rays == 200000)
+    check("★足りなければ「精度が怪しい」", plan.doubtful and "精度が怪しい" in (plan.warning() or ""),
+          f"期待値 {plan.hits:.3f} 本")
+    check("精度の注意は計算情報の表にも入る",
+          any(k == "精度の注意" for k, _ in plan.rows()))
+    enough = rc.plan(pj.Project(folder, rays=20_000_000, max_time=3.0, radius=1.0), 343.0)
+    check("指定でも足りていれば注意は出ない", not enough.doubtful, f"期待値 {enough.hits:.2f} 本")
+
+    # 昔の project.json（決め方の項目が無い）は「指定」で読む
+    with open(os.path.join(folder, pj.PROJECT_FILE), "w", encoding="utf-8") as f:
+        json.dump({"rays": 1000000, "max_time": 5.0}, f)
+    old = pj.Project.load(folder)
+    check("★昔の project.json は指定の本数のまま", old.rays_mode == "manual" and old.rays == 1000000)
+
+    # 伝搬距離で打ち切っても、応答の長さ以内の経路は同じ
+    model, source, receiver = load_test_room(6)
+    rays = sr.soundray_generator(3000)
+    limit = 343.0 * 0.05
+    stats = {}
+    cut = lr.loop(source, receiver, rays, 60, model.mesh, 0.3, max_length=limit, stats=stats)
+    full = lr.loop(source, receiver, rays, 60, model.mesh, 0.3)
+    p_cut = ln.loop(source, receiver, ld.delete(cut), model.mesh, sound_velocity=343.0, verbose=False)
+    p_full = ln.loop(source, receiver, ld.delete(full), model.mesh, sound_velocity=343.0, verbose=False)
+    inside = (limit - 0.3) / 343.0
+    a = np.sort(np.asarray(p_cut.time)[np.asarray(p_cut.time) <= inside])
+    b = np.sort(np.asarray(p_full.time)[np.asarray(p_full.time) <= inside])
+    check("★応答の長さで打ち切っても、その中の経路は打ち切らないときと同じ",
+          len(a) == len(b) and np.allclose(a, b), f"{len(a)} / {len(b)} 本")
+    check("打ち切った分だけ短い（応答の外の経路は追わない）",
+          len(p_cut) < len(p_full) and float(np.max(p_cut.time)) <= (limit + 0.3) / 343.0 + 1e-9,
+          f"{len(p_cut)} / {len(p_full)} 本・最大 {float(np.max(p_cut.time)) * 1000:.1f} ms")
+    check("打ち切りの内訳を数える", stats.get("length", 0) > 0, f"{stats}")
+
+
 def main():
     print("geosim 数値検証")
     print(f"  Python {sys.version.split()[0]} / numpy {np.__version__}")
@@ -7357,7 +7417,8 @@ def main():
                test_triangle_cleanup, test_conditions_shelf,
                test_reports_19_to_22, test_html_viewer_patches,
                test_auralize, test_result_viewer, test_dialog_dirs,
-               test_reflection_filter_and_contribution, test_plane_matching):
+               test_reflection_filter_and_contribution, test_plane_matching,
+               test_ray_count):
         fn()
 
     failed = [name for name, ok in _results if not ok]

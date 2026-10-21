@@ -48,6 +48,9 @@ def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref
             atmosphere=None, raylog_filename=None, raylog_max_rays=2000,
             pulse_filename=None, impulse_filename=None,
             sampling_frequency=ir.SAMPLING_FREQUENCY, max_time=ir.MAX_TIME,
+            # ★伝搬距離が「音速 × 応答の長さ」を超えた音線は追跡をやめる（2026-10-21。
+            #   豊田氏の修正版の改善 3）。応答の外の経路は使わないので計算を省くだけ
+            limit_length=True,
             reverberation_filename=None, decay_filename=None,
             # ★**RTany**（評価区間を利用者が決める残響時間。2026-09-15 ユーザー指示）。
             #   両方 None なら従来どおり EDT / T20 / T30 だけ
@@ -365,10 +368,15 @@ def process(soundsource_point, receiver_point, dxf_filename, sphere_radius, nref
         # 音線ループで反射面のIDを履歴として記録します
         # 元コード524行目に対応
         report("音線追跡", 0.0)
+        trace_stats = {}
         reflection_history = lr.loop(soundsource_point, receiver_point, soundray_list,
                                      nref, mesh, sphere_radius, recorder=recorder,
                                      two_sided=two_sided,
-                                     progress=lambda f: report("音線追跡", f))
+                                     progress=lambda f: report("音線追跡", f),
+                                     max_length=(sound_velocity * max_time
+                                                 if limit_length else None),
+                                     stats=trace_stats)
+        lr.report_stats(trace_stats, nref, limit_length)
 
         if recorder is not None:
             print("音線軌跡:", recorder.summary())
