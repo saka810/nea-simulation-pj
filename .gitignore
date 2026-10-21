@@ -1,4 +1,6 @@
-fortran/
+fortran/*
+# 豊田氏の修正版（2026-10-19 受領）は共有してよい（2026-10-21 ユーザー判断）
+!fortran/backtrace_rev/
 __pycache__/
 *.pyc
 

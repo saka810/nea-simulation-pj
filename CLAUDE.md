@@ -131,6 +131,7 @@ ea-simulation-pj\last_dirs.json` に残す
   別端末には自動で配られないので、参照するコードの内容を履歴や `PROGRAM_STRUCTURE.md` 側に
   書き残しておくと他端末で追いやすい。
   - ★`fortran\backtrace_rev\` … **元の作成者（豊田政弘氏）の修正版**（2026-10-19 受領）。
+    ★**ここだけは Git で共有する**（2026-10-21 ユーザー判断。`.gitignore` で `fortran/*` を除外したうえで例外にしてある）。
     `backtrace_rev.f90`・説明 PDF・`hall1.dxf`（**mm 単位**・$INSUNITS なし）・`absorption.csv`。
     geosim との対応状況は `評価レポート/2026-10-21_修正版backtraceとの対応状況_WIN240377_Claude.pptx`
     （6 項目中 ①④⑤⑥ は済、**②平面単位の照合は一部・③音線数を時間長から決めるは未対応**）
