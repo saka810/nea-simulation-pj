@@ -71,6 +71,9 @@ class FaceArrays:
         # **面ごと**の「その面の平面上の点」。虚音源を束で作るのに使う
         # （loop_noredundancy._image_source_table）
         self.plane_point = self.v0
+        # 経路の照合に使う平面の番号。三角形単位の参照実装なので**三角形そのまま**
+        # （平面でまとめるのは本番の PatchArrays._planes）
+        self.plane_of_face = np.arange(self.count, dtype=np.int64)
 
         # 三角形内部の判定に使う辺ベクトル。
         # scalar 版は innerproduct_from3vertexes(node, 頂点0, 頂点1, 頂点2) と
@@ -358,6 +361,41 @@ class PatchArrays:
         self.v = np.cross(self.patch_normal, u)
 
         self._build_outlines(triangles, tol)
+        self.plane_of_face = self._planes(triangles)
+
+    def _planes(self, triangles, distance=PATCH_DISTANCE):
+        """面ごとに「どの平面か」の番号（その平面の代表三角形のインデックス）を返す。
+
+        ★**経路の照合はパッチではなく平面で行う**（2026-10-21。豊田氏の修正版
+        backtrace_rev.f90 の改善 2）。虚音源の位置は**どの平面で映したか**だけで
+        決まり、レイヤにもつながりにも依らない。パッチは吸音率を引くために
+        レイヤで割ってあるので、同じ平面の別レイヤに当たっただけの正しい経路を
+        バックトレースが捨てていた（hall1.dxf で可視な虚音源が 61,667 → 73,817）。
+
+        同じ平面とみなすのは、**法線の向きが揃っていて、片方のパッチの全頂点が
+        もう片方の平面から `distance` 以内**のとき。角度ではなく頂点の距離で見るので、
+        離れたパッチどうしでも形が狂わない（遠いほど角度の誤差は大きく効く）。
+        """
+        vertices = [[] for _ in range(self.count)]
+        for j, tri in enumerate(triangles):
+            vertices[int(self.patch_of_face[j])].extend(tri)
+        vertices = [np.asarray(v, dtype=float) for v in vertices]
+        unit = self.patch_normal / np.linalg.norm(self.patch_normal, axis=1, keepdims=True)
+        offset = -np.einsum("ij,ij->i", unit, self.origin)
+
+        plane_of_patch = np.arange(self.count, dtype=np.int64)
+        for q in range(self.count):
+            for p in range(q):
+                if plane_of_patch[p] != p:
+                    continue                       # 代表どうしだけを比べる
+                if float(np.dot(unit[p], unit[q])) <= 0.0:
+                    continue                       # 向きが逆なら別の鏡
+                gap = np.abs(vertices[q] @ unit[p] + offset[p])
+                if float(gap.max()) <= distance:
+                    plane_of_patch[q] = p
+                    break
+        self.plane_count = int(len(np.unique(plane_of_patch)))
+        return self.face_of_patch[plane_of_patch[self.patch_of_face]]
 
     def _build_outlines(self, triangles, tol):
         """パッチごとの外周辺を 2 次元で持つ（CSR 風に 1 本の配列に詰める）。
