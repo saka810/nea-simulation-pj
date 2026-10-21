@@ -55,7 +55,9 @@ import numpy as np
 FINGERPRINT_KEYS = ("geometry", "patches", "source", "receiver",
                     "rays", "nref", "radius", "two_sided")
 
-CACHE_VERSION = 1
+# ★2 … 2026-10-21。経路の照合をパッチから平面に替えた（同じ平面の別レイヤに当たる
+#   経路を捨てなくなった）。版 1 の経路はその分が欠けているので使わずに作り直す
+CACHE_VERSION = 2
 
 
 def _digest(*arrays):
@@ -195,8 +197,13 @@ def load(filename, mark=None, sound_velocity=None, verbose=True, points=None):
     except Exception as error:
         print(f"[経路] {filename} を読めませんでした: {type(error).__name__}: {error}")
         return None
-    if int(data.get("version", 0)) != CACHE_VERSION:
-        print(f"[経路] 形式が古いので使いません: {filename}")
+    version = int(data.get("version", 0))
+    if version != CACHE_VERSION:
+        if version == 1:
+            print("[経路] 2026-10-21 の修正（同じ平面の別レイヤに当たる経路を捨てない）より前の"
+                  f"経路なので使いません。音線追跡からやり直します: {filename}")
+        else:
+            print(f"[経路] 形式が古いので使いません: {filename}")
         return None
 
     if mark is not None:

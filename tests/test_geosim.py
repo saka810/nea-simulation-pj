@@ -7264,6 +7264,68 @@ def test_reflection_filter_and_contribution():
           and narrowed["rec1"]["pulses"] < results["rec1"]["pulses"])
 
 
+def test_plane_matching():
+    """[66] 経路の照合を平面で行う（2026-10-21。豊田氏の修正版 backtrace_rev.f90 の改善 2）。
+
+    x = 0 の壁 1 枚を、下部（z 0〜1 m）レイヤ A・上部（z 1〜2 m）レイヤ B に分けて描く。
+    音源の虚音源から受音点の中心へ引いた線は上部 B に当たるので、
+    「下部 A で反射」と記録された経路は**以前は捨てていた**（パッチが違う）。
+    """
+    print("\n[66] 経路の照合を平面で行う（同じ平面の別レイヤ）")
+    import mesh
+    import mesh_method as mm
+    import loop_noredundancy as ln
+
+    def quad(y0, y1, z0, z1):
+        a, b, c, d = ([0.0, y0, z0], [0.0, y1, z0], [0.0, y1, z1], [0.0, y0, z1])
+        return [(a, b, c), (a, c, d)]
+
+    normal = np.array([1.0, 0.0, 0.0])
+    alpha = {"A": np.full(6, 0.2), "B": np.full(6, 0.6)}
+    wall = ([("A", t) for t in quad(-5.0, 5.0, 0.0, 1.0)]
+            + [("B", t) for t in quad(-5.0, 5.0, 1.0, 2.0)])
+    model = [mesh.Mesh(t[0], t[1], t[2], normal, lay, alpha[lay]) for lay, t in wall]
+    faces = mm.collision_arrays(model)
+    lower, upper = int(faces.face_of_patch[faces.patch_of_face[0]]), \
+        int(faces.face_of_patch[faces.patch_of_face[2]])
+    check("レイヤが違えばパッチは別（吸音率を引くため）", lower != upper, f"{lower} / {upper}")
+    check("★同じ平面なら平面の番号は同じ", faces.plane_of_face[lower] == faces.plane_of_face[upper],
+          f"平面 {faces.plane_count} / パッチ {faces.count}")
+
+    source, receiver = np.array([2.0, 0.0, 0.5]), np.array([2.0, 0.0, 1.8])
+    got = ln.backtrace_batch(source, receiver, [[lower]], model, faces, 6)
+    check("★記録は下部 A・辿り直すと上部 B に当たる経路を捨てない", len(got) == 1, f"{len(got)} 本")
+    if got:
+        record = got[0]
+        check("経路として残すのは実際に当たった上部 B", record["wall_ids"] == [upper],
+              f"{record['wall_ids']}")
+        image = np.array([-2.0, 0.0, 0.5])
+        ray = (image - receiver) / np.linalg.norm(image - receiver)
+        expected = sr.energy_decay(ray, normal, 0.6, 1.0)
+        check("吸音率は上部 B（0.6）で計算する", abs(record["energy"][0] - expected) < 1e-12,
+              f"{record['energy'][0]:.6f} / {expected:.6f}")
+        single = ln.backtrace_path(source, receiver, [lower], model, 6, faces=faces)
+        check("1 本ずつの版も同じ", single is not None and single["wall_ids"] == [upper]
+              and abs(single["energy"][0] - record["energy"][0]) < 1e-12)
+
+    merged = ln.plane_histories([[lower], [upper], [lower, upper]], faces)
+    check("★同じ平面の別レイヤの履歴は 1 本にまとめる（同じ虚音源を 2 回数えない）",
+          len(merged) == 2, f"{merged}")
+
+    # 向きが逆の面（板の裏）は同じ平面に入れない
+    back = [mesh.Mesh(t[0], t[1], t[2], -normal, "A", alpha["A"]) for t in quad(-5.0, 5.0, 2.0, 3.0)]
+    faces2 = mm.collision_arrays(model + back)
+    check("法線が逆向きなら別の平面", faces2.plane_count == 2, f"{faces2.plane_count} 平面")
+
+    # 平面から 1 mm ずれたパッチは別（許容は 0.1 mm）
+    shifted = [mesh.Mesh(np.add(t[0], [0.001, 0, 0]), np.add(t[1], [0.001, 0, 0]),
+                         np.add(t[2], [0.001, 0, 0]), normal, "B", alpha["B"])
+               for t in quad(-5.0, 5.0, 1.0, 2.0)]
+    lower_only = [m for m, (lay, _) in zip(model, wall) if lay == "A"]
+    faces3 = mm.collision_arrays(lower_only + shifted)
+    check("1 mm ずれた面は同じ平面とみなさない", faces3.plane_count == 2, f"{faces3.plane_count} 平面")
+
+
 def main():
     print("geosim 数値検証")
     print(f"  Python {sys.version.split()[0]} / numpy {np.__version__}")
@@ -7295,7 +7357,7 @@ def main():
                test_triangle_cleanup, test_conditions_shelf,
                test_reports_19_to_22, test_html_viewer_patches,
                test_auralize, test_result_viewer, test_dialog_dirs,
-               test_reflection_filter_and_contribution):
+               test_reflection_filter_and_contribution, test_plane_matching):
         fn()
 
     failed = [name for name, ok in _results if not ok]

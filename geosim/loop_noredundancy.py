@@ -250,6 +250,8 @@ def backtrace_path(soundsource_point, receiver_point, wall_ids, mesh,
         faces = mm.collision_arrays(mesh)
     images = image_sources(soundsource_point, wall_ids, mesh)
     ktmp = len(wall_ids)
+    plane_of = _plane_of_face(faces)
+    actual = list(wall_ids)        # 実際に当たったパッチ
 
     energy = np.ones(band_number)
 
@@ -283,9 +285,11 @@ def backtrace_path(soundsource_point, receiver_point, wall_ids, mesh,
                     return None
                 break
 
-            # 経路が言う壁と違う壁に当たったら却下（元コード 1086 行）
-            if hit_id != wall_ids[k - 1]:
+            # 経路が言う壁と違う**平面**に当たったら却下（元コード 1086 行）。
+            # 同じ平面の別パッチなら通す（束の版 `backtrace_batch` と同じ扱い）
+            if plane_of[hit_id] != plane_of[wall_ids[k - 1]]:
                 return None
+            actual[k - 1] = hit_id
 
             node = node_array[0]
 
@@ -323,7 +327,7 @@ def backtrace_path(soundsource_point, receiver_point, wall_ids, mesh,
         # 元コードの -vtgt。受音点から虚音源を見込む向き＝音が到来する方向
         "direction": (-vtgt) / distance,
         "energy": energy.copy(),
-        "wall_ids": list(wall_ids),
+        "wall_ids": [int(w) for w in actual],
     }
 
 
@@ -349,6 +353,27 @@ def backtrace_path(soundsource_point, receiver_point, wall_ids, mesh,
 # ★`backtrace_path()` は**参照実装として残す**。同じ結果になることを
 #   tests/test_geosim.py の「バックトレースの配列演算（1 本ずつとの一致）」で確かめる。
 # ------------------------------------------------------------------------------
+
+def _plane_of_face(faces):
+    """面（三角形）ごとの平面の番号。持たない入れ物なら三角形そのもの。"""
+    plane = getattr(faces, "plane_of_face", None)
+    if plane is None:
+        plane = np.arange(len(faces.normal), dtype=np.int64)
+    return np.asarray(plane, dtype=np.int64)
+
+
+def plane_histories(histories, faces):
+    """反射履歴を**平面の番号**に直して重複を除く。
+
+    ★同じ平面の別パッチ（別レイヤ）で反射した履歴は**同じ虚音源**を作る。
+      平面で照合するようにしたので、直さずに回すと同じ虚音源が 2 回数えられる
+      （エネルギーが倍になる）。修正版 backtrace_rev.f90 が反射履歴に平面の
+      番号を記録しているのと同じ扱い。順序は初出順（`loop_deleteredundancy.delete` と同じ）。
+    """
+    plane = _plane_of_face(faces)
+    canonical = (tuple(int(plane[w]) for w in h) for h in histories)
+    return [list(h) for h in dict.fromkeys(canonical)]
+
 
 def _image_source_table(soundsource_point, walls, lengths, faces):
     """経路ごとの虚音源の列 (P, Kmax+1, 3) をまとめて作る。
@@ -445,6 +470,8 @@ def backtrace_batch(soundsource_point, receiver_point, histories, mesh, faces,
             walls[i, :len(h)] = h
 
     images = _image_source_table(soundsource_point, walls, lengths, faces)
+    plane_of = _plane_of_face(faces)
+    actual = walls.copy()          # 実際に当たったパッチ（照合は平面で行うので記録と違いうる）
 
     receiver = np.asarray(receiver_point, dtype=float)
     source = np.asarray(soundsource_point, dtype=float)
@@ -491,16 +518,21 @@ def backtrace_batch(soundsource_point, receiver_point, histories, mesh, faces,
             alive[index] = False
             continue
 
-        # 経路が言う壁と違う壁に当たったら却下（元コード 1086 行）
+        # 経路が言う壁と違う**平面**に当たったら却下（元コード 1086 行）。
+        # ★同じ平面の別のパッチ（別レイヤ・離れた部分）なら通す。虚音源は平面だけで
+        #   決まるので経路として正しい（2026-10-21。修正版 backtrace_rev.f90 の改善 2）
         want = walls[index, k - 1]
-        good = hit & (hit_id == want)
+        hit_face = np.maximum(hit_id, 0)
+        good = hit & (plane_of[hit_face] == plane_of[want])
         alive[index[~good]] = False
         keep = index[good]
         if not len(keep):
             continue
         local = np.nonzero(good)[0]
 
-        wall = want[good]
+        # 吸音率・入射角は**実際に当たったパッチ**で引き、その番号を経路として残す
+        wall = hit_id[good]
+        actual[keep, k - 1] = wall
         cosines[keep, k - 1] = np.abs(np.einsum("ij,ij->i", ray[keep],
                                                 faces.normal[wall]))
         energy[keep] = _energy_decay_batch(ray[keep], faces.normal[wall],
@@ -525,7 +557,8 @@ def backtrace_batch(soundsource_point, receiver_point, histories, mesh, faces,
             "distance": distance,
             "direction": (-vtgt) / distance,
             "energy": energy[i].copy(),
-            "wall_ids": list(histories[i]),
+            # ★実際に当たったパッチの並び（記録した並びと同じ平面で、レイヤは違いうる）
+            "wall_ids": actual[i, :lengths[i]].tolist(),
             # 吸音率を変えたときに再利用する材料（`energy_from_geometry`）
             "cos_theta": cosines[i, :lengths[i]].copy(),
         })
@@ -570,6 +603,13 @@ def loop(soundsource_point, receiver_point, reflectionmeshid_history, mesh,
 
     faces = mm.collision_arrays(mesh, two_sided=two_sided)
     records = []
+
+    # ★履歴を平面の番号に直して重複を除く（照合を平面で行うため。`plane_histories`）
+    given = len(reflectionmeshid_history)
+    reflectionmeshid_history = plane_histories(reflectionmeshid_history, faces)
+    if verbose and len(reflectionmeshid_history) < given:
+        print(f"[loop_noredundancy] 同じ平面の別レイヤを同じ鏡とみなして "
+              f"経路 {given} → {len(reflectionmeshid_history)} 本にまとめました")
 
     total = len(reflectionmeshid_history)
     # 経路を塊に分けて束で処理する（`backtrace_batch`）。1 本ずつの `backtrace_path` は
