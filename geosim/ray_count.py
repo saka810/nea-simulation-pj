@@ -30,6 +30,28 @@ DEFAULT_HITS = 3.0      # 応答の長さの時刻で届いてほしい本数（
 # ★これを切ったら「精度が怪しい」。期待値 1 本＝見落とす確率 e^{-1} ≈ 37%
 DOUBTFUL_HITS = 1.0
 
+# ★★**反射回数の上限も応答の長さから決める**（2026-10-30。豊田氏の修正版 10-23 版の改善 7）。
+#   それまでは `nref` を定数（既定 120）で与えていたので、**小さい室では応答の長さまで
+#   届かなかった**（JR 研修室：平均自由行程 3.8 m × 120 回 ≒ 460 m ＝ 1.5 s で 500 万本の
+#   ほぼ全部が上限で止まり、T20 が 3〜4 s の条件は後半が欠けていた）。
+#   方向を均等に散らした `NREF_SAMPLE` 本を、伝搬距離が「音速 × 応答の長さ」に
+#   達するまで反射回数の制限なしで追い（`loop_reflectionmesh.sample_reflections`）、
+#   その最大反射回数に `nref_margin` を掛けた値を上限にする
+#   - 余裕の既定は 1.25（豊田氏のメールの「AI の推奨値」。豊田氏自身は正確さ重視で 10）
+#   - ★昔の project.json（`nref_mode` が無い）と反射回数を渡したプロジェクトは `manual`
+#     （`rays_mode` と同じ約束。結果が黙って変わらないように）
+NREF_AUTO = "auto"
+NREF_MANUAL = "manual"
+NREF_MODES = (NREF_AUTO, NREF_MANUAL)
+DEFAULT_NREF_MARGIN = 1.25
+NREF_SAMPLE = 100_000       # 試し追跡の本数（修正版の nsample）
+NREF_CAP = 1_000_000        # 試し追跡で 1 本を追う反射回数の打ち切り（修正版の nrefcap）
+
+
+def reflection_limit(max_reflections, margin=DEFAULT_NREF_MARGIN):
+    """試し追跡の最大反射回数から上限を決める（修正版の `nref = ceiling(nrefmrg * kmax)`）。"""
+    return max(1, int(math.ceil(float(margin) * int(max_reflections))))
+
 
 def rays_for(time, radius, hits=DEFAULT_HITS, sound_velocity=343.0):
     """時刻 `time` [s] で受音球に `hits` 本届く音線の本数。"""

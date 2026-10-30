@@ -139,6 +139,9 @@ ea-simulation-pj\last_dirs.json` に残す
   - ★`fortran\backtrace_rev\` … **元の作成者（豊田政弘氏）の修正版**（2026-10-19 受領）。
     ★**ここだけは Git で共有する**（2026-10-21 ユーザー判断。`.gitignore` で `fortran/*` を除外したうえで例外にしてある）。
     `backtrace_rev.f90`・説明 PDF・`hall1.dxf`（**mm 単位**・$INSUNITS なし）・`absorption.csv`。
+    ★`backtrace_rev.f90` は **2026-10-23 のマイナーアップデート版**に差し替えた（2026-10-30。
+    改善 7 反射回数の自動決定・8 メモリ上限 `memgb`。文字コードは受け取ったまま CP932。
+    10-19 版は Git の履歴にある）。パラメータは豊田氏の検証用（`00_mag.dxf`・`nhitmin=30`・`nrefmrg=10`）
     geosim との対応状況は `評価レポート/2026-10-21_修正版backtraceとの対応状況_WIN240377_Claude.pptx`
     （作成時点では ①④⑤⑥ が済・②一部・③未対応。**同日中に②③も入れた**）
 - ★★**音線の本数は応答の長さから決める**（`ray_count.py`。2026-10-21。修正版の改善 3）。
@@ -150,9 +153,16 @@ ea-simulation-pj\last_dirs.json` に残す
     自動で読むと 100 万本の案件が黙って数千万本になる。新規の既定は `auto`
   - 追跡は**伝搬距離 `音速 × 応答の長さ` で打ち切る**（応答の外は使わないので省くだけ）。
     最大反射回数は安全装置。届く前に上限で止まった本数をログに出す。テスト [67]
+  - ★★**最大反射回数も応答の長さから決める**（2026-10-30。修正版 10-23 版の改善 7）。
+    `nref_mode`（`auto` / `manual`）・`nref_margin`（既定 1.25。豊田氏は 10）。
+    10 万本を伝搬距離 `音速 × 応答の長さ` まで制限なしで追い（`loop_reflectionmesh.sample_reflections`）、
+    最大反射回数 × 余裕を `run_project._freeze_reflection_limit` が焼き付ける（条件をまたいで使い回す）。
+    ★固定 120 回だと JR 研修室で 1.5 s 前後に全音線が止まっていた（自動なら 972 回）。
+    ★**昔の project.json と `nref` を渡したプロジェクトは `manual`**。テスト [68]。
+    修正版の改善 8（`memgb` で組に分ける）は未（geosim は 2 万本ずつ追うので当面不要）
 - `PROGRAM_STRUCTURE.md` … 各モジュールの役割・Fortran との変数対応・実装状況・既知のバグ一覧。
   **コードに手を入れたらこの文書も合わせて更新する。**
-- `tests\test_geosim.py` … 数値検証（1189 項目）。pytest 不要、素の Python で走る。
+- `tests\test_geosim.py` … 数値検証（1201 項目）。pytest 不要、素の Python で走る。
   **数式に関わるコードを変更したら必ず走らせる**：`.venv\Scripts\python tests\test_geosim.py`
 - `TODO.md` … 作業一覧（A〜G にグルーピング）。着手・完了したらチェックボックスを更新する。
 - `docs\pdf\` … **docs の Markdown を PDF にしたもの**（2026-08-23 ユーザー要望

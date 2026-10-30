@@ -193,6 +193,12 @@ DEFAULTS = {
     "rays_mode": "auto",
     "rays_hits": 3.0,
     "nref": 120,
+    # ★反射回数の上限の決め方（2026-10-30。豊田氏の修正版 10-23 版の改善 7。`ray_count.py`）。
+    #   `auto` … 試し追跡で応答の長さまでの最大反射回数を数え、`nref_margin` を掛ける
+    #   `manual` … `nref` の回数で打ち切る
+    #   ★昔の project.json（この項目が無い）は `manual` として読む（`rays_mode` と同じ約束）
+    "nref_mode": "auto",
+    "nref_margin": 1.25,
     "radius": 1.0,
     "max_time": 3.0,
     "temperature": 20.0,
@@ -272,6 +278,10 @@ class Project:
         #   既定の `auto` で読むと本数が黙って変わる（100 万本 → 数千万本）
         if "rays" in values and "rays_mode" not in values:
             values = dict(values, rays_mode="manual")
+        # ★反射回数も同じ（2026-10-30）。昔の project.json を `auto` で読むと、
+        #   120 回で回していた案件の上限が黙って変わり、結果も変わる
+        if "nref" in values and "nref_mode" not in values:
+            values = dict(values, nref_mode="manual")
         for key, default in DEFAULTS.items():
             setattr(self, key, values.get(key, default))
         # ★`name` は**空のままにしておく**（既定はフォルダ名ではない）。

@@ -139,6 +139,66 @@ def loop(soundsource_point, receiver_point, soundray_list, nref, mesh, sphere_ra
     return [r[0] for r in results] if one_receiver else results
 
 
+def sample_reflections(soundsource_point, soundray_list, mesh, max_length,
+                       sphere_radius=0.0, cap=1_000_000, two_sided=False,
+                       ray_chunk=20000):
+    """**反射回数の上限を決めるための試し追跡**（2026-10-30。豊田氏の修正版
+    backtrace_rev.f90 10-23 版の改善 7）。
+
+    音線を伝搬距離 `max_length`（＝音速 × 応答の長さ）に達するまで**反射回数の
+    制限なしで**追い、何回反射したかを数える。受音は見ない（履歴も持たない）ので軽い。
+    修正版の 378〜481 行と同じ手順（`cap` は無限ループよけの打ち切り＝`nrefcap`）。
+
+    戻り値: dict
+        `max` 最大反射回数（修正版の kmax）/ `mean` 平均 /
+        `escaped` 壁に当たらず抜けた本数 / `capped` `cap` に達した本数 / `rays` 本数
+    """
+    sources = np.atleast_2d(np.asarray(soundsource_point, dtype=float))
+    faces = mm.collision_arrays(mesh, two_sided=two_sided)
+    soundray_list = np.atleast_2d(np.asarray(soundray_list, dtype=float))
+    directions_all = np.tile(soundray_list, (len(sources), 1))
+    origins_all = np.repeat(sources, len(soundray_list), axis=0)
+
+    kmax, total, escaped, capped = 0, 0, 0, 0
+    step = max(1, int(ray_chunk))
+    for start in range(0, len(directions_all), step):
+        origins = np.array(origins_all[start:start + step], copy=True)
+        directions = directions_all[start:start + step]
+        directions = directions / np.linalg.norm(directions, axis=1)[:, None]
+        travelled = np.zeros(len(origins))
+        count = np.zeros(len(origins), dtype=np.int64)
+        last_face = np.full(len(origins), -1, dtype=np.int64)
+        alive = np.arange(len(origins))
+        while len(alive):
+            hit_id, distance, node = faces.nearest_hit(
+                origins[alive], directions[alive],
+                ignore=last_face[alive] if faces.two_sided else None)
+            collision = hit_id >= 0
+            escaped += int(np.count_nonzero(~collision))
+            alive, hit_id, distance, node = (alive[collision], hit_id[collision],
+                                             distance[collision], node[collision])
+            travelled[alive] += distance
+            # ★修正版と同じ順：距離が応答の長さ（受音球の半径ぶんの余裕込み）を
+            #   超えたらその反射は数えずにやめる。本番の追跡（`_trace_chunk`）と同じ条件
+            going = travelled[alive] - sphere_radius <= max_length
+            alive, hit_id, node = alive[going], hit_id[going], node[going]
+            at_cap = count[alive] >= cap
+            capped += int(np.count_nonzero(at_cap))
+            alive, hit_id, node = alive[~at_cap], hit_id[~at_cap], node[~at_cap]
+            count[alive] += 1
+            last_face[alive] = hit_id
+            origins[alive] = node
+            normal = faces.normal[hit_id]
+            d = directions[alive]
+            reflected = d - 2.0 * np.einsum("ij,ij->i", d, normal)[:, None] * normal
+            directions[alive] = reflected / np.linalg.norm(reflected, axis=1)[:, None]
+        kmax = max(kmax, int(count.max(initial=0)))
+        total += int(count.sum())
+    rays = len(directions_all)
+    return {"max": kmax, "mean": total / rays if rays else 0.0,
+            "escaped": escaped, "capped": capped, "rays": rays}
+
+
 def report_stats(stats, nref, limited=True):
     """打ち切りの内訳を知らせる（修正版 backtrace_rev.f90 の表示と同じ）。
 

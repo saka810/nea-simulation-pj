@@ -454,6 +454,18 @@ Fibonacci スパイラルで球面上に均等分布する単位音線ベクト�
 - ★追跡は**伝搬距離 `音速 × 応答の長さ` で打ち切る**（`loop_reflectionmesh.loop(max_length=…, stats=…)`。
   `procedure.process(limit_length=True)` と共有追跡の両方）。応答の中の経路は打ち切らないときと
   同じ（テスト [67]）。`report_stats` が「応答の長さに届く前に反射回数の上限で止まった音線」を数える
+- ★★**反射回数の上限も応答の長さから決める**（2026-10-30。修正版 10-23 版の改善 7）。
+  `nref_mode`（`auto` / `manual`）と `nref_margin`（既定 1.25）。`auto` なら
+  `run_project._freeze_reflection_limit()` が実行の頭で、全部の音源から `NREF_SAMPLE`（10 万）本を
+  伝搬距離 `音速 × 応答の長さ` まで制限なしで追い（`loop_reflectionmesh.sample_reflections`）、
+  `reflection_limit(最大反射回数, 余裕)` を `project.nref` に焼き付ける。面の上の音源は本番と同じく半球。
+  試し追跡は**幾何・音源・応答の長さが同じなら使い回す**（`_REFLECTION_SAMPLES`。条件をまたいで 1 回）。
+  ★**`nref_mode` の無い昔の project.json と、`nref` を渡したプロジェクトは `manual`**（`rays_mode` と同じ約束）。
+  きっかけは JR 研修室：120 回だと 1.5 s 前後で 500 万本のほぼ全部が上限で止まっていた。
+  自動にすると 972 回（試し追跡の最大 777 回 × 1.25、平均 449 回。試し追跡 約 4 分）。テスト [68]
+  - 修正版の改善 8（音線を組に分けてメモリを抑える）は入れていない。geosim の追跡は
+    もともと `ray_chunk`（2 万本）ずつで、反射履歴の配列は塊の大きさ × (nref+1) で済むため
+    （nref 972 でも 1 塊 約 160 MB）。受音した経路のリストは全部持つので、数千万本では要注意
 
 ```python
 normalized_soundray(sound_ray) -> ndarray (3,)          # L2ノルムで正規化（関数名は normalized の綴りミス）

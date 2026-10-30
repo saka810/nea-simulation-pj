@@ -141,6 +141,81 @@ def _freeze_ray_count(project, verbose=True):
     return plan
 
 
+# 試し追跡の結果の控え。★幾何・音源・応答の長さが同じなら条件をまたいで使い回す
+# （吸音率に依らない。`_model_for` の控えと同じ考え）
+_REFLECTION_SAMPLES = {}
+
+
+def _freeze_reflection_limit(project, verbose=True):
+    """**この実行で使う反射回数の上限を、計算を始める前に確定させる**（2026-10-30。
+    豊田氏の修正版 backtrace_rev.f90 10-23 版の改善 7）。
+
+    `nref_mode` が `auto` なら、全部の音源から `ray_count.NREF_SAMPLE` 本を
+    伝搬距離が「音速 × 応答の長さ」に達するまで制限なしで追い
+    （`loop_reflectionmesh.sample_reflections`）、最大反射回数 × `nref_margin` を
+    `project.nref` に焼き付ける。`manual` なら指定の回数のまま。
+    ★`_freeze_ray_count` と同じく `save()` のあとに呼ぶ（決めた値を設定として残さない）。
+    ★面の上に置いた音源は本番と同じく半球に折り返し、面の上へ置き直してから追う。
+    """
+    import loop_reflectionmesh as lr
+    import ray_count as rc
+    import sound_ray as sr
+
+    mode = getattr(project, "nref_mode", rc.NREF_MANUAL) or rc.NREF_MANUAL
+    if mode not in rc.NREF_MODES:
+        raise ValueError(f"反射回数の決め方が分かりません: {mode!r}"
+                         f"（{' / '.join(rc.NREF_MODES)}）")
+    if mode == rc.NREF_MANUAL:
+        if verbose:
+            print(f"[run] 最大反射回数 {project.nref} 回（指定）")
+        return None
+    margin = float(getattr(project, "nref_margin", None) or rc.DEFAULT_NREF_MARGIN)
+    velocity = Atmosphere(temperature=project.temperature, humidity=project.humidity,
+                          pressure=project.pressure).sound_velocity
+    max_length = velocity * float(project.max_time)
+    model = _model_for(project, verbose=False)
+    points, directions = [], []
+    for source in _sources(project, model):
+        rays = sr.soundray_generator(rc.NREF_SAMPLE)
+        placement = placement_for(project, model, source, verbose=False)
+        if placement.on_surface:
+            import source_placement as spl
+            rays = spl.hemisphere(rays, placement.normal)
+            source = placement.point
+        points.append(np.asarray(source, dtype=float))
+        directions.append(rays)
+    if not points:
+        raise ValueError("音源が無いので反射回数の上限を決められません")
+    key = (_geometry_key(project), repr([p.round(9).tolist() for p in points]),
+           round(max_length, 9), float(project.radius), bool(project.two_sided))
+    sample = _REFLECTION_SAMPLES.get(key)
+    if sample is None:
+        if verbose:
+            print(f"[run] 反射回数の上限を決める試し追跡（{rc.NREF_SAMPLE:,} 本 × "
+                  f"音源 {len(points)} 点、応答の長さ {project.max_time:g} s まで）")
+        sample = {"max": 0, "mean": 0.0, "escaped": 0, "capped": 0}
+        for point, rays in zip(points, directions):
+            got = lr.sample_reflections(point, rays, model.mesh, max_length,
+                                        sphere_radius=project.radius,
+                                        cap=rc.NREF_CAP, two_sided=project.two_sided)
+            sample["max"] = max(sample["max"], got["max"])
+            sample["mean"] = max(sample["mean"], got["mean"])
+            sample["escaped"] += got["escaped"]
+            sample["capped"] += got["capped"]
+        _REFLECTION_SAMPLES[key] = sample
+    project.nref = rc.reflection_limit(sample["max"], margin)
+    if verbose:
+        print(f"[run] 最大反射回数 {project.nref} 回（自動：試し追跡の最大 {sample['max']} 回 × "
+              f"余裕 {margin:g}。平均 {sample['mean']:.1f} 回）")
+        if sample["capped"]:
+            print(f"[run] ★試し追跡で {sample['capped']:,} 本が {rc.NREF_CAP:,} 回に達しました"
+                  f"（音線が閉じ込められている可能性）")
+        if sample["escaped"]:
+            print(f"[run] ★試し追跡で室外へ抜けた音線が {sample['escaped']:,} 本あります"
+                  f"（形状データのすき間の可能性）")
+    return sample
+
+
 def run(project, verbose=True, make_figures=True, progress=None,
         reuse_paths=True, save_settings=True):
     """プロジェクトの条件で計算し、結果 CSV と図を書き出す。
@@ -165,6 +240,7 @@ def run(project, verbose=True, make_figures=True, progress=None,
     dxf = project.dxf_path
     if not dxf or not os.path.exists(dxf):
         raise FileNotFoundError(f"DXF が見つかりません: {project.dxf!r}")
+    _freeze_reflection_limit(project, verbose=verbose)
 
     # ★★**音源が複数あれば 1 点ずつ回す**（2026-09-15 ユーザー要望。不具合報告 ⑨）。
     #   それまでは `model.source_points[0]` を黙って使い、2 点目以降を捨てていた。
@@ -676,7 +752,11 @@ def write_run_info(project, elapsed=None, conditions=None, verbose=True):
     except Exception as error:      # 見込みが出せなくても本数だけは残す
         print(f"[run] 音線数の見込みを出せませんでした: {type(error).__name__}: {error}")
         rows.append(("音線数", project.rays))
+    nref_auto = getattr(project, "nref_mode", "manual") == "auto"
     rows += [("最大反射回数", project.nref),
+             ("最大反射回数の決め方",
+              f"自動（試し追跡の最大 × 余裕 {getattr(project, 'nref_margin', 1.25):g}）"
+              if nref_auto else "指定"),
              ("受音球の半径 [m]", project.radius),
              ("応答の長さ [s]", project.max_time),
              ("周波数バンド", project.band_number)]

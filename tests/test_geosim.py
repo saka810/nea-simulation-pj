@@ -7386,6 +7386,69 @@ def test_ray_count():
     check("打ち切りの内訳を数える", stats.get("length", 0) > 0, f"{stats}")
 
 
+def test_reflection_limit():
+    """[68] 反射回数の上限を応答の長さから決める（2026-10-30。修正版 10-23 版の改善 7）。"""
+    print("\n[68] 反射回数の上限を試し追跡で決める")
+    import json
+    import shutil
+    import tempfile
+    import ray_count as rc
+    import project as pj
+    import run_project as rp
+
+    check("上限＝最大反射回数 × 余裕（切り上げ）",
+          rc.reflection_limit(100, 1.25) == 125 and rc.reflection_limit(7, 1.25) == 9)
+    check("反射しなくても上限は 1 回以上", rc.reflection_limit(0) == 1)
+
+    # 2×3×1 m の箱：平均自由行程 4V/S = 24/22 m。平均の反射回数は 距離 / 平均自由行程 に近い
+    model, source, receiver = load_test_room(6)
+    limit = 343.0 * 0.05
+    sample = lr.sample_reflections(source, sr.soundray_generator(2000), model.mesh, limit,
+                                   sphere_radius=0.3)
+    expect = (limit + 0.3) / (4.0 * 6.0 / 22.0)
+    check("試し追跡の平均反射回数は 距離 / 平均自由行程 に近い（±15%）",
+          abs(sample["mean"] / expect - 1.0) < 0.15,
+          f"平均 {sample['mean']:.2f} 回 / 目安 {expect:.2f} 回・最大 {sample['max']} 回")
+    check("閉じた箱なので抜ける音線も打ち切りも無い",
+          sample["escaped"] == 0 and sample["capped"] == 0, f"{sample}")
+
+    # ★決めた上限で本番の追跡をすると、応答の長さに届く前に上限で止まる音線が無い
+    nref = rc.reflection_limit(sample["max"])
+    stats = {}
+    lr.loop(source, receiver, sr.soundray_generator(3000), nref, model.mesh, 0.3,
+            max_length=limit, stats=stats)
+    check("★自動の上限なら応答の長さまで追える（上限で止まる音線 0）",
+          stats.get("nref", 0) == 0 and stats.get("length", 0) > 0, f"上限 {nref} 回 / {stats}")
+    stats = {}
+    lr.loop(source, receiver, sr.soundray_generator(3000), sample["max"] // 2, model.mesh, 0.3,
+            max_length=limit, stats=stats)
+    check("上限が足りないと止まる音線を数える（警告の元）", stats.get("nref", 0) > 0, f"{stats}")
+
+    # 決め方の既定と昔のファイル
+    folder = tempfile.mkdtemp(prefix="geosim_nref_")
+    check("新しいプロジェクトの既定は自動", pj.Project(folder).nref_mode == "auto")
+    check("★反射回数を渡したら「指定」のまま", pj.Project(folder, nref=50).nref_mode == "manual")
+    with open(os.path.join(folder, pj.PROJECT_FILE), "w", encoding="utf-8") as f:
+        json.dump({"nref": 120, "max_time": 5.0}, f)
+    old = pj.Project.load(folder)
+    check("★昔の project.json は指定の回数のまま", old.nref_mode == "manual" and old.nref == 120)
+
+    # 実行の頭で焼き付ける（`run_project._freeze_reflection_limit`）
+    shutil.copy(TEST_DXF, os.path.join(folder, "test.dxf"))
+    auto = pj.Project(folder, dxf="test.dxf", max_time=0.05, radius=0.3, nref_mode="auto")
+    got = rp._freeze_reflection_limit(auto, verbose=False)
+    check("★自動なら試し追跡の最大 × 余裕を焼き付ける",
+          got is not None and auto.nref == rc.reflection_limit(got["max"], auto.nref_margin),
+          f"{auto.nref} 回（最大 {got and got['max']}）")
+    again = pj.Project(folder, dxf="test.dxf", max_time=0.05, radius=0.3, nref_mode="auto")
+    check("同じ幾何なら試し追跡を使い回す（同じ値）",
+          rp._freeze_reflection_limit(again, verbose=False) is got and again.nref == auto.nref)
+    manual = pj.Project(folder, dxf="test.dxf", max_time=0.05, nref=40)
+    rp._freeze_reflection_limit(manual, verbose=False)
+    check("指定なら回数を変えない", manual.nref == 40)
+    shutil.rmtree(folder, ignore_errors=True)
+
+
 def main():
     print("geosim 数値検証")
     print(f"  Python {sys.version.split()[0]} / numpy {np.__version__}")
@@ -7418,7 +7481,7 @@ def main():
                test_reports_19_to_22, test_html_viewer_patches,
                test_auralize, test_result_viewer, test_dialog_dirs,
                test_reflection_filter_and_contribution, test_plane_matching,
-               test_ray_count):
+               test_ray_count, test_reflection_limit):
         fn()
 
     failed = [name for name, ok in _results if not ok]

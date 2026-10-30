@@ -56,7 +56,10 @@ GEOMETRY_FIELDS = [
     ("rays", "音線数（指定のとき）", int, "「指定」のときだけ使う。少ないと後半を見落とす"),
     ("rays_hits", "届いてほしい本数（自動のとき）", float,
      "応答の長さの時刻で受音球に届く本数。既定 3（見落とし 5%）"),
-    ("nref", "最大反射回数", int, "35 dB 減衰するまで必要。足りないと残響が短く出る"),
+    ("nref", "最大反射回数（指定のとき）", int,
+     "「指定」のときだけ使う。足りないと残響の後半が欠けて短く出る"),
+    ("nref_margin", "反射回数の余裕（自動のとき）", float,
+     "試し追跡の最大反射回数に掛ける。既定 1.25（豊田氏は正確さ重視で 10）"),
     ("radius", "受音球の半径 [m]", float,
      "★経路を見つけるための網。小さすぎると残響が短く出る"),
     ("max_time", "インパルス応答の長さ [s]", float, "残響時間より十分長くとる"),
@@ -78,6 +81,10 @@ DECAY_FIELDS = [
 #   その場合、足りない時は、精度怪しい、という表示を出すようにしてください」
 RAYS_MODE_CHOICES = [("自動（応答の長さから決める）", "auto"),
                      ("指定（計算時間優先。足りなければ「精度が怪しい」と出す）", "manual")]
+# ★反射回数の上限の決め方（2026-10-30。豊田氏の修正版 10-23 版の改善 7）。
+#   固定の 120 回だと小さい室では応答の長さまで届かなかった（JR 研修室で 1.5 s）
+NREF_MODE_CHOICES = [("自動（試し追跡で応答の長さまでの反射回数を数える）", "auto"),
+                     ("指定（「最大反射回数」の回数で打ち切る）", "manual")]
 DECAY_FIT_CHOICES = [("ISO 3382（区間の全点に直線を当てる）", "least_squares"),
                      ("2 点法（開始 dB と終了 dB を横切る時刻の差）", "crossing")]
 SOURCE_FIELDS = [
@@ -319,6 +326,13 @@ class SetupWindow:
         self.ray_note = tk.Label(frame, text="", justify="left", anchor="w",
                                  wraplength=760)
         self.ray_note.grid(row=row + 1, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        ttk.Label(frame, text="最大反射回数の決め方").grid(row=row + 2, column=0,
+                                                          sticky="w", pady=3)
+        nref_var = tk.StringVar()
+        self.vars["nref_mode"] = nref_var
+        ttk.Combobox(frame, textvariable=nref_var, state="readonly", width=52,
+                     values=[text for text, _ in NREF_MODE_CHOICES]).grid(
+                         row=row + 2, column=1, columnspan=2, sticky="w", padx=8)
         for key in ("rays_mode", "rays", "rays_hits", "max_time", "radius"):
             self.vars[key].trace_add("write", lambda *_: self._update_ray_note())
 
@@ -488,6 +502,7 @@ class SetupWindow:
         self._set_combo("decay_fit", DECAY_FIT_CHOICES,
                         getattr(p, "decay_fit", "least_squares"))
         self._set_combo("rays_mode", RAYS_MODE_CHOICES, getattr(p, "rays_mode", "manual"))
+        self._set_combo("nref_mode", NREF_MODE_CHOICES, getattr(p, "nref_mode", "manual"))
         self._set_combo("source_combination", MIX_CHOICES,
                         getattr(p, "source_combination", sx.MIX_ALL))
         self._set_combo("impulse_method", IMPULSE_CHOICES,
@@ -551,6 +566,7 @@ class SetupWindow:
                                                       CLOSED_CHOICES)
         self.project.decay_fit = self._combo_value("decay_fit", DECAY_FIT_CHOICES)
         self.project.rays_mode = self._combo_value("rays_mode", RAYS_MODE_CHOICES)
+        self.project.nref_mode = self._combo_value("nref_mode", NREF_MODE_CHOICES)
         self.project.source_combination = self._combo_value("source_combination",
                                                             MIX_CHOICES)
         self.project.impulse_method = self._combo_value("impulse_method",
