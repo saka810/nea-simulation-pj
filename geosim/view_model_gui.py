@@ -1565,7 +1565,7 @@ class LayerControls:
 
     パネルは**作った順に積む**ので、ボタンを後に作ると
     レイヤの数だけ下に押し下げられ、ページを送らないと見えなくなる
-    （CLAUDE.md「『表示の切り替え』の欄はパネルの先頭へ動かす」）。
+    （設計メモ.md「『表示の切り替え』の欄はパネルの先頭へ動かす」）。
     """
 
     def __init__(self, panel=None, names=(), notice=None, on_pick=None,
