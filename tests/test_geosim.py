@@ -7449,6 +7449,53 @@ def test_reflection_limit():
     shutil.rmtree(folder, ignore_errors=True)
 
 
+def test_local_server_origin():
+    """[69] 可聴化・見比べのサーバは別のサイトからの要求を弾く（2026-11-02 セキュリティ確認）。"""
+    print("\n[69] ローカルサーバの Origin / Host 検査")
+    import http.client
+    import threading
+    from http.server import ThreadingHTTPServer
+    import auralize as au
+    import result_viewer as rvw
+
+    for label, handler in (("可聴化", au.make_handler(None, {})),
+                           ("見比べ", rvw.make_handler(None, {}))):
+        server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        port = server.server_address[1]
+        own = f"http://127.0.0.1:{port}"
+
+        def status(method, headers, path="/api/ping"):
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            conn.putrequest(method, path, skip_host=True)
+            for name, value in headers.items():
+                conn.putheader(name, value)
+            conn.putheader("Content-Length", "0")
+            conn.endheaders()
+            code = conn.getresponse().status
+            conn.close()
+            return code
+
+        host = {"Host": f"127.0.0.1:{port}"}
+        check(f"{label}：同じ画面からの GET は通す", status("GET", host) == 200)
+        check(f"{label}：アドレス欄から開く（Sec-Fetch-Site: none）は通す",
+              status("GET", {**host, "Sec-Fetch-Site": "none"}) == 200)
+        check(f"{label}：同じ画面からの POST は通す",
+              status("POST", {**host, "Origin": own, "Sec-Fetch-Site": "same-origin"},
+                     "/api/bye") == 200)
+        check(f"{label}：★別のサイトからの POST は弾く",
+              status("POST", {**host, "Origin": "https://evil.example",
+                              "Sec-Fetch-Site": "cross-site"}, "/api/bye") == 403)
+        check(f"{label}：★Origin だけ別でも弾く",
+              status("POST", {**host, "Origin": "http://127.0.0.1:1"}, "/api/bye") == 403)
+        check(f"{label}：★別のサイトからの GET（Sec-Fetch-Site: cross-site）は弾く",
+              status("GET", {**host, "Sec-Fetch-Site": "cross-site"}) == 403)
+        check(f"{label}：★Host が別名（DNS リバインディング）なら弾く",
+              status("GET", {"Host": f"evil.example:{port}"}) == 403)
+        server.shutdown()
+        server.server_close()
+
+
 def main():
     print("geosim 数値検証")
     print(f"  Python {sys.version.split()[0]} / numpy {np.__version__}")
@@ -7481,7 +7528,7 @@ def main():
                test_reports_19_to_22, test_html_viewer_patches,
                test_auralize, test_result_viewer, test_dialog_dirs,
                test_reflection_filter_and_contribution, test_plane_matching,
-               test_ray_count, test_reflection_limit):
+               test_ray_count, test_reflection_limit, test_local_server_origin):
         fn()
 
     failed = [name for name, ok in _results if not ok]

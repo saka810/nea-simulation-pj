@@ -65,7 +65,7 @@
 - `requirements.txt` / `requirements-lock.txt` / `.python-version` … 実行環境の定義（下記）
 - `PROGRAM_STRUCTURE.md` … 各モジュールの役割・Fortran との変数対応・実装状況・既知のバグ一覧。
   **コードに手を入れたらこの文書も合わせて更新する。**
-- `tests\test_geosim.py` … 数値検証（1201 項目）。pytest 不要、素の Python で走る。
+- `tests\test_geosim.py` … 数値検証（1215 項目）。pytest 不要、素の Python で走る。
   **数式に関わるコードを変更したら必ず走らせる**：`.venv\Scripts\python tests\test_geosim.py`
 - `TODO.md` … 作業一覧（A〜G にグルーピング）。着手・完了したらチェックボックスを更新する。
 - `docs\技術説明書.md` … フローと数式の解説（根拠は『建築音響物理学』2.2 節）。
@@ -93,6 +93,7 @@
 - `.venv/` は `.gitignore` 済み。**端末ごとに作り直す**（中身は共有しない）。
 - 新しいライブラリを入れたら **`requirements.txt` と `requirements-lock.txt` を必ず更新**する。
 - ブラウザ画面（可聴化・見比べ）は**追加のライブラリを入れない**方針（標準の http.server・127.0.0.1 のみ）。
+  ★要求は `auralize.local_request()` で**同じ画面からのものだけ**通す（別のサイト・別名の Host は 403。テスト [69]）。
 
 ## 作業の約束（要点。詳細は `設計メモ.md`）
 

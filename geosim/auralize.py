@@ -420,6 +420,24 @@ AUDIO_TYPES = {".wav": "audio/wav", ".mp3": "audio/mpeg", ".flac": "audio/flac",
                ".ogg": "audio/ogg", ".m4a": "audio/mp4"}
 
 
+def local_request(handler):
+    """要求がこの画面（127.0.0.1 の同じポート）から来たものかを確かめる（2026-11-02）。
+
+    127.0.0.1 で待ち受けても、**同じ PC のブラウザで開いた別のサイト**からは届く。
+    ★`Host` を見て DNS リバインディング（別名で 127.0.0.1 に向ける手口）を弾き、
+    `Origin` / `Sec-Fetch-Site` を見て別のサイトからの要求（音声の追加・図の保存など）を弾く。
+    アドレス欄・`--app` で開いたとき（`Sec-Fetch-Site: none`）と同じ画面からの要求は通す。
+    """
+    port = handler.server.server_address[1]
+    hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
+    if handler.headers.get("Host", "") not in hosts:
+        return False
+    origin = handler.headers.get("Origin")
+    if origin is not None and origin not in {f"http://{h}" for h in hosts}:
+        return False
+    return handler.headers.get("Sec-Fetch-Site", "same-origin") in ("same-origin", "none")
+
+
 def make_handler(catalog, state):
 
     class Handler(BaseHTTPRequestHandler):
@@ -446,6 +464,9 @@ def make_handler(catalog, state):
                 pass
 
         def do_GET(self):
+            if not local_request(self):
+                self._send({"error": "forbidden"}, status=403)
+                return
             state["last_seen"] = time.time()
             url = urllib.parse.urlparse(self.path)
             query = urllib.parse.parse_qs(url.query)
@@ -493,6 +514,9 @@ def make_handler(catalog, state):
                 self._send({"error": str(error)}, status=500)
 
         def do_POST(self):
+            if not local_request(self):
+                self._send({"error": "forbidden"}, status=403)
+                return
             url = urllib.parse.urlparse(self.path)
             # 窓を閉じたときの知らせ（`navigator.sendBeacon`）。★読み込み直しでも
             #   届くので、すぐには止めず猶予を置く（次の要求が来れば続ける）

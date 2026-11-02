@@ -623,6 +623,9 @@ def make_handler(results, state):
                 pass
 
         def do_GET(self):
+            if not au.local_request(self):          # ★別のサイトからの要求は弾く
+                self._send({"error": "forbidden"}, status=403)
+                return
             state["last_seen"] = time.time()
             url = urllib.parse.urlparse(self.path)
             q = {k: v[0] for k, v in urllib.parse.parse_qs(url.query).items()}
@@ -666,6 +669,9 @@ def make_handler(results, state):
                 self._send({"error": str(error)}, status=500)
 
         def do_POST(self):
+            if not au.local_request(self):
+                self._send({"error": "forbidden"}, status=403)
+                return
             url = urllib.parse.urlparse(self.path)
             if url.path == "/api/bye":
                 state["last_seen"] = time.time() - au.IDLE_SECONDS + au.BYE_GRACE
