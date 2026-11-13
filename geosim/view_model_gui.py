@@ -1396,11 +1396,11 @@ class ControlPanel:
 # 「法線の確認なのか、音線の可視化なのか」だけ。物件名は画面の中の見出しに出ている。
 # ここに集めてあるので、画面が増えたら 1 行足すだけで済む。
 WINDOW_TITLES = {
-    "normals":    ("法線の確認",     "geosim - normals"),
-    "rays":       ("音線・音粒子",   "geosim - rays and particles"),
-    "directions": ("音線の飛び方",   "geosim - ray directions"),
-    "model":      ("モデルビューア", "geosim - model viewer"),
-    "images":     ("虚音源",         "geosim - image sources"),
+    "normals":    ("NEA GeoSim — 法線の確認",     "NEA GeoSim - normals"),
+    "rays":       ("NEA GeoSim — 音線・音粒子",   "NEA GeoSim - rays and particles"),
+    "directions": ("NEA GeoSim — 音線の飛び方",   "NEA GeoSim - ray directions"),
+    "model":      ("NEA GeoSim — モデルビューア", "NEA GeoSim - model viewer"),
+    "images":     ("NEA GeoSim — 虚音源",         "NEA GeoSim - image sources"),
 }
 
 
@@ -1417,11 +1417,11 @@ def window_titles(screen, default=""):
     """画面の種類から (タイトル, 化けたときの英字) を引く。
 
     知らない種類なら `default` をそのまま使い、英字の予備は
-    そこから ASCII だけ抜いて作る（無ければ `geosim`）。
+    そこから ASCII だけ抜いて作る（無ければ `NEA GeoSim`）。
     """
     if screen in WINDOW_TITLES:
         return WINDOW_TITLES[screen]
-    return default, (ascii_tag(default) or "geosim")
+    return default, (ascii_tag(default) or "NEA GeoSim")
 
 
 def _window_handle(plotter):
@@ -1494,7 +1494,7 @@ def set_window_title(plotter, title, fallback=None):
     if shown is None or shown == title:
         return remember(title)
 
-    safe = fallback or "geosim"
+    safe = fallback or "NEA GeoSim"
     try:
         plotter.ren_win.SetWindowName(safe)
     except Exception:

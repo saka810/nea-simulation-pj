@@ -1921,14 +1921,14 @@ def test_capture():
                          ("directions", "音線の飛び方"),
                          ("model", "モデルビューア")):
         bar, fallback = vg.window_titles(screen)
-        check(f"{screen} の題が「{want}」だけ（物件名を入れない）",
-              bar == want and "JR" not in fallback and "研修室" not in bar,
+        check(f"{screen} の題が製品名と「{want}」（物件名を入れない）",
+              bar == f"NEA GeoSim — {want}" and "JR" not in fallback and "研修室" not in bar,
               f"{bar} / {fallback}")
     check("予備はすべて英字",
           all(vg.ascii_tag(f) == f for _, f in vg.WINDOW_TITLES.values()),
           str([f for _, f in vg.WINDOW_TITLES.values()]))
     check("知らない画面は渡した題を使う",
-          vg.window_titles("なにか", "モデル") == ("モデル", "geosim"),
+          vg.window_titles("なにか", "モデル") == ("モデル", "NEA GeoSim"),
           str(vg.window_titles("なにか", "モデル")))
     check("知らない画面でも英字ならそれを予備に",
           vg.window_titles("なにか", "viewer") == ("viewer", "viewer"))

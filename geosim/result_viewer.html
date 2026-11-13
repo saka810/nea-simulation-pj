@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>結果を見比べる</title>
+<title>NEA GeoSim（ネアシム）— 結果を見比べる</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=BIZ+UDPGothic:wght@400;700&display=swap" rel="stylesheet">
 <style>
@@ -142,7 +142,7 @@ main { padding: 10px; overflow: auto; min-height: 0; }
 <div class="app" id="app">
   <header>
     <button class="btn" id="railToggle" title="RTany の区間と線の決まりの欄を出し入れ">RTany・凡例</button>
-    <h1>結果を見比べる</h1>
+    <h1><small style="display:block;font-size:11px;letter-spacing:.02em">NEA GeoSim（ネアシム）</small>結果を見比べる</h1>
     <span class="where" id="where">読み込み中…</span>
     <span class="spacer"></span>
     <span class="where">窓の数</span>
@@ -1085,7 +1085,7 @@ addEventListener("pagehide", () => navigator.sendBeacon("/api/bye"));
 (async function start() {
   catalog = await (await fetch("/api/catalog")).json();
   document.getElementById("where").textContent = `${catalog.project}　条件 ${catalog.conditions.length}・受音点 ${(catalog.receivers[catalog.shelves[0]] || []).length}${catalog.shelves.length > 1 ? `・音源の棚 ${catalog.shelves.length}` : ""}`;
-  document.title = `結果を見比べる｜${catalog.project}`;
+  document.title = `NEA GeoSim（ネアシム）— 結果を見比べる｜${catalog.project}`;
   catalog.bands.forEach(b => rtany["*"][String(b)] = [...catalog.rt_any]);
   const saved = await (await fetch("/api/layout")).json();
   const base = defaultLayout();

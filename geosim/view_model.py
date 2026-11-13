@@ -217,7 +217,7 @@ kbd{
 <div id="wrap">
   <canvas id="gl"></canvas>
   <div id="panel">
-    <h1>モデルビューア</h1>
+    <h1>NEA GeoSim<br>モデルビューア</h1>
     <p class="sub" id="fname"></p>
 
     <h2>表示</h2>
@@ -539,7 +539,7 @@ def export_html(model, out_path, title="", subtitle=""):
     payload["title"] = subtitle or title
     html = (HTML_TEMPLATE
             .replace("__DATA__", json.dumps(payload, ensure_ascii=False))
-            .replace("__TITLE__", title or "モデルビューア"))
+            .replace("__TITLE__", "NEA GeoSim — " + (title or "モデルビューア")))
     with open(out_path, "w", encoding="utf-8") as f:
         f.write(html)
     return out_path

@@ -189,7 +189,7 @@ class SetupWindow:
 
     def run(self):
         self.root = tk.Tk()
-        self.root.title("幾何音響シミュレーション — 計算条件")
+        self.root.title("NEA GeoSim（ネアシム） — 計算条件")
         # ★**ボタンが隠れない大きさで開く**（2026-08-24 ユーザー指摘。
         #   900 px だと「面を確認」のボタンが右へ押し出されて見えなかった）。
         #   `minsize` も入れて、**縮めても隠れない**ようにする

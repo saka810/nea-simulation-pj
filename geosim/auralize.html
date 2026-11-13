@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>可聴化</title>
+<title>NEA GeoSim（ネアシム）— 可聴化</title>
 <!--
   可聴化の画面（auralize.py が配る）。音は Web Audio の ConvolverNode で
   リアルタイムに畳み込む。設計の約束：
@@ -215,7 +215,7 @@ footer .status { margin-left: auto; }
 <body>
 <header>
   <div class="title">
-    <h1>可聴化</h1>
+    <h1><small style="display:block;font-size:11px;letter-spacing:.02em">NEA GeoSim（ネアシム）</small>可聴化</h1>
     <span class="project" id="project">読み込み中…</span>
   </div>
   <div class="output">
@@ -654,7 +654,7 @@ async function loadCatalog(rescan) {
   S.catalog = data;
   $("project").textContent = data.project;
   $("project").title = data.folder;
-  document.title = `可聴化 ${data.project}`;
+  document.title = `NEA GeoSim（ネアシム）— 可聴化 ${data.project}`;
   resultIndex = new Map(data.results.map((r) => [key(r.condition, r.source, r.receiver), r]));
   const uniq = (list) => [...new Set(list)];
   S.conditions = uniq(data.results.map((r) => r.condition));

@@ -1,6 +1,8 @@
-# geosim — プログラム構成まとめ
+# NEA GeoSim（ネアシム）— プログラム構成まとめ
 
 幾何音響シミュレーション（音線法 + 虚音源バックトレース）の Fortran → Python 移植プロジェクト。
+
+2026-11-13：正式名を NEA GeoSim、愛称をネアシムに統一。設定・進捗・3D・HTMLビューア・可聴化・結果比較・起動コンソールの表示名を更新。内部パッケージ名は `geosim` のまま。
 元コードは `fortran/` の 3 ファイル（`backtrace.f90` / `make_ipls_freq_monaural_fortran.f90` / `ipls2rt_fortran.f90`）。
 最終更新: 2026-08-23（HBN240018）。**コードに手を入れたらこの文書も合わせて更新する。**
 
@@ -1970,17 +1972,17 @@ mp4 には ffmpeg が要る）。そのぶん幅 720 px・128 色に落とし、
 
 #### ウィンドウのタイトル
 
-**タイトルバーには画面の種類だけを出す。物件名は入れない**（ユーザー判断 2026-08-17）。
+**タイトルバーには製品名 NEA GeoSim と画面の種類を出す。物件名は入れない**（画面の区別は2026-08-17、製品名追加は2026-11-13）。
 知りたいのは「法線の確認なのか、音線の可視化なのか」だけで、物件名は
 画面の中の見出しに出ている。題は `WINDOW_TITLES` に集めてあり、
 画面が増えたら 1 行足すだけで済む。
 
 | `screen` | タイトル | 化けたときの英字 |
 |---|---|---|
-| `normals` | 法線の確認 | `geosim - normals` |
-| `rays` | 音線・音粒子 | `geosim - rays and particles` |
-| `directions` | 音線の飛び方 | `geosim - ray directions` |
-| `model` | モデルビューア | `geosim - model viewer` |
+| `normals` | NEA GeoSim — 法線の確認 | `NEA GeoSim - normals` |
+| `rays` | NEA GeoSim — 音線・音粒子 | `NEA GeoSim - rays and particles` |
+| `directions` | NEA GeoSim — 音線の飛び方 | `NEA GeoSim - ray directions` |
+| `model` | NEA GeoSim — モデルビューア | `NEA GeoSim - model viewer` |
 
 `make_plotter(title, ..., screen=...)` の `title` は**画面の中の見出し**
 （物件名を含んでよい。フォント指定で描くので化けない）、
@@ -1999,7 +2001,7 @@ VTK が Windows に作るウィンドウは **ANSI ウィンドウ**で、日本
 | `SetWindowTextA` に CP932 のバイト列 | やはり全部 `?` |
 
 そこで `set_window_title()` は**設定したあと読み戻して検証**し、
-一致しなければ `geosim - normals [JR]` のような英字の題に差し替える。
+一致しなければ `NEA GeoSim - normals [JR]` のような英字の題に差し替える。
 化けた文字列を出しておくよりましという判断。**画面の中の見出しは日本語のまま**
 （フォントを指定して描いているので化けない）。
 

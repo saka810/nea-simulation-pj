@@ -285,7 +285,7 @@ def _report(project, results):
 
 
 def main():
-    p = argparse.ArgumentParser(description="幾何音響シミュレーション（GUI）")
+    p = argparse.ArgumentParser(description="NEA GeoSim（ネアシム）— 幾何音響シミュレーション（GUI）")
     p.add_argument("folder", nargs="?", help="プロジェクトフォルダ")
     p.add_argument("--run", action="store_true",
                    help="条件入力ウィンドウを出さずにすぐ計算する")

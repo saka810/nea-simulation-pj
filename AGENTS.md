@@ -43,6 +43,8 @@
 
 ## リポジトリの目的
 
+- ソフトの正式名は **NEA GeoSim**、愛称は **ネアシム**。画面・説明書はこの表記に揃える（内部の `geosim/` 名は維持）。
+
 - 日本環境アメニティ株式会社（NEA）のシミュレーションPJ。
 - 幾何音響シミュレーション（音線法＋虚音源バックトレース）の **Fortran → Python 移植**。
 - 元コードは Fortran 3 ファイル：`backtrace.f90` / `make_ipls_freq_monaural_fortran.f90` /

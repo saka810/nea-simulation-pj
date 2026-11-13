@@ -90,7 +90,7 @@ class ProgressWindow:
 
     def _build(self):
         self.root = tk.Tk()
-        self.root.title(self.title)
+        self.root.title(f"NEA GeoSim（ネアシム） — {self.title}")
         self.root.geometry(f"{self.size[0]}x{self.size[1]}")
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
