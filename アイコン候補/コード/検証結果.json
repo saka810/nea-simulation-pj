@@ -1,0 +1,202 @@
+[
+  {
+    "id": "NG01",
+    "name": "反射の道すじ",
+    "original": {
+      "width": 1254,
+      "height": 1254,
+      "sha256": "ef7879141dff844574a1c19cfdbec39dc55cc903272618c5a33ce298907ac84a"
+    },
+    "png": {
+      "width": 512,
+      "height": 512
+    },
+    "ico_sizes": [
+      16,
+      20,
+      24,
+      32,
+      40,
+      48,
+      64,
+      128,
+      256
+    ],
+    "verified": true
+  },
+  {
+    "id": "NG02",
+    "name": "鏡の向こうの音源",
+    "original": {
+      "width": 1254,
+      "height": 1254,
+      "sha256": "4c5d905f8aed18edf1614f9637eff2853699c49b15638526519f7eedfacb72ba"
+    },
+    "png": {
+      "width": 512,
+      "height": 512
+    },
+    "ico_sizes": [
+      16,
+      20,
+      24,
+      32,
+      40,
+      48,
+      64,
+      128,
+      256
+    ],
+    "verified": true
+  },
+  {
+    "id": "NG03",
+    "name": "音線から応答へ",
+    "original": {
+      "width": 1254,
+      "height": 1254,
+      "sha256": "3d1d146d1ee3fb463d713bd1338f6907011a1153f37836a2b6fe25ee88fb20a0"
+    },
+    "png": {
+      "width": 512,
+      "height": 512
+    },
+    "ico_sizes": [
+      16,
+      20,
+      24,
+      32,
+      40,
+      48,
+      64,
+      128,
+      256
+    ],
+    "verified": true
+  },
+  {
+    "id": "NG04",
+    "name": "ホールをたどる",
+    "original": {
+      "width": 1254,
+      "height": 1254,
+      "sha256": "2e3424a34f48973a941977198a7fc5b9124a51266991a0881ba70a103c501011"
+    },
+    "png": {
+      "width": 512,
+      "height": 512
+    },
+    "ico_sizes": [
+      16,
+      20,
+      24,
+      32,
+      40,
+      48,
+      64,
+      128,
+      256
+    ],
+    "verified": true
+  },
+  {
+    "id": "NG05",
+    "name": "響きを聴く",
+    "original": {
+      "width": 1254,
+      "height": 1254,
+      "sha256": "e515739c9ec65d19b62b16da5bfd5360a23e2668d87bc0a1f9ba20dbdd45a2b2"
+    },
+    "png": {
+      "width": 512,
+      "height": 512
+    },
+    "ico_sizes": [
+      16,
+      20,
+      24,
+      32,
+      40,
+      48,
+      64,
+      128,
+      256
+    ],
+    "verified": true
+  },
+  {
+    "id": "NG06",
+    "name": "Nの反射",
+    "original": {
+      "width": 1254,
+      "height": 1254,
+      "sha256": "b84d2b55ae80ce524fc97b987bebf4083559ca89c5f9d620ef78f441bd99b9f1"
+    },
+    "png": {
+      "width": 512,
+      "height": 512
+    },
+    "ico_sizes": [
+      16,
+      20,
+      24,
+      32,
+      40,
+      48,
+      64,
+      128,
+      256
+    ],
+    "verified": true
+  },
+  {
+    "id": "NG07",
+    "name": "Gの受音点",
+    "original": {
+      "width": 1254,
+      "height": 1254,
+      "sha256": "447cb6266a066b56906ab2293edbfef085ab3c9bb2c47f6f4b81046b0831356b"
+    },
+    "png": {
+      "width": 512,
+      "height": 512
+    },
+    "ico_sizes": [
+      16,
+      20,
+      24,
+      32,
+      40,
+      48,
+      64,
+      128,
+      256
+    ],
+    "verified": true
+  },
+  {
+    "id": "NG08",
+    "name": "ネアシムのネ",
+    "original": {
+      "width": 1254,
+      "height": 1254,
+      "sha256": "cac47251a3ada32f92a83d462b41341894e940c692304ddd612aff7f398c81fb"
+    },
+    "png": {
+      "width": 512,
+      "height": 512
+    },
+    "ico_sizes": [
+      16,
+      20,
+      24,
+      32,
+      40,
+      48,
+      64,
+      128,
+      256
+    ],
+    "verified": true
+  }
+]

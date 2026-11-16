@@ -1,0 +1,66 @@
+[
+  {
+    "id": "NG01",
+    "name": "反射の道すじ",
+    "aim": "室の断面を一筆の音線が反射し、受音球へ届く。",
+    "palette": "ティール・コーラル",
+    "prompt": "Use case: logo-brand. Asset type: Windows engineering app icon for NEA GeoSim, a geometric room acoustics ray-tracing and image-source backtrace simulator. Create one clean flat monoline illustration in the approved style: consistent medium-bold dark navy #102C54 contours, rounded caps and joins, warm-white opaque square artboard #FFFCF8. White negative space dominates. Restrained flat accent colors, no enclosing colored tile or badge. Entirely two-dimensional: no shadows, gradients, texture, glow, highlights, bevels or realistic materials. Center a large memorable silhouette with 8 percent safe margins. Deliberately sparse paths and large gaps to survive 16px and 32px. Professional contemporary engineering software icon. No labels, numerals or watermarks. Subject: A square room cross-section as a simple navy open architectural outline, viewed straight-on, not a cube. Inside one continuous thick teal zigzag sound ray travels from a small coral source dot at lower left, bounces once off top wall then once off bottom wall, and ends in a large white receiver circle with navy border at right. Exactly one ray and two bounces, no grid or extra arrows. No letters.",
+    "source": "C:\\Users\\sakayoshi\\.codex\\generated_images\\01a1dfb7-4a1c-70a3-83f8-0c38a5d7e77d\\exec-2c83821f-4e61-4659-b811-8378b0047e92.png"
+  },
+  {
+    "id": "NG02",
+    "name": "鏡の向こうの音源",
+    "aim": "壁の反対側の虚音源と反射経路を作図する。",
+    "palette": "バイオレット・オレンジ",
+    "prompt": "Use case: logo-brand. Asset type: Windows engineering app icon for NEA GeoSim, a geometric room acoustics ray-tracing and image-source backtrace simulator. Create one clean flat monoline illustration in the approved style: consistent medium-bold dark navy #102C54 contours, rounded caps and joins, warm-white opaque square artboard #FFFCF8. White negative space dominates. Restrained flat accent colors, no enclosing colored tile or badge. Entirely two-dimensional: no shadows, gradients, texture, glow, highlights, bevels or realistic materials. Center a large memorable silhouette with 8 percent safe margins. Deliberately sparse paths and large gaps to survive 16px and 32px. Professional contemporary engineering software icon. No labels, numerals or watermarks. Subject: A minimal image-source construction diagram: one horizontal navy reflecting wall across the lower middle, orange solid source dot above left, violet hollow dashed ghost-source circle directly below the wall, teal receiver ring above right. One V-shaped orange specular reflected path touches the wall once; a sparse violet dashed line extends the segment behind the wall to the ghost source. No axes, labels, extra dots or letters. Spacious geometrical composition.",
+    "source": "C:\\Users\\sakayoshi\\.codex\\generated_images\\01a1dfb7-4a1c-70a3-83f8-0c38a5d7e77d\\exec-abe518bc-3399-4510-9f16-00ddcd72a32b.png"
+  },
+  {
+    "id": "NG03",
+    "name": "音線から応答へ",
+    "aim": "放射する音線と減衰する応答の棒を組み合わせる。",
+    "palette": "シアン・アンバー",
+    "prompt": "Use case: logo-brand. Asset type: Windows engineering app icon for NEA GeoSim, a geometric room acoustics ray-tracing and image-source backtrace simulator. Create one clean flat monoline illustration in the approved style: consistent medium-bold dark navy #102C54 contours, rounded caps and joins, warm-white opaque square artboard #FFFCF8. White negative space dominates. Restrained flat accent colors, no enclosing colored tile or badge. Entirely two-dimensional: no shadows, gradients, texture, glow, highlights, bevels or realistic materials. Center a large memorable silhouette with 8 percent safe margins. Deliberately sparse paths and large gaps to survive 16px and 32px. Professional contemporary engineering software icon. No labels, numerals or watermarks. Subject: On the left one small solid navy sound-source circle sends exactly three thick cyan straight rays fanning toward upper right. On the right a compact impulse-response emblem: exactly four round-capped vertical amber stems of decreasing height sitting on one short navy baseline. Integrate them as one balanced diagonal composition, source lower left and decay upper right, no extra axes or curves. No letters.",
+    "source": "C:\\Users\\sakayoshi\\.codex\\generated_images\\01a1dfb7-4a1c-70a3-83f8-0c38a5d7e77d\\exec-3869d93b-e9d4-429d-b3fc-9724760ee1e7.png"
+  },
+  {
+    "id": "NG04",
+    "name": "ホールをたどる",
+    "aim": "ホールの輪郭と、内部を走る一本の反射経路。",
+    "palette": "ブルー・コーラル",
+    "prompt": "Use case: logo-brand. Asset type: Windows engineering app icon for NEA GeoSim, a geometric room acoustics ray-tracing and image-source backtrace simulator. Create one clean flat monoline illustration in the approved style: consistent medium-bold dark navy #102C54 contours, rounded caps and joins, warm-white opaque square artboard #FFFCF8. White negative space dominates. Restrained flat accent colors, no enclosing colored tile or badge. Entirely two-dimensional: no shadows, gradients, texture, glow, highlights, bevels or realistic materials. Center a large memorable silhouette with 8 percent safe margins. Deliberately sparse paths and large gaps to survive 16px and 32px. Professional contemporary engineering software icon. No labels, numerals or watermarks. Subject: A simplified architectural concert-hall cutaway, a broad trapezoidal roof and two side edges with open front in a spare navy wireframe, flat 2D linework suggesting an axonometric volume with no shading. Exactly one bold coral angular sound ray travels from a blue source dot at front left to the roof and then down into a large outlined receiver ring at front right. No seats, grids, mesh subdivisions, decorative waves or letters.",
+    "source": "C:\\Users\\sakayoshi\\.codex\\generated_images\\01a1dfb7-4a1c-70a3-83f8-0c38a5d7e77d\\exec-c28596ee-1901-467a-8ba5-11d438249f89.png"
+  },
+  {
+    "id": "NG05",
+    "name": "響きを聴く",
+    "aim": "耳に届く折れ線で、計算から可聴化までを表す。",
+    "palette": "ティール・マスタード",
+    "prompt": "Use case: logo-brand. Asset type: Windows engineering app icon for NEA GeoSim, a geometric room acoustics ray-tracing and image-source backtrace simulator. Create one clean flat monoline illustration in the approved style: consistent medium-bold dark navy #102C54 contours, rounded caps and joins, warm-white opaque square artboard #FFFCF8. White negative space dominates. Restrained flat accent colors, no enclosing colored tile or badge. Entirely two-dimensional: no shadows, gradients, texture, glow, highlights, bevels or realistic materials. Center a large memorable silhouette with 8 percent safe margins. Deliberately sparse paths and large gaps to survive 16px and 32px. Professional contemporary engineering software icon. No labels, numerals or watermarks. Subject: One large recognizable human ear drawn using only two smooth navy contour paths on right. A single thick teal sound ray from a mustard source circle at left makes one angular upward bounce before entering the ear center. No wavy audio waveform: the connecting ray is geometric straight segments. Strong minimal silhouette for 16px, no architectural frame or letters.",
+    "source": "C:\\Users\\sakayoshi\\.codex\\generated_images\\01a1dfb7-4a1c-70a3-83f8-0c38a5d7e77d\\exec-8f1f5c4e-3a23-4070-807b-707a7cc2e3b5.png"
+  },
+  {
+    "id": "NG06",
+    "name": "Nの反射",
+    "aim": "Nの対角線を音線と見立てた、簡潔なロゴ案。",
+    "palette": "ティール・オレンジ",
+    "prompt": "Use case: logo-brand. Asset type: Windows engineering app icon for NEA GeoSim, a geometric room acoustics ray-tracing and image-source backtrace simulator. Create one clean flat monoline illustration in the approved style: consistent medium-bold dark navy #102C54 contours, rounded caps and joins, warm-white opaque square artboard #FFFCF8. White negative space dominates. Restrained flat accent colors, no enclosing colored tile or badge. Entirely two-dimensional: no shadows, gradients, texture, glow, highlights, bevels or realistic materials. Center a large memorable silhouette with 8 percent safe margins. Deliberately sparse paths and large gaps to survive 16px and 32px. Professional contemporary engineering software icon. No labels, numerals or watermarks. Subject: One large uppercase N constructed from exactly three bold rounded monoline strokes. Two navy vertical wall-like strokes and one teal diagonal sound-ray stroke descending from UPPER LEFT to LOWER RIGHT, with one small orange endpoint dot at the LOWER RIGHT. Integrate ray into the letter, no separate arrow or waveform, no enclosing frame. Extra sparse iconic monogram with generous whitespace, legible at 16px. Only letter N, no other text. The diagonal MUST connect the TOP of the LEFT vertical to the BOTTOM of the RIGHT vertical, like the standard Latin N; never mirror it or draw Cyrillic И.",
+    "source": "C:\\Users\\sakayoshi\\.codex\\generated_images\\01a1dfb7-4a1c-70a3-83f8-0c38a5d7e77d\\exec-3cf640d6-303a-4d06-8896-a120c9baff90.png"
+  },
+  {
+    "id": "NG07",
+    "name": "Gの受音点",
+    "aim": "Gの輪郭に受音点を組み込み、幾何と音を象徴する。",
+    "palette": "ブルー・ライム",
+    "prompt": "Use case: logo-brand. Asset type: Windows engineering app icon for NEA GeoSim, a geometric room acoustics ray-tracing and image-source backtrace simulator. Create one clean flat monoline illustration in the approved style: consistent medium-bold dark navy #102C54 contours, rounded caps and joins, warm-white opaque square artboard #FFFCF8. White negative space dominates. Restrained flat accent colors, no enclosing colored tile or badge. Entirely two-dimensional: no shadows, gradients, texture, glow, highlights, bevels or realistic materials. Center a large memorable silhouette with 8 percent safe margins. Deliberately sparse paths and large gaps to survive 16px and 32px. Professional contemporary engineering software icon. No labels, numerals or watermarks. Subject: A single large navy open circular G contour with a short horizontal inward crossbar at right. A blue straight ray comes diagonally from the lower-left opening into the center and terminates at one large lime receiver dot. Treat G as an abstract geometric acoustic chamber; retain a clean recognizable uppercase G silhouette. Exactly one circle contour, one crossbar, one ray and one dot. Flat sparse rounded monoline, no other text.",
+    "source": "C:\\Users\\sakayoshi\\.codex\\generated_images\\01a1dfb7-4a1c-70a3-83f8-0c38a5d7e77d\\exec-f7115708-98f2-46ec-b542-54674e0e1220.png"
+  },
+  {
+    "id": "NG08",
+    "name": "ネアシムのネ",
+    "aim": "「ネ」の払いを音線に見立てた、日本語のロゴ案。",
+    "palette": "コーラル・バイオレット",
+    "prompt": "Use case: logo-brand. Asset type: Windows engineering app icon for NEA GeoSim, a geometric room acoustics ray-tracing and image-source backtrace simulator. Create one clean flat monoline illustration in the approved style: consistent medium-bold dark navy #102C54 contours, rounded caps and joins, warm-white opaque square artboard #FFFCF8. White negative space dominates. Restrained flat accent colors, no enclosing colored tile or badge. Entirely two-dimensional: no shadows, gradients, texture, glow, highlights, bevels or realistic materials. Center a large memorable silhouette with 8 percent safe margins. Deliberately sparse paths and large gaps to survive 16px and 32px. Professional contemporary engineering software icon. No labels, numerals or watermarks. Subject: One large stylized Japanese katakana ネ as the sole motif, recognizable and typographically correct, built with a few navy round-capped monoline strokes. Make its descending right diagonal stroke coral like a sound ray, ending in a modest violet outlined receiver circle. Keep the top short tick and sweeping diagonal distinct with wide gaps. No frame, no waveform, no English words, no other text. Very sparse Japanese engineering app monogram, designed to stay readable at 16px.",
+    "source": "C:\\Users\\sakayoshi\\.codex\\generated_images\\01a1dfb7-4a1c-70a3-83f8-0c38a5d7e77d\\exec-7ed47f84-6a31-44ce-928a-fb56a10779e1.png"
+  }
+]
